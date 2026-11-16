@@ -1,5 +1,22 @@
-import { useEffect, useRef, useState } from 'react';
-import { Play, Square, RefreshCw, Plus, Trash2, Upload, Send, ShieldCheck, Clock, ExternalLink, RotateCcw } from 'lucide-react';
+import { useEffect, useMemo, useRef, useState } from 'react';
+import {
+  Play,
+  Square,
+  RefreshCw,
+  Plus,
+  Trash2,
+  Upload,
+  Send,
+  ShieldCheck,
+  Clock,
+  RotateCcw,
+  BookOpen,
+  Sparkles,
+  CheckCircle2,
+  Edit3,
+  Copy,
+  Layers,
+} from 'lucide-react';
 import { apiRequest } from '../api';
 
 interface SauStatus {
@@ -11,7 +28,6 @@ interface SauStatus {
   port: number;
   frontendPort: number;
   backendUrl: string;
-  frontendUrl: string;
 }
 
 interface SauAccount {
@@ -46,11 +62,30 @@ interface SauPublishRecord {
   created_at: string;
 }
 
-const TITLE_TEMPLATES = [
-  { label: '干货拆解', title: '【干货必看】3分钟讲清楚核心逻辑，建议先收藏再慢慢看！', tags: '干货分享, 效率提升' },
-  { label: '好物测评', title: '真实体验一周后才敢说实话：到底值不值得入手？', tags: '好物推荐, 真实测评' },
-  { label: '教程实操', title: '保姆级手把手教学，跟着做一遍就能学会！', tags: '教程, 新手必看' },
-];
+interface TitleTemplate {
+  id: number;
+  category: string;
+  title: string;
+  tags: string[];
+  note: string;
+  use_count: number;
+  created_at: string;
+}
+
+interface VideoDraftItem {
+  filePath: string;
+  filename: string;
+  filesize: number;
+  title: string;
+  tagsText: string;
+}
+
+interface BatchRunResult {
+  platformLabel: string;
+  videoName: string;
+  status: 'pending' | 'running' | 'success' | 'error';
+  message: string;
+}
 
 const PLATFORM_OPTIONS = [
   { type: 3, label: '抖音', badge: 'badge-red' },
@@ -59,38 +94,57 @@ const PLATFORM_OPTIONS = [
   { type: 2, label: '微信视频号', badge: 'badge-green' },
 ] as const;
 
+const TEMPLATE_CATEGORIES = ['全部', '通用', '干货拆解', '好物测评', '教程实操', '日常Vlog', '科技'] as const;
+
 function getPlatformMeta(type: number) {
   return PLATFORM_OPTIONS.find((p) => p.type === type) || { type, label: `平台(${type})`, badge: 'badge-gray' };
 }
 
+function stripFileExt(name: string) {
+  return name.replace(/\.[^.]+$/, '');
+}
+
 export function PublishPage({ onToast }: { onToast: (msg: string) => void }) {
-  const [subTab, setSubTab] = useState<'publish' | 'accounts' | 'materials' | 'history'>('publish');
+  const [subTab, setSubTab] = useState<'publish' | 'titles' | 'accounts' | 'materials' | 'history'>('publish');
   const [status, setStatus] = useState<SauStatus | null>(null);
   const [accounts, setAccounts] = useState<SauAccount[]>([]);
   const [files, setFiles] = useState<SauFile[]>([]);
   const [history, setHistory] = useState<SauPublishRecord[]>([]);
+  const [templates, setTemplates] = useState<TitleTemplate[]>([]);
+
   const [loading, setLoading] = useState(false);
   const [validating, setValidating] = useState(false);
   const [engineBusy, setEngineBusy] = useState(false);
   const [installing, setInstalling] = useState(false);
   const [sauDirInput, setSauDirInput] = useState('');
 
-  // 发布表单状态
-  const [platformType, setPlatformType] = useState<number>(3);
-  const [selectedAccounts, setSelectedAccounts] = useState<string[]>([]);
-  const [selectedFiles, setSelectedFiles] = useState<string[]>([]);
-  const [title, setTitle] = useState('');
-  const [tagsText, setTagsText] = useState('');
+  const [selectedAccountKeys, setSelectedAccountKeys] = useState<string[]>([]);
+  const [videoDrafts, setVideoDrafts] = useState<VideoDraftItem[]>([]);
+  const [globalTitle, setGlobalTitle] = useState('');
+  const [globalTagsText, setGlobalTagsText] = useState('');
   const [enableTimer, setEnableTimer] = useState(false);
   const [videosPerDay, setVideosPerDay] = useState(1);
-  const [dailyTime, setDailyTime] = useState('10:00');
+  const [dailyTimesText, setDailyTimesText] = useState('10:00, 18:00');
   const [startDays, setStartDays] = useState(0);
+  const [isOriginal, setIsOriginal] = useState(false);
   const [isDraft, setIsDraft] = useState(false);
   const [productLink, setProductLink] = useState('');
   const [productTitle, setProductTitle] = useState('');
-  const [publishing, setPublishing] = useState(false);
 
-  // 添加账号弹窗与 SSE
+  const [publishing, setPublishing] = useState(false);
+  const [batchResults, setBatchResults] = useState<BatchRunResult[]>([]);
+  const [dragOver, setDragOver] = useState(false);
+
+  const [tplCategoryFilter, setTplCategoryFilter] = useState<string>('全部');
+  const [tplSearch, setTplSearch] = useState('');
+  const [showTplModal, setShowTplModal] = useState(false);
+  const [editingTplId, setEditingTplId] = useState<number | null>(null);
+  const [tplFormCategory, setTplFormCategory] = useState('干货拆解');
+  const [tplFormTitle, setTplFormTitle] = useState('');
+  const [tplFormTags, setTplFormTags] = useState('');
+  const [tplFormNote, setTplFormNote] = useState('');
+  const [savingTpl, setSavingTpl] = useState(false);
+
   const [showAddModal, setShowAddModal] = useState(false);
   const [newPlatform, setNewPlatform] = useState<number>(3);
   const [newAccountName, setNewAccountName] = useState('');
@@ -126,29 +180,30 @@ export function PublishPage({ onToast }: { onToast: (msg: string) => void }) {
       setStatus(st);
       setSauDirInput((prev) => prev || st.sauDir || '');
       if (st.running) {
-        const [accRes, fileRes] = await Promise.all([
+        const [accRes, fileRes, histRes, tplRes] = await Promise.allSettled([
           apiRequest<{ code: number; data: Array<[number, number, string, string, number]> }>('/api/sau/accounts'),
           apiRequest<{ code: number; data: SauFile[] }>('/api/sau/files'),
+          apiRequest<{ code: number; data: SauPublishRecord[] }>('/api/sau/publish-history'),
+          apiRequest<{ code: number; data: TitleTemplate[] }>('/api/sau/title-templates'),
         ]);
-        const mappedAccounts: SauAccount[] = (accRes.data || []).map((row) => ({
-          id: row[0],
-          type: row[1],
-          filePath: row[2],
-          name: row[3],
-          status: row[4],
-        }));
-        setAccounts(mappedAccounts);
-        setFiles(fileRes.data || []);
-        try {
-          const histRes = await apiRequest<{ code: number; data: SauPublishRecord[] }>('/api/sau/publish-history');
-          setHistory(histRes.data || []);
-        } catch {
-          setHistory([]);
+        if (accRes.status === 'fulfilled') {
+          const mappedAccounts: SauAccount[] = (accRes.value.data || []).map((row) => ({
+            id: row[0],
+            type: row[1],
+            filePath: row[2],
+            name: row[3],
+            status: row[4],
+          }));
+          setAccounts(mappedAccounts);
         }
+        if (fileRes.status === 'fulfilled') setFiles(fileRes.value.data || []);
+        if (histRes.status === 'fulfilled') setHistory(histRes.value.data || []);
+        if (tplRes.status === 'fulfilled') setTemplates(tplRes.value.data || []);
       } else {
         setAccounts([]);
         setFiles([]);
         setHistory([]);
+        setTemplates([]);
       }
     } catch (err) {
       if (!silent) onToast((err as Error).message);
@@ -205,14 +260,17 @@ export function PublishPage({ onToast }: { onToast: (msg: string) => void }) {
   };
 
   const handleSaveSauDir = async () => {
-    if (!sauDirInput.trim()) return;
+    if (!sauDirInput.trim()) {
+      onToast('请先填写本地目录路径');
+      return;
+    }
     try {
       const res = await apiRequest<{ ok: boolean; sauDir: string }>('/api/sau/config', {
         method: 'POST',
         body: JSON.stringify({ sauDir: sauDirInput.trim() }),
       });
       setSauDirInput(res.sauDir);
-      onToast(`已更新发布引擎目录: ${res.sauDir}`);
+      onToast('路径已保存');
       await loadAll();
     } catch (err) {
       onToast((err as Error).message);
@@ -223,19 +281,17 @@ export function PublishPage({ onToast }: { onToast: (msg: string) => void }) {
     setValidating(true);
     try {
       const res = await apiRequest<{ code: number; data: Array<[number, number, string, string, number]> }>(
-        '/api/sau/accounts/validate',
-        { method: 'POST' }
+        '/api/sau/accounts/validate'
       );
-      setAccounts(
-        (res.data || []).map((row) => ({
-          id: row[0],
-          type: row[1],
-          filePath: row[2],
-          name: row[3],
-          status: row[4],
-        }))
-      );
-      onToast('已完成发布账号 Cookie 状态检测');
+      const mappedAccounts: SauAccount[] = (res.data || []).map((row) => ({
+        id: row[0],
+        type: row[1],
+        filePath: row[2],
+        name: row[3],
+        status: row[4],
+      }));
+      setAccounts(mappedAccounts);
+      onToast('账号 Cookie 有效性检查完成');
     } catch (err) {
       onToast((err as Error).message);
     } finally {
@@ -246,6 +302,7 @@ export function PublishPage({ onToast }: { onToast: (msg: string) => void }) {
   const handleDeleteAccount = async (acc: SauAccount) => {
     try {
       await apiRequest(`/api/sau/accounts/${acc.id}`, { method: 'DELETE' });
+      setSelectedAccountKeys((prev) => prev.filter((k) => k !== `${acc.type}:${acc.filePath}`));
       onToast(`已删除账号：${acc.name}`);
       await loadAll(true);
     } catch (err) {
@@ -253,21 +310,41 @@ export function PublishPage({ onToast }: { onToast: (msg: string) => void }) {
     }
   };
 
-  const handleUploadMaterial = async (fileList: FileList | null) => {
+  const handleUploadMaterial = async (fileList: FileList | null, autoSelectForPublish = false) => {
     if (!fileList || fileList.length === 0) return;
     setUploading(true);
+    const uploadedNames: string[] = [];
     try {
       for (const f of Array.from(fileList)) {
         const fd = new FormData();
         fd.append('file', f);
         const res = await fetch('/api/sau/upload', { method: 'POST', body: fd });
-        const data = (await res.json().catch(() => ({}))) as { code?: number; msg?: string };
+        const data = (await res.json().catch(() => ({}))) as { code?: number; msg?: string; data?: string };
         if (!res.ok || data.code !== 200) {
           throw new Error(data.msg || `上传失败 (${res.status})`);
         }
+        uploadedNames.push(f.name);
       }
-      onToast('视频素材上传成功');
-      await loadAll(true);
+      onToast(`成功上传 ${uploadedNames.length} 个视频`);
+      const fileRes = await apiRequest<{ code: number; data: SauFile[] }>('/api/sau/files');
+      const latestFiles = fileRes.data || [];
+      setFiles(latestFiles);
+      if (autoSelectForPublish && uploadedNames.length > 0) {
+        const newlyAdded = latestFiles.slice(-uploadedNames.length);
+        setVideoDrafts((prev) => {
+          const exists = new Set(prev.map((d) => d.filePath));
+          const extra = newlyAdded
+            .filter((f) => !exists.has(f.file_path))
+            .map((f) => ({
+              filePath: f.file_path,
+              filename: f.filename,
+              filesize: f.filesize,
+              title: globalTitle.trim() || stripFileExt(f.filename),
+              tagsText: globalTagsText,
+            }));
+          return [...prev, ...extra];
+        });
+      }
     } catch (err) {
       onToast((err as Error).message);
     } finally {
@@ -279,7 +356,7 @@ export function PublishPage({ onToast }: { onToast: (msg: string) => void }) {
   const handleDeleteFile = async (file: SauFile) => {
     try {
       await apiRequest(`/api/sau/files/${file.id}`, { method: 'DELETE' });
-      setSelectedFiles((prev) => prev.filter((p) => p !== file.file_path));
+      setVideoDrafts((prev) => prev.filter((d) => d.filePath !== file.file_path));
       onToast(`已删除素材：${file.filename}`);
       await loadAll(true);
     } catch (err) {
@@ -373,65 +450,323 @@ export function PublishPage({ onToast }: { onToast: (msg: string) => void }) {
     setSseMsg('');
   };
 
-  const handleSubmitPublish = async () => {
-    if (selectedAccounts.length === 0) {
-      onToast('请至少选择一个发布账号');
-      return;
-    }
-    if (selectedFiles.length === 0) {
-      onToast('请至少选择一个已上传的视频素材');
-      return;
-    }
-    if (!title.trim()) {
-      onToast('请输入视频标题');
-      return;
-    }
+  const toggleAccountKey = (acc: SauAccount) => {
+    const key = `${acc.type}:${acc.filePath}`;
+    setSelectedAccountKeys((prev) => (prev.includes(key) ? prev.filter((k) => k !== key) : [...prev, key]));
+  };
 
-    const tags = tagsText
-      .split(/[,，\s#]+/)
+  const selectAllNormalAccounts = () => {
+    const normals = accounts.filter((a) => a.status === 1);
+    const list = normals.length > 0 ? normals : accounts;
+    setSelectedAccountKeys(list.map((a) => `${a.type}:${a.filePath}`));
+    onToast(`已勾选 ${list.length} 个账号`);
+  };
+
+  const toggleVideoFile = (f: SauFile) => {
+    setVideoDrafts((prev) => {
+      if (prev.some((d) => d.filePath === f.file_path)) {
+        return prev.filter((d) => d.filePath !== f.file_path);
+      }
+      return [
+        ...prev,
+        {
+          filePath: f.file_path,
+          filename: f.filename,
+          filesize: f.filesize,
+          title: globalTitle.trim() || stripFileExt(f.filename),
+          tagsText: globalTagsText,
+        },
+      ];
+    });
+  };
+
+  const selectAllVideos = () => {
+    if (videoDrafts.length === files.length) {
+      setVideoDrafts([]);
+      return;
+    }
+    setVideoDrafts(
+      files.map((f) => ({
+        filePath: f.file_path,
+        filename: f.filename,
+        filesize: f.filesize,
+        title: globalTitle.trim() || stripFileExt(f.filename),
+        tagsText: globalTagsText,
+      }))
+    );
+  };
+
+  const updateDraftItem = (filePath: string, patch: Partial<VideoDraftItem>) => {
+    setVideoDrafts((prev) => prev.map((d) => (d.filePath === filePath ? { ...d, ...patch } : d)));
+  };
+
+  const applyUniformTitleToAll = () => {
+    if (!globalTitle.trim() && !globalTagsText.trim()) {
+      onToast('请先输入统一标题或话题，再点应用');
+      return;
+    }
+    setVideoDrafts((prev) =>
+      prev.map((d) => ({
+        ...d,
+        title: globalTitle.trim() ? globalTitle.trim() : d.title,
+        tagsText: globalTagsText.trim() ? globalTagsText.trim() : d.tagsText,
+      }))
+    );
+    onToast('已把统一标题与话题同步到所有选中视频');
+  };
+
+  const applyFilenameAsTitle = () => {
+    setVideoDrafts((prev) => prev.map((d) => ({ ...d, title: stripFileExt(d.filename) })));
+    onToast('已按文件名自动生成每条视频的标题');
+  };
+
+  const assignTemplatesToDrafts = (randomMode: boolean) => {
+    if (templates.length === 0) {
+      onToast('标题文案库还是空的，请先到「标题文案库」添加模板');
+      return;
+    }
+    if (videoDrafts.length === 0) {
+      onToast('请先在上方勾选至少 1 个视频');
+      return;
+    }
+    setVideoDrafts((prev) =>
+      prev.map((d, idx) => {
+        const tpl = randomMode
+          ? templates[Math.floor(Math.random() * templates.length)]
+          : templates[idx % templates.length];
+        return {
+          ...d,
+          title: tpl.title,
+          tagsText: (tpl.tags || []).join(', '),
+        };
+      })
+    );
+    onToast(randomMode ? '已从标题库随机分配标题与话题' : '已按标题库顺序轮流分配标题与话题');
+  };
+
+  const parsedDailyTimes = useMemo(() => {
+    const arr = dailyTimesText
+      .split(/[,，\s]+/)
       .map((s) => s.trim())
       .filter(Boolean);
+    return arr.length > 0 ? arr : ['10:00'];
+  }, [dailyTimesText]);
+
+  const schedulePreviewSlots = useMemo(() => {
+    if (!enableTimer || videoDrafts.length === 0) return [];
+    const perDay = Math.max(1, Number(videosPerDay || 1));
+    const base = new Date();
+    base.setDate(base.getDate() + 1 + Number(startDays || 0));
+    return videoDrafts.slice(0, 6).map((v, idx) => {
+      const dayOffset = Math.floor(idx / perDay);
+      const timeStr = parsedDailyTimes[idx % parsedDailyTimes.length] || parsedDailyTimes[0];
+      const d = new Date(base);
+      d.setDate(base.getDate() + dayOffset);
+      const mm = String(d.getMonth() + 1).padStart(2, '0');
+      const dd = String(d.getDate()).padStart(2, '0');
+      return `${v.filename} → ${mm}-${dd} ${timeStr}`;
+    });
+  }, [enableTimer, videoDrafts, videosPerDay, startDays, parsedDailyTimes]);
+
+  const groupedSelectedAccounts = useMemo(() => {
+    const map = new Map<number, string[]>();
+    for (const key of selectedAccountKeys) {
+      const sep = key.indexOf(':');
+      if (sep <= 0) continue;
+      const pType = Number(key.slice(0, sep));
+      const fp = key.slice(sep + 1);
+      if (!map.has(pType)) map.set(pType, []);
+      map.get(pType)!.push(fp);
+    }
+    return Array.from(map.entries());
+  }, [selectedAccountKeys]);
+
+  const handleSubmitBatchPublish = async () => {
+    if (groupedSelectedAccounts.length === 0) {
+      onToast('请至少勾选一个平台账号');
+      return;
+    }
+    if (videoDrafts.length === 0) {
+      onToast('请至少勾选一个要发布的视频');
+      return;
+    }
+    const emptyTitle = videoDrafts.find((d) => !d.title.trim());
+    if (emptyTitle) {
+      onToast(`视频「${emptyTitle.filename}」还没有填写标题`);
+      return;
+    }
+
+    const tasks: Array<{ platformType: number; platformLabel: string; accountList: string[]; video: VideoDraftItem }> = [];
+    for (const [pType, accPaths] of groupedSelectedAccounts) {
+      const pLabel = getPlatformMeta(pType).label;
+      for (const video of videoDrafts) {
+        tasks.push({ platformType: pType, platformLabel: pLabel, accountList: accPaths, video });
+      }
+    }
 
     setPublishing(true);
+    setBatchResults(
+      tasks.map((t) => ({
+        platformLabel: t.platformLabel,
+        videoName: t.video.filename,
+        status: 'pending',
+        message: '等待执行',
+      }))
+    );
+
+    let successCount = 0;
+    let failCount = 0;
+
+    for (let i = 0; i < tasks.length; i++) {
+      const t = tasks[i];
+      setBatchResults((prev) =>
+        prev.map((r, idx) => (idx === i ? { ...r, status: 'running', message: '正在提交...' } : r))
+      );
+
+      const tags = t.video.tagsText
+        .split(/[,，\s#]+/)
+        .map((s) => s.trim())
+        .filter(Boolean);
+
+      try {
+        await apiRequest<{ code: number; msg: string }>('/api/sau/post-video', {
+          method: 'POST',
+          body: JSON.stringify({
+            type: t.platformType,
+            title: t.video.title.trim(),
+            tags,
+            fileList: [t.video.filePath],
+            accountList: t.accountList,
+            enableTimer: enableTimer ? 1 : 0,
+            videosPerDay,
+            dailyTimes: parsedDailyTimes,
+            startDays,
+            category: isOriginal ? 1 : 0,
+            isDraft,
+            productLink: t.platformType === 3 ? productLink.trim() : '',
+            productTitle: t.platformType === 3 ? productTitle.trim() : '',
+          }),
+        });
+        successCount++;
+        setBatchResults((prev) =>
+          prev.map((r, idx) => (idx === i ? { ...r, status: 'success', message: '已提交发布' } : r))
+        );
+      } catch (err) {
+        failCount++;
+        setBatchResults((prev) =>
+          prev.map((r, idx) => (idx === i ? { ...r, status: 'error', message: (err as Error).message } : r))
+        );
+      }
+    }
+
+    setPublishing(false);
+    onToast(`批量发布结束：成功 ${successCount} 个任务，失败 ${failCount} 个任务`);
+    await loadAll(true);
+  };
+
+  const filteredTemplates = useMemo(() => {
+    return templates.filter((t) => {
+      const matchCat = tplCategoryFilter === '全部' || t.category === tplCategoryFilter;
+      const kw = tplSearch.trim().toLowerCase();
+      const matchKw =
+        !kw ||
+        t.title.toLowerCase().includes(kw) ||
+        (t.note || '').toLowerCase().includes(kw) ||
+        (t.tags || []).some((tg) => tg.toLowerCase().includes(kw));
+      return matchCat && matchKw;
+    });
+  }, [templates, tplCategoryFilter, tplSearch]);
+
+  const openCreateTplModal = () => {
+    setEditingTplId(null);
+    setTplFormCategory('干货拆解');
+    setTplFormTitle('');
+    setTplFormTags('');
+    setTplFormNote('');
+    setShowTplModal(true);
+  };
+
+  const openEditTplModal = (tpl: TitleTemplate) => {
+    setEditingTplId(tpl.id);
+    setTplFormCategory(tpl.category || '通用');
+    setTplFormTitle(tpl.title || '');
+    setTplFormTags((tpl.tags || []).join(', '));
+    setTplFormNote(tpl.note || '');
+    setShowTplModal(true);
+  };
+
+  const handleSaveTemplate = async () => {
+    if (!tplFormTitle.trim()) {
+      onToast('请输入标题文案内容');
+      return;
+    }
+    setSavingTpl(true);
     try {
-      const res = await apiRequest<{ code: number; msg: string }>('/api/sau/post-video', {
+      await apiRequest('/api/sau/title-templates', {
         method: 'POST',
         body: JSON.stringify({
-          type: platformType,
-          title: title.trim(),
-          tags,
-          fileList: selectedFiles,
-          accountList: selectedAccounts,
-          enableTimer: enableTimer ? 1 : 0,
-          videosPerDay,
-          dailyTimes: [dailyTime || '10:00'],
-          startDays,
-          category: 0,
-          isDraft,
-          productLink: productLink.trim(),
-          productTitle: productTitle.trim(),
+          id: editingTplId || undefined,
+          category: tplFormCategory,
+          title: tplFormTitle.trim(),
+          tags: tplFormTags,
+          note: tplFormNote.trim(),
         }),
       });
-      onToast(res.msg || '视频发布任务已完成提交');
+      setShowTplModal(false);
+      onToast(editingTplId ? '标题模板已更新' : '已添加到标题文案库');
       await loadAll(true);
     } catch (err) {
       onToast((err as Error).message);
-      await loadAll(true);
     } finally {
-      setPublishing(false);
+      setSavingTpl(false);
     }
   };
 
+  const handleDeleteTemplate = async (id: number) => {
+    try {
+      await apiRequest(`/api/sau/title-templates/${id}`, { method: 'DELETE' });
+      setTemplates((prev) => prev.filter((t) => t.id !== id));
+      onToast('标题模板已删除');
+    } catch (err) {
+      onToast((err as Error).message);
+    }
+  };
+
+  const handleApplyTemplateToGlobal = (tpl: TitleTemplate) => {
+    setGlobalTitle(tpl.title);
+    setGlobalTagsText((tpl.tags || []).join(', '));
+    setVideoDrafts((prev) =>
+      prev.map((d) => ({
+        ...d,
+        title: tpl.title,
+        tagsText: (tpl.tags || []).join(', '),
+      }))
+    );
+    setSubTab('publish');
+    onToast(`已将模板「${tpl.title.slice(0, 14)}...」应用到发布任务`);
+  };
+
   const handleReuseHistory = (item: SauPublishRecord) => {
-    setPlatformType(item.platform_type || 3);
-    setSelectedAccounts(item.account_list || []);
-    setSelectedFiles(item.file_list || []);
-    setTitle(item.title || '');
-    setTagsText((item.tags || []).join(', '));
+    const pType = item.platform_type || 3;
+    setSelectedAccountKeys((item.account_list || []).map((fp) => `${pType}:${fp}`));
+    setGlobalTitle(item.title || '');
+    setGlobalTagsText((item.tags || []).join(', '));
     setEnableTimer(Boolean(item.enable_timer));
     setIsDraft(Boolean(item.is_draft));
+    const reusedDrafts: VideoDraftItem[] = (item.file_list || []).map((fp) => {
+      const matched = files.find((f) => f.file_path === fp);
+      const name = matched?.filename || String(fp).split(/[/\\]/).pop() || fp;
+      return {
+        filePath: fp,
+        filename: name,
+        filesize: matched?.filesize || 0,
+        title: item.title || stripFileExt(name),
+        tagsText: (item.tags || []).join(', '),
+      };
+    });
+    setVideoDrafts(reusedDrafts);
     setSubTab('publish');
-    onToast('已把历史任务参数回填到发布表单');
+    onToast('已把历史任务参数回填到批量发布台');
   };
 
   const handleDeleteHistory = async (id: number) => {
@@ -444,34 +779,34 @@ export function PublishPage({ onToast }: { onToast: (msg: string) => void }) {
     }
   };
 
-  const platformAccounts = accounts.filter((a) => a.type === platformType);
-
-  const toggleAccount = (filePath: string) => {
-    setSelectedAccounts((prev) =>
-      prev.includes(filePath) ? prev.filter((item) => item !== filePath) : [...prev, filePath]
-    );
-  };
-
-  const toggleFile = (filePath: string) => {
-    setSelectedFiles((prev) =>
-      prev.includes(filePath) ? prev.filter((item) => item !== filePath) : [...prev, filePath]
-    );
-  };
+  const hasDouyinSelected = groupedSelectedAccounts.some(([pType]) => pType === 3);
+  const hasChannelsSelected = groupedSelectedAccounts.some(([pType]) => pType === 2);
 
   return (
     <div>
-      <div className="card" style={{ marginBottom: 16, display: 'flex', justifyContent: 'space-between', alignItems: 'center', gap: 12, flexWrap: 'wrap' }}>
+      <div
+        className="card"
+        style={{
+          marginBottom: 16,
+          display: 'flex',
+          justifyContent: 'space-between',
+          alignItems: 'center',
+          gap: 12,
+          flexWrap: 'wrap',
+          background: 'linear-gradient(135deg, #ffffff 0%, #f8fafc 100%)',
+        }}
+      >
         <div style={{ display: 'flex', alignItems: 'center', gap: 10 }}>
           <ShieldCheck size={20} color={status?.running ? '#16a34a' : '#d97706'} />
           <div>
-            <div style={{ fontWeight: 600 }}>
-              视频一键发布引擎（SAU）
+            <div style={{ fontWeight: 700 }}>
+              一体化视频发布引擎（已融合至本机工作台）
               <span className={`badge ${status?.running ? 'badge-green' : 'badge-amber'}`} style={{ marginLeft: 8 }}>
-                {status?.running ? '运行中 (5409)' : '未启动'}
+                {status?.running ? '随工作台运行中' : '未启动'}
               </span>
             </div>
             <div style={{ fontSize: 12, color: 'var(--text-muted)', marginTop: 2 }}>
-              项目目录：{status?.sauDir || '自动检测中...'} · 账号 {accounts.length} 个 · 素材 {files.length} 条
+              内置目录：{status?.sauDir || '自动检测中...'} · 账号 {accounts.length} 个 · 视频 {files.length} 条 · 标题模板 {templates.length} 套
             </div>
           </div>
         </div>
@@ -479,7 +814,7 @@ export function PublishPage({ onToast }: { onToast: (msg: string) => void }) {
         <div style={{ display: 'flex', gap: 8, flexWrap: 'wrap' }}>
           {status && !status.installed ? (
             <button className="btn btn-primary btn-sm" disabled={installing} onClick={() => void handleInstallEngine()}>
-              {installing ? '正在拉取并安装...' : '一键安装发布引擎'}
+              {installing ? '正在配置环境...' : '一键配置发布环境'}
             </button>
           ) : !status?.running ? (
             <button className="btn btn-primary btn-sm" disabled={engineBusy} onClick={() => void handleStartEngine()}>
@@ -487,163 +822,211 @@ export function PublishPage({ onToast }: { onToast: (msg: string) => void }) {
             </button>
           ) : (
             <button className="btn btn-danger btn-sm" disabled={engineBusy} onClick={() => void handleStopEngine()}>
-              <Square size={13} /> {engineBusy ? '停止中...' : '停止发布引擎'}
+              <Square size={13} /> {engineBusy ? '停止中...' : '停止引擎'}
             </button>
           )}
           <button className="btn btn-sm" disabled={loading} onClick={() => void loadAll()}>
-            <RefreshCw size={13} /> 刷新
+            <RefreshCw size={13} /> 刷新数据
           </button>
           <button className="btn btn-sm" disabled={validating || !status?.running} onClick={() => void handleValidateAccounts()}>
             {validating ? '检测中...' : '检测账号 Cookie'}
           </button>
-          <a
-            href={status?.frontendUrl || 'http://127.0.0.1:5173/'}
-            target="_blank"
-            rel="noreferrer"
-            className="btn btn-sm"
-          >
-            <ExternalLink size={13} /> 打开新版发布台
-          </a>
         </div>
       </div>
 
       {status && !status.installed && (
         <div className="card" style={{ marginBottom: 16, background: '#fffbeb', borderColor: '#fde68a' }}>
-          <div style={{ fontWeight: 600, marginBottom: 6 }}>新电脑首次使用提示：尚未检测到 SAU 发布引擎虚拟环境</div>
+          <div style={{ fontWeight: 600, marginBottom: 6 }}>首次使用提示：尚未检测到内置发布引擎 Python 虚拟环境</div>
           <div style={{ fontSize: 13, color: '#78350f', marginBottom: 10 }}>
-            点击下方「一键拉取并安装」会自动把配套的 social-auto-upload 克隆到指定目录并配好 Python 环境；如果你已经在别的目录放好了该项目，也可以直接填写路径后点「保存路径」。
+            点击「一键配置发布环境」即可自动初始化 Python 依赖与浏览器内核，之后每次打开工作台都会随主服务自动启停，无需再手动开第二个窗口。
           </div>
           <div style={{ display: 'flex', gap: 8, flexWrap: 'wrap' }}>
             <input
               className="input"
               value={sauDirInput}
               onChange={(e) => setSauDirInput(e.target.value)}
-              placeholder="例如 D:\HeyGem\social-auto-upload 或 ..\social-auto-upload"
+              placeholder="默认使用内置 sau-engine 目录"
               style={{ flex: 1, minWidth: 260 }}
             />
             <button className="btn btn-sm" onClick={() => void handleSaveSauDir()}>保存路径</button>
             <button className="btn btn-primary btn-sm" disabled={installing} onClick={() => void handleInstallEngine()}>
-              {installing ? '安装中（首次约1~2分钟）...' : '一键拉取并安装'}
+              {installing ? '配置中（约1~2分钟）...' : '一键配置发布环境'}
             </button>
           </div>
         </div>
       )}
 
-      <div style={{ display: 'flex', gap: 8, marginBottom: 16 }}>
-        <button
-          className={`btn ${subTab === 'publish' ? 'btn-primary' : ''}`}
-          onClick={() => setSubTab('publish')}
-        >
-          <Send size={14} /> 一键发布
+      <div style={{ display: 'flex', gap: 8, marginBottom: 16, flexWrap: 'wrap' }}>
+        <button className={`btn ${subTab === 'publish' ? 'btn-primary' : ''}`} onClick={() => setSubTab('publish')}>
+          <Layers size={14} /> 批量视频发布
         </button>
-        <button
-          className={`btn ${subTab === 'accounts' ? 'btn-primary' : ''}`}
-          onClick={() => setSubTab('accounts')}
-        >
+        <button className={`btn ${subTab === 'titles' ? 'btn-primary' : ''}`} onClick={() => setSubTab('titles')}>
+          <BookOpen size={14} /> 标题文案库 ({templates.length})
+        </button>
+        <button className={`btn ${subTab === 'accounts' ? 'btn-primary' : ''}`} onClick={() => setSubTab('accounts')}>
           发布账号 ({accounts.length})
         </button>
-        <button
-          className={`btn ${subTab === 'materials' ? 'btn-primary' : ''}`}
-          onClick={() => setSubTab('materials')}
-        >
+        <button className={`btn ${subTab === 'materials' ? 'btn-primary' : ''}`} onClick={() => setSubTab('materials')}>
           视频素材 ({files.length})
         </button>
-        <button
-          className={`btn ${subTab === 'history' ? 'btn-primary' : ''}`}
-          onClick={() => setSubTab('history')}
-        >
+        <button className={`btn ${subTab === 'history' ? 'btn-primary' : ''}`} onClick={() => setSubTab('history')}>
           <Clock size={14} /> 发布历史 ({history.length})
         </button>
       </div>
 
       {subTab === 'publish' && (
-        <div className="card" style={{ display: 'grid', gap: 16 }}>
-          <div>
-            <div style={{ fontWeight: 600, marginBottom: 8 }}>1. 选择目标平台</div>
-            <div style={{ display: 'flex', gap: 8, flexWrap: 'wrap' }}>
-              {PLATFORM_OPTIONS.map((p) => (
-                <button
-                  key={p.type}
-                  className={`btn ${platformType === p.type ? 'btn-primary' : ''}`}
-                  onClick={() => {
-                    setPlatformType(p.type);
-                    setSelectedAccounts([]);
-                  }}
-                >
-                  {p.label}
+        <div style={{ display: 'grid', gap: 16 }}>
+          <div className="card">
+            <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: 12, flexWrap: 'wrap', gap: 8 }}>
+              <div>
+                <div style={{ fontWeight: 700, fontSize: 15 }}>1. 选择要发布的平台与账号（支持多平台同时勾选）</div>
+                <div style={{ fontSize: 12, color: 'var(--text-muted)' }}>
+                  已选 {selectedAccountKeys.length} 个账号，覆盖 {groupedSelectedAccounts.length} 个平台
+                </div>
+              </div>
+              <div style={{ display: 'flex', gap: 8 }}>
+                {accounts.length > 0 && (
+                  <button className="btn btn-sm" onClick={selectAllNormalAccounts}>
+                    <CheckCircle2 size={13} /> 全选正常账号
+                  </button>
+                )}
+                {selectedAccountKeys.length > 0 && (
+                  <button className="btn btn-sm" onClick={() => setSelectedAccountKeys([])}>清空账号</button>
+                )}
+                <button className="btn btn-primary btn-sm" onClick={() => setShowAddModal(true)}>
+                  <Plus size={13} /> 扫码添加账号
                 </button>
-              ))}
+              </div>
             </div>
-          </div>
 
-          <div>
-            <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: 8 }}>
-              <span style={{ fontWeight: 600 }}>2. 选择发布账号</span>
-              <button
-                className="btn btn-sm"
-                onClick={() => {
-                  setNewPlatform(platformType);
-                  setShowAddModal(true);
-                }}
-              >
-                <Plus size={13} /> 扫码添加账号
-              </button>
-            </div>
-            {platformAccounts.length === 0 ? (
-              <div style={{ fontSize: 13, color: 'var(--text-muted)' }}>
-                当前平台还没有账号，请点击右侧“扫码添加账号”（如果发布引擎还没开，会自动拉起）。
+            {accounts.length === 0 ? (
+              <div style={{ padding: 16, background: 'var(--surface-muted)', borderRadius: 8, fontSize: 13, color: 'var(--text-muted)' }}>
+                还没有绑定任何平台账号，请先点击右上角「扫码添加账号」。
               </div>
             ) : (
-              <div style={{ display: 'flex', gap: 8, flexWrap: 'wrap' }}>
-                {platformAccounts.map((acc) => {
-                  const checked = selectedAccounts.includes(acc.filePath);
+              <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(230px, 1fr))', gap: 10 }}>
+                {PLATFORM_OPTIONS.map((plat) => {
+                  const pAccounts = accounts.filter((a) => a.type === plat.type);
                   return (
-                    <button
-                      key={acc.id}
-                      className={`btn btn-sm ${checked ? 'btn-primary' : ''}`}
-                      onClick={() => toggleAccount(acc.filePath)}
+                    <div
+                      key={plat.type}
+                      style={{
+                        border: '1px solid var(--border)',
+                        borderRadius: 10,
+                        padding: 12,
+                        background: 'var(--surface-muted)',
+                      }}
                     >
-                      {acc.name}
-                      <span className={`badge ${acc.status === 1 ? 'badge-green' : 'badge-red'}`} style={{ marginLeft: 4 }}>
-                        {acc.status === 1 ? '正常' : '失效'}
-                      </span>
-                    </button>
+                      <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: 8 }}>
+                        <span className={`badge ${plat.badge}`}>{plat.label}</span>
+                        <span style={{ fontSize: 11, color: 'var(--text-muted)' }}>{pAccounts.length} 个号</span>
+                      </div>
+                      {pAccounts.length === 0 ? (
+                        <button
+                          className="btn btn-sm"
+                          style={{ width: '100%' }}
+                          onClick={() => {
+                            setNewPlatform(plat.type);
+                            setShowAddModal(true);
+                          }}
+                        >
+                          + 绑定{plat.label}
+                        </button>
+                      ) : (
+                        <div style={{ display: 'flex', flexDirection: 'column', gap: 6 }}>
+                          {pAccounts.map((acc) => {
+                            const key = `${acc.type}:${acc.filePath}`;
+                            const checked = selectedAccountKeys.includes(key);
+                            return (
+                              <button
+                                key={acc.id}
+                                type="button"
+                                className={`btn btn-sm ${checked ? 'btn-primary' : ''}`}
+                                style={{ justifyContent: 'space-between', width: '100%' }}
+                                onClick={() => toggleAccountKey(acc)}
+                              >
+                                <span style={{ overflow: 'hidden', textOverflow: 'ellipsis' }}>{acc.name}</span>
+                                <span className={`badge ${acc.status === 1 ? 'badge-green' : 'badge-red'}`}>
+                                  {acc.status === 1 ? '正常' : '失效'}
+                                </span>
+                              </button>
+                            );
+                          })}
+                        </div>
+                      )}
+                    </div>
                   );
                 })}
               </div>
             )}
           </div>
 
-          <div>
-            <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: 8 }}>
-              <span style={{ fontWeight: 600 }}>3. 选择视频素材</span>
+          <div className="card">
+            <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: 12, flexWrap: 'wrap', gap: 8 }}>
+              <div>
+                <div style={{ fontWeight: 700, fontSize: 15 }}>2. 批量上传或勾选待发布视频（已选 {videoDrafts.length} 条）</div>
+                <div style={{ fontSize: 12, color: 'var(--text-muted)' }}>支持直接把多条视频拖进虚线框内，上传后自动勾选进入发布列表</div>
+              </div>
               <div style={{ display: 'flex', gap: 8 }}>
+                {files.length > 0 && (
+                  <button className="btn btn-sm" onClick={selectAllVideos}>
+                    {videoDrafts.length === files.length ? '取消全选视频' : `全选已有视频 (${files.length})`}
+                  </button>
+                )}
                 <input
                   ref={fileInputRef}
                   type="file"
                   accept="video/*"
                   multiple
                   style={{ display: 'none' }}
-                  onChange={(e) => void handleUploadMaterial(e.target.files)}
+                  onChange={(e) => void handleUploadMaterial(e.target.files, true)}
                 />
-                <button className="btn btn-sm" disabled={uploading} onClick={() => fileInputRef.current?.click()}>
-                  <Upload size={13} /> {uploading ? '上传中...' : '上传新视频'}
+                <button className="btn btn-primary btn-sm" disabled={uploading} onClick={() => fileInputRef.current?.click()}>
+                  <Upload size={13} /> {uploading ? '批量上传中...' : '批量选择本地视频'}
                 </button>
               </div>
             </div>
-            {files.length === 0 ? (
-              <div style={{ fontSize: 13, color: 'var(--text-muted)' }}>还没有视频素材，请先点击右上角“上传新视频”。</div>
-            ) : (
-              <div style={{ display: 'flex', gap: 8, flexWrap: 'wrap' }}>
+
+            <div
+              onDragOver={(e) => {
+                e.preventDefault();
+                setDragOver(true);
+              }}
+              onDragLeave={() => setDragOver(false)}
+              onDrop={(e) => {
+                e.preventDefault();
+                setDragOver(false);
+                void handleUploadMaterial(e.dataTransfer.files, true);
+              }}
+              onClick={() => fileInputRef.current?.click()}
+              style={{
+                border: `1.5px dashed ${dragOver ? 'var(--primary)' : 'var(--border)'}`,
+                background: dragOver ? 'var(--primary-soft)' : 'var(--surface-muted)',
+                borderRadius: 10,
+                padding: '18px 16px',
+                textAlign: 'center',
+                cursor: 'pointer',
+                marginBottom: files.length > 0 ? 12 : 0,
+              }}
+            >
+              <div style={{ fontWeight: 600, color: 'var(--primary)' }}>
+                {uploading ? '正在批量上传视频，请稍候...' : '把多个视频直接拖拽到这里，或点击批量添加视频'}
+              </div>
+              <div style={{ fontSize: 12, color: 'var(--text-muted)', marginTop: 4 }}>支持 MP4 / MOV / AVI 等格式（单文件上限 160MB）</div>
+            </div>
+
+            {files.length > 0 && (
+              <div style={{ display: 'flex', flexWrap: 'wrap', gap: 8 }}>
                 {files.map((f) => {
-                  const checked = selectedFiles.includes(f.file_path);
+                  const checked = videoDrafts.some((d) => d.filePath === f.file_path);
                   return (
                     <button
                       key={f.id}
+                      type="button"
                       className={`btn btn-sm ${checked ? 'btn-primary' : ''}`}
-                      onClick={() => toggleFile(f.file_path)}
+                      onClick={() => toggleVideoFile(f)}
                     >
-                      {f.filename} ({f.filesize}MB)
+                      {checked ? '✓ ' : ''}{f.filename} ({f.filesize}MB)
                     </button>
                   );
                 })}
@@ -651,122 +1034,353 @@ export function PublishPage({ onToast }: { onToast: (msg: string) => void }) {
             )}
           </div>
 
-          <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 12 }}>
-            <div>
-              <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: 6 }}>
-                <label style={{ fontSize: 13, fontWeight: 600 }}>视频标题</label>
-                <div style={{ display: 'flex', gap: 4, flexWrap: 'wrap' }}>
-                  {TITLE_TEMPLATES.map((tpl) => (
-                    <button
-                      key={tpl.label}
-                      type="button"
-                      className="btn btn-sm"
-                      style={{ padding: '2px 7px', fontSize: 11 }}
-                      onClick={() => {
-                        setTitle(tpl.title);
-                        setTagsText(tpl.tags);
-                      }}
+          <div className="card">
+            <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: 12, flexWrap: 'wrap', gap: 8 }}>
+              <div>
+                <div style={{ fontWeight: 700, fontSize: 15 }}>3. 批量配置标题与话题（支持统一套用 / 标题库自动分配 / 逐条微调）</div>
+                <div style={{ fontSize: 12, color: 'var(--text-muted)' }}>可先在「标题文案库」管理你的常用爆款标题，再点下方按钮一键批量填入</div>
+              </div>
+              <div style={{ display: 'flex', gap: 6, flexWrap: 'wrap' }}>
+                <button className="btn btn-sm" onClick={() => setSubTab('titles')}>
+                  <BookOpen size={13} /> 管理标题库
+                </button>
+                <button className="btn btn-sm" onClick={applyFilenameAsTitle} disabled={videoDrafts.length === 0}>
+                  用文件名当标题
+                </button>
+                <button className="btn btn-sm" onClick={() => assignTemplatesToDrafts(false)} disabled={videoDrafts.length === 0}>
+                  <Sparkles size={13} /> 标题库顺序分配
+                </button>
+                <button className="btn btn-sm" onClick={() => assignTemplatesToDrafts(true)} disabled={videoDrafts.length === 0}>
+                  <Sparkles size={13} /> 标题库随机分配
+                </button>
+              </div>
+            </div>
+
+            <div
+              style={{
+                display: 'grid',
+                gridTemplateColumns: '1fr 1fr auto',
+                gap: 10,
+                padding: 12,
+                borderRadius: 10,
+                background: 'var(--surface-muted)',
+                border: '1px solid var(--border)',
+                marginBottom: 14,
+                alignItems: 'end',
+              }}
+            >
+              <div>
+                <label style={{ display: 'block', fontSize: 12, fontWeight: 600, marginBottom: 4 }}>统一标题（可一键同步给所有已选视频）</label>
+                <input
+                  className="input"
+                  value={globalTitle}
+                  onChange={(e) => setGlobalTitle(e.target.value)}
+                  placeholder="例如：效率工具实测分享，建议收藏！"
+                />
+              </div>
+              <div>
+                <label style={{ display: 'block', fontSize: 12, fontWeight: 600, marginBottom: 4 }}>统一话题标签（逗号或空格分隔）</label>
+                <input
+                  className="input"
+                  value={globalTagsText}
+                  onChange={(e) => setGlobalTagsText(e.target.value)}
+                  placeholder="例如：效率神器, 干货分享"
+                />
+              </div>
+              <button className="btn btn-primary btn-sm" onClick={applyUniformTitleToAll} disabled={videoDrafts.length === 0}>
+                一键应用到全部视频
+              </button>
+            </div>
+
+            {templates.length > 0 && (
+              <div style={{ display: 'flex', alignItems: 'center', gap: 6, flexWrap: 'wrap', marginBottom: 14 }}>
+                <span style={{ fontSize: 12, color: 'var(--text-muted)' }}>快捷点击标题库模板填入：</span>
+                {templates.slice(0, 6).map((tpl) => (
+                  <button
+                    key={tpl.id}
+                    type="button"
+                    className="btn btn-sm"
+                    style={{ fontSize: 11, padding: '3px 9px' }}
+                    onClick={() => handleApplyTemplateToGlobal(tpl)}
+                    title={tpl.title}
+                  >
+                    [{tpl.category}] {tpl.title.slice(0, 14)}{tpl.title.length > 14 ? '...' : ''}
+                  </button>
+                ))}
+              </div>
+            )}
+
+            {videoDrafts.length === 0 ? (
+              <div style={{ fontSize: 13, color: 'var(--text-muted)', padding: '8px 0' }}>
+                请先在「第 2 步」勾选或上传要发布的视频，这里会列出每条视频的独立标题和话题方便你微调。
+              </div>
+            ) : (
+              <div className="table-wrap">
+                <table>
+                  <thead>
+                    <tr>
+                      <th style={{ width: '24%' }}>视频文件名</th>
+                      <th style={{ width: '42%' }}>独立标题（可逐条修改）</th>
+                      <th style={{ width: '26%' }}>独立话题标签</th>
+                      <th style={{ width: '8%' }}>移除</th>
+                    </tr>
+                  </thead>
+                  <tbody>
+                    {videoDrafts.map((item) => (
+                      <tr key={item.filePath}>
+                        <td>
+                          <div style={{ fontWeight: 600 }}>{item.filename}</div>
+                          <div style={{ fontSize: 11, color: 'var(--text-muted)' }}>{item.filesize} MB</div>
+                        </td>
+                        <td>
+                          <input
+                            className="input"
+                            value={item.title}
+                            onChange={(e) => updateDraftItem(item.filePath, { title: e.target.value })}
+                            placeholder="请输入这条视频的标题"
+                          />
+                        </td>
+                        <td>
+                          <input
+                            className="input"
+                            value={item.tagsText}
+                            onChange={(e) => updateDraftItem(item.filePath, { tagsText: e.target.value })}
+                            placeholder="逗号分隔，如：干货, 测评"
+                          />
+                        </td>
+                        <td>
+                          <button
+                            className="btn btn-danger btn-sm"
+                            onClick={() => setVideoDrafts((prev) => prev.filter((d) => d.filePath !== item.filePath))}
+                          >
+                            移除
+                          </button>
+                        </td>
+                      </tr>
+                    ))}
+                  </tbody>
+                </table>
+              </div>
+            )}
+          </div>
+
+          <div className="card" style={{ display: 'grid', gap: 14 }}>
+            <div style={{ fontWeight: 700, fontSize: 15 }}>4. 定时排期与高级选项</div>
+
+            <div style={{ display: 'flex', gap: 16, alignItems: 'center', flexWrap: 'wrap' }}>
+              <label style={{ display: 'flex', alignItems: 'center', gap: 6, fontSize: 13, fontWeight: 600 }}>
+                <input type="checkbox" checked={enableTimer} onChange={(e) => setEnableTimer(e.target.checked)} />
+                开启定时排期发布
+              </label>
+              <label style={{ display: 'flex', alignItems: 'center', gap: 6, fontSize: 13 }}>
+                <input type="checkbox" checked={isOriginal} onChange={(e) => setIsOriginal(e.target.checked)} />
+                声明原创
+              </label>
+              {hasChannelsSelected && (
+                <label style={{ display: 'flex', alignItems: 'center', gap: 6, fontSize: 13 }}>
+                  <input type="checkbox" checked={isDraft} onChange={(e) => setIsDraft(e.target.checked)} />
+                  视频号仅保存为草稿（用手机确认发布）
+                </label>
+              )}
+            </div>
+
+            {enableTimer && (
+              <div style={{ padding: 12, borderRadius: 10, background: 'var(--surface-muted)', border: '1px solid var(--border)', display: 'grid', gap: 10 }}>
+                <div style={{ display: 'flex', gap: 16, flexWrap: 'wrap', alignItems: 'center' }}>
+                  <label style={{ fontSize: 13 }}>
+                    每天发布条数：
+                    <input
+                      className="input"
+                      type="number"
+                      min={1}
+                      max={10}
+                      value={videosPerDay}
+                      onChange={(e) => setVideosPerDay(Number(e.target.value) || 1)}
+                      style={{ width: 72, display: 'inline-block', marginLeft: 6 }}
+                    />
+                  </label>
+                  <label style={{ fontSize: 13 }}>
+                    每天时间点（逗号分隔）：
+                    <input
+                      className="input"
+                      value={dailyTimesText}
+                      onChange={(e) => setDailyTimesText(e.target.value)}
+                      placeholder="10:00, 18:00"
+                      style={{ width: 170, display: 'inline-block', marginLeft: 6 }}
+                    />
+                  </label>
+                  <label style={{ fontSize: 13 }}>
+                    起始天数：
+                    <select
+                      className="select"
+                      value={startDays}
+                      onChange={(e) => setStartDays(Number(e.target.value))}
+                      style={{ width: 120, display: 'inline-block', marginLeft: 6 }}
                     >
-                      {tpl.label}
-                    </button>
+                      <option value={0}>明天起</option>
+                      <option value={1}>后天起</option>
+                      <option value={2}>3天后起</option>
+                    </select>
+                  </label>
+                </div>
+                {schedulePreviewSlots.length > 0 && (
+                  <div style={{ display: 'flex', gap: 6, flexWrap: 'wrap', alignItems: 'center' }}>
+                    <span style={{ fontSize: 12, fontWeight: 600, color: 'var(--text-muted)' }}>排期预览：</span>
+                    {schedulePreviewSlots.map((slot, i) => (
+                      <span key={i} className="badge badge-blue">{slot}</span>
+                    ))}
+                  </div>
+                )}
+              </div>
+            )}
+
+            {hasDouyinSelected && (
+              <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 12 }}>
+                <div>
+                  <label style={{ display: 'block', fontSize: 12, fontWeight: 600, marginBottom: 4 }}>抖音商品链接（可选）</label>
+                  <input className="input" value={productLink} onChange={(e) => setProductLink(e.target.value)} placeholder="不挂车请留空" />
+                </div>
+                <div>
+                  <label style={{ display: 'block', fontSize: 12, fontWeight: 600, marginBottom: 4 }}>抖音商品短标题（可选）</label>
+                  <input className="input" value={productTitle} onChange={(e) => setProductTitle(e.target.value)} placeholder="不挂车请留空" />
+                </div>
+              </div>
+            )}
+
+            <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', flexWrap: 'wrap', gap: 10, paddingTop: 6, borderTop: '1px solid var(--border)' }}>
+              <div style={{ fontSize: 13, color: 'var(--text-muted)' }}>
+                预计生成任务数：<strong>{groupedSelectedAccounts.length * videoDrafts.length}</strong> 个
+                （{groupedSelectedAccounts.length} 个平台 × {videoDrafts.length} 条视频）
+              </div>
+              <button
+                className="btn btn-primary"
+                disabled={publishing || !status?.running}
+                onClick={() => void handleSubmitBatchPublish()}
+              >
+                <Send size={14} /> {publishing ? '正在批量提交发布...' : '一键开始全部批量发布'}
+              </button>
+            </div>
+
+            {batchResults.length > 0 && (
+              <div style={{ padding: 12, borderRadius: 10, background: 'var(--surface-muted)', border: '1px solid var(--border)' }}>
+                <div style={{ fontWeight: 600, fontSize: 13, marginBottom: 8 }}>本次批量提交实时进度：</div>
+                <div style={{ display: 'grid', gap: 6 }}>
+                  {batchResults.map((res, idx) => (
+                    <div key={idx} style={{ display: 'flex', justifyContent: 'space-between', fontSize: 13, alignItems: 'center' }}>
+                      <span>[{res.platformLabel}] {res.videoName}</span>
+                      <span
+                        className={`badge ${
+                          res.status === 'success'
+                            ? 'badge-green'
+                            : res.status === 'error'
+                              ? 'badge-red'
+                              : res.status === 'running'
+                                ? 'badge-blue'
+                                : 'badge-gray'
+                        }`}
+                      >
+                        {res.message}
+                      </span>
+                    </div>
                   ))}
                 </div>
               </div>
-              <input
-                className="input"
-                value={title}
-                onChange={(e) => setTitle(e.target.value)}
-                placeholder="输入视频标题"
-              />
-            </div>
+            )}
+          </div>
+        </div>
+      )}
+
+      {subTab === 'titles' && (
+        <div className="card">
+          <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: 14, flexWrap: 'wrap', gap: 10 }}>
             <div>
-              <label style={{ display: 'block', fontSize: 13, fontWeight: 600, marginBottom: 6 }}>话题标签（逗号或空格分隔）</label>
-              <input
-                className="input"
-                value={tagsText}
-                onChange={(e) => setTagsText(e.target.value)}
-                placeholder="例如：AI工具, 效率神器"
-              />
+              <div style={{ fontWeight: 700, fontSize: 15 }}>标题与文案模板库（可随时增删改、按分类管理、批量发布时一键分配）</div>
+              <div style={{ fontSize: 12, color: 'var(--text-muted)' }}>把平时爆款标题、常用话题组合存下来，发视频时不用每次现想</div>
             </div>
-          </div>
-
-          <div style={{ display: 'flex', gap: 16, alignItems: 'center', flexWrap: 'wrap' }}>
-            <label style={{ display: 'flex', alignItems: 'center', gap: 6, fontSize: 13 }}>
-              <input type="checkbox" checked={enableTimer} onChange={(e) => setEnableTimer(e.target.checked)} />
-              开启定时发布
-            </label>
-            {enableTimer && (
-              <>
-                <label style={{ fontSize: 13 }}>
-                  每天条数：
-                  <input
-                    className="input"
-                    type="number"
-                    min={1}
-                    max={5}
-                    value={videosPerDay}
-                    onChange={(e) => setVideosPerDay(Math.max(1, Number(e.target.value) || 1))}
-                    style={{ width: 64, display: 'inline-block', marginLeft: 4 }}
-                  />
-                </label>
-                <label style={{ fontSize: 13 }}>
-                  发布时间：
-                  <input
-                    className="input"
-                    value={dailyTime}
-                    onChange={(e) => setDailyTime(e.target.value)}
-                    placeholder="10:00"
-                    style={{ width: 90, display: 'inline-block', marginLeft: 4 }}
-                  />
-                </label>
-                <label style={{ fontSize: 13 }}>
-                  延后天数：
-                  <input
-                    className="input"
-                    type="number"
-                    min={0}
-                    value={startDays}
-                    onChange={(e) => setStartDays(Math.max(0, Number(e.target.value) || 0))}
-                    style={{ width: 64, display: 'inline-block', marginLeft: 4 }}
-                  />
-                </label>
-              </>
-            )}
-            {platformType === 2 && (
-              <label style={{ display: 'flex', alignItems: 'center', gap: 6, fontSize: 13 }}>
-                <input type="checkbox" checked={isDraft} onChange={(e) => setIsDraft(e.target.checked)} />
-                仅保存为视频号草稿
-              </label>
-            )}
-          </div>
-
-          {platformType === 3 && (
-            <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 12 }}>
-              <div>
-                <label style={{ display: 'block', fontSize: 13, fontWeight: 600, marginBottom: 6 }}>抖音商品链接（可选）</label>
-                <input
-                  className="input"
-                  value={productLink}
-                  onChange={(e) => setProductLink(e.target.value)}
-                  placeholder="不挂车请留空"
-                />
-              </div>
-              <div>
-                <label style={{ display: 'block', fontSize: 13, fontWeight: 600, marginBottom: 6 }}>商品短标题（可选）</label>
-                <input
-                  className="input"
-                  value={productTitle}
-                  onChange={(e) => setProductTitle(e.target.value)}
-                  placeholder="不挂车请留空"
-                />
-              </div>
-            </div>
-          )}
-
-          <div style={{ display: 'flex', justifyContent: 'flex-end' }}>
-            <button className="btn btn-primary" disabled={publishing} onClick={() => void handleSubmitPublish()}>
-              <Send size={14} /> {publishing ? '正在执行发布，请勿关闭...' : '提交发布任务'}
+            <button className="btn btn-primary btn-sm" onClick={openCreateTplModal}>
+              <Plus size={13} /> 新增标题模板
             </button>
+          </div>
+
+          <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', gap: 10, marginBottom: 14, flexWrap: 'wrap' }}>
+            <div style={{ display: 'flex', gap: 6, flexWrap: 'wrap' }}>
+              {TEMPLATE_CATEGORIES.map((cat) => (
+                <button
+                  key={cat}
+                  className={`btn btn-sm ${tplCategoryFilter === cat ? 'btn-primary' : ''}`}
+                  onClick={() => setTplCategoryFilter(cat)}
+                >
+                  {cat}
+                </button>
+              ))}
+            </div>
+            <input
+              className="input"
+              value={tplSearch}
+              onChange={(e) => setTplSearch(e.target.value)}
+              placeholder="搜索标题、话题或备注..."
+              style={{ width: 240 }}
+            />
+          </div>
+
+          <div className="table-wrap">
+            <table>
+              <thead>
+                <tr>
+                  <th style={{ width: '11%' }}>分类</th>
+                  <th style={{ width: '35%' }}>标题内容</th>
+                  <th style={{ width: '20%' }}>配套话题</th>
+                  <th style={{ width: '14%' }}>适用备注</th>
+                  <th style={{ width: '20%' }}>操作</th>
+                </tr>
+              </thead>
+              <tbody>
+                {filteredTemplates.length === 0 ? (
+                  <tr>
+                    <td colSpan={5} style={{ textAlign: 'center', color: 'var(--text-muted)' }}>
+                      没有匹配的标题模板，点击右上角「新增标题模板」添加一条吧
+                    </td>
+                  </tr>
+                ) : (
+                  filteredTemplates.map((tpl) => (
+                    <tr key={tpl.id}>
+                      <td><span className="badge badge-blue">{tpl.category}</span></td>
+                      <td style={{ fontWeight: 600 }}>{tpl.title}</td>
+                      <td>
+                        <div style={{ display: 'flex', gap: 4, flexWrap: 'wrap' }}>
+                          {(tpl.tags || []).map((tg, i) => (
+                            <span key={i} className="badge badge-gray">#{tg}</span>
+                          ))}
+                        </div>
+                      </td>
+                      <td style={{ fontSize: 12, color: 'var(--text-muted)' }}>{tpl.note || '-'}</td>
+                      <td>
+                        <div style={{ display: 'flex', gap: 6, flexWrap: 'wrap' }}>
+                          <button className="btn btn-primary btn-sm" onClick={() => handleApplyTemplateToGlobal(tpl)}>
+                            去发布套用
+                          </button>
+                          <button
+                            className="btn btn-sm"
+                            onClick={() => {
+                              void navigator.clipboard?.writeText(tpl.title);
+                              onToast('已复制标题');
+                            }}
+                          >
+                            <Copy size={12} />
+                          </button>
+                          <button className="btn btn-sm" onClick={() => openEditTplModal(tpl)}>
+                            <Edit3 size={12} />
+                          </button>
+                          <button className="btn btn-danger btn-sm" onClick={() => void handleDeleteTemplate(tpl.id)}>
+                            <Trash2 size={12} />
+                          </button>
+                        </div>
+                      </td>
+                    </tr>
+                  ))
+                )}
+              </tbody>
+            </table>
           </div>
         </div>
       )}
@@ -774,7 +1388,7 @@ export function PublishPage({ onToast }: { onToast: (msg: string) => void }) {
       {subTab === 'accounts' && (
         <div className="card">
           <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: 12 }}>
-            <div style={{ fontWeight: 600 }}>已绑定的发布账号</div>
+            <div style={{ fontWeight: 600 }}>已绑定发布账号</div>
             <button className="btn btn-primary btn-sm" onClick={() => setShowAddModal(true)}>
               <Plus size={13} /> 扫码添加账号
             </button>
@@ -783,18 +1397,17 @@ export function PublishPage({ onToast }: { onToast: (msg: string) => void }) {
             <table>
               <thead>
                 <tr>
-                  <th>账号名称</th>
                   <th>平台</th>
-                  <th>状态</th>
-                  <th>Cookie 文件</th>
+                  <th>账号名称</th>
+                  <th>Cookie 状态</th>
                   <th>操作</th>
                 </tr>
               </thead>
               <tbody>
                 {accounts.length === 0 ? (
                   <tr>
-                    <td colSpan={5} style={{ textAlign: 'center', color: 'var(--text-muted)' }}>
-                      暂无发布账号，点击右上角“扫码添加账号”即可绑定。
+                    <td colSpan={4} style={{ textAlign: 'center', color: 'var(--text-muted)' }}>
+                      暂无发布账号，点击右上角扫码绑定
                     </td>
                   </tr>
                 ) : (
@@ -802,14 +1415,13 @@ export function PublishPage({ onToast }: { onToast: (msg: string) => void }) {
                     const meta = getPlatformMeta(acc.type);
                     return (
                       <tr key={acc.id}>
-                        <td>{acc.name}</td>
                         <td><span className={`badge ${meta.badge}`}>{meta.label}</span></td>
+                        <td style={{ fontWeight: 600 }}>{acc.name}</td>
                         <td>
                           <span className={`badge ${acc.status === 1 ? 'badge-green' : 'badge-red'}`}>
-                            {acc.status === 1 ? '正常' : '已失效'}
+                            {acc.status === 1 ? '正常' : '失效/待重登'}
                           </span>
                         </td>
-                        <td style={{ fontSize: 12, color: 'var(--text-muted)' }}>{acc.filePath}</td>
                         <td>
                           <button className="btn btn-danger btn-sm" onClick={() => void handleDeleteAccount(acc)}>
                             <Trash2 size={13} /> 删除
@@ -829,19 +1441,9 @@ export function PublishPage({ onToast }: { onToast: (msg: string) => void }) {
         <div className="card">
           <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: 12 }}>
             <div style={{ fontWeight: 600 }}>已上传视频素材</div>
-            <div>
-              <input
-                ref={fileInputRef}
-                type="file"
-                accept="video/*"
-                multiple
-                style={{ display: 'none' }}
-                onChange={(e) => void handleUploadMaterial(e.target.files)}
-              />
-              <button className="btn btn-primary btn-sm" disabled={uploading} onClick={() => fileInputRef.current?.click()}>
-                <Upload size={13} /> {uploading ? '上传中...' : '上传视频'}
-              </button>
-            </div>
+            <button className="btn btn-primary btn-sm" disabled={uploading} onClick={() => fileInputRef.current?.click()}>
+              <Upload size={13} /> {uploading ? '上传中...' : '上传视频'}
+            </button>
           </div>
           <div className="table-wrap">
             <table>
@@ -856,9 +1458,7 @@ export function PublishPage({ onToast }: { onToast: (msg: string) => void }) {
               <tbody>
                 {files.length === 0 ? (
                   <tr>
-                    <td colSpan={4} style={{ textAlign: 'center', color: 'var(--text-muted)' }}>
-                      暂无视频素材
-                    </td>
+                    <td colSpan={4} style={{ textAlign: 'center', color: 'var(--text-muted)' }}>暂无视频素材</td>
                   </tr>
                 ) : (
                   files.map((f) => (
@@ -866,7 +1466,18 @@ export function PublishPage({ onToast }: { onToast: (msg: string) => void }) {
                       <td>{f.filename}</td>
                       <td>{f.filesize} MB</td>
                       <td>{f.upload_time}</td>
-                      <td>
+                      <td style={{ display: 'flex', gap: 6 }}>
+                        <button
+                          className="btn btn-sm"
+                          onClick={() => {
+                            if (!videoDrafts.some((d) => d.filePath === f.file_path)) {
+                              toggleVideoFile(f);
+                            }
+                            setSubTab('publish');
+                          }}
+                        >
+                          加入批量发布
+                        </button>
                         <button className="btn btn-danger btn-sm" onClick={() => void handleDeleteFile(f)}>
                           <Trash2 size={13} /> 删除
                         </button>
@@ -903,9 +1514,7 @@ export function PublishPage({ onToast }: { onToast: (msg: string) => void }) {
               <tbody>
                 {history.length === 0 ? (
                   <tr>
-                    <td colSpan={6} style={{ textAlign: 'center', color: 'var(--text-muted)' }}>
-                      暂无发布历史记录
-                    </td>
+                    <td colSpan={6} style={{ textAlign: 'center', color: 'var(--text-muted)' }}>暂无发布历史记录</td>
                   </tr>
                 ) : (
                   history.map((item) => (
@@ -932,6 +1541,61 @@ export function PublishPage({ onToast }: { onToast: (msg: string) => void }) {
                 )}
               </tbody>
             </table>
+          </div>
+        </div>
+      )}
+
+      {showTplModal && (
+        <div className="modal-backdrop">
+          <div className="modal-card" style={{ maxWidth: 500 }}>
+            <div className="modal-header">
+              <div style={{ fontWeight: 600 }}>{editingTplId ? '编辑标题模板' : '新增标题模板'}</div>
+              <button className="btn btn-sm" onClick={() => setShowTplModal(false)}>关闭</button>
+            </div>
+            <div className="modal-body" style={{ display: 'grid', gap: 12 }}>
+              <div>
+                <label style={{ display: 'block', fontSize: 13, fontWeight: 600, marginBottom: 6 }}>模板分类</label>
+                <select className="select" value={tplFormCategory} onChange={(e) => setTplFormCategory(e.target.value)}>
+                  {TEMPLATE_CATEGORIES.filter((c) => c !== '全部').map((c) => (
+                    <option key={c} value={c}>{c}</option>
+                  ))}
+                </select>
+              </div>
+              <div>
+                <label style={{ display: 'block', fontSize: 13, fontWeight: 600, marginBottom: 6 }}>标题/文案内容</label>
+                <textarea
+                  className="textarea"
+                  rows={3}
+                  value={tplFormTitle}
+                  onChange={(e) => setTplFormTitle(e.target.value)}
+                  placeholder="请输入常用爆款标题内容"
+                />
+              </div>
+              <div>
+                <label style={{ display: 'block', fontSize: 13, fontWeight: 600, marginBottom: 6 }}>配套话题（逗号分隔）</label>
+                <input
+                  className="input"
+                  value={tplFormTags}
+                  onChange={(e) => setTplFormTags(e.target.value)}
+                  placeholder="例如：干货分享, 效率工具"
+                />
+              </div>
+              <div>
+                <label style={{ display: 'block', fontSize: 13, fontWeight: 600, marginBottom: 6 }}>适用场景备注（选填）</label>
+                <input
+                  className="input"
+                  value={tplFormNote}
+                  onChange={(e) => setTplFormNote(e.target.value)}
+                  placeholder="例如：适合软件测评开箱"
+                />
+              </div>
+            </div>
+            <div className="modal-footer">
+              <button className="btn" onClick={() => setShowTplModal(false)}>取消</button>
+              <button className="btn btn-primary" disabled={savingTpl} onClick={() => void handleSaveTemplate()}>
+                {savingTpl ? '保存中...' : '保存模板'}
+              </button>
+            </div>
           </div>
         </div>
       )}
@@ -969,9 +1633,9 @@ export function PublishPage({ onToast }: { onToast: (msg: string) => void }) {
               </div>
 
               {sseState !== 'idle' && (
-                <div style={{ textAlign: 'center', padding: 12, background: '#f8fafc', borderRadius: 8 }}>
+                <div style={{ textAlign: 'center', padding: 14, background: '#f8fafc', borderRadius: 10 }}>
                   {qrSrc && sseState === 'qr' && (
-                    <img src={qrSrc} alt="登录二维码" style={{ width: 180, height: 180, objectFit: 'contain', marginBottom: 8 }} />
+                    <img src={qrSrc} alt="登录二维码" style={{ width: 185, height: 185, objectFit: 'contain', margin: '0 auto 8px', background: '#fff', padding: 8, borderRadius: 10, border: '1px solid #e2e8f0' }} />
                   )}
                   <div style={{ fontSize: 13, color: sseState === 'error' ? '#dc2626' : sseState === 'success' ? '#16a34a' : '#334155' }}>
                     {sseMsg}

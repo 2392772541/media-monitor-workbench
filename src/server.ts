@@ -8,7 +8,7 @@ import { closeDb, getDb } from './db/database.js';
 import { closeAllBrowsers } from './browser/profileManager.js';
 import { startScheduler, stopScheduler } from './scheduler/taskRunner.js';
 import { registerRoutes } from './api/routes.js';
-import { stopSauBackend } from './services/sauBridge.js';
+import { getSauStatus, startSauBackend, stopSauBackend } from './services/sauBridge.js';
 import { log } from './utils/logger.js';
 
 async function bootstrap() {
@@ -43,8 +43,8 @@ async function bootstrap() {
       wildcard: false,
     });
     app.setNotFoundHandler((req, reply) => {
-      if (req.url.startsWith('/api/')) {
-        return reply.code(404).send({ error: 'API endpoint not found' });
+      if (req.url.startsWith('/api/') || req.url.startsWith('/assets/')) {
+        return reply.code(404).send({ error: 'Not found' });
       }
       const indexPath = path.join(PATHS.frontendDist, 'index.html');
       if (fs.existsSync(indexPath)) {
@@ -65,6 +65,18 @@ async function bootstrap() {
 
   await app.listen({ host: HOST, port: PORT });
   startScheduler();
+  // 一体化启动：若发布引擎已安装且尚未运行，后台静默拉起（避免双开窗口）
+  void (async () => {
+    try {
+      const st = await getSauStatus();
+      if (st.installed && !st.running) {
+        const res = await startSauBackend();
+        log('INFO', 'server', `Auto-start SAU engine: ${res.message}`);
+      }
+    } catch (err) {
+      log('WARN', 'server', `Auto-start SAU skipped: ${(err as Error).message}`);
+    }
+  })();
   log('INFO', 'server', `Workbench listening on http://${HOST}:${PORT}`);
 }
 

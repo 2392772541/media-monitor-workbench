@@ -10,3 +10,16 @@ tests/artifacts/
 *.db-wal
 *.db-shm
 .env
+
+# Embedded SAU Python engine runtime & secrets
+sau-engine/.venv/
+sau-engine/__pycache__/
+sau-engine/**/__pycache__/
+sau-engine/.pytest_cache/
+sau-engine/cookiesFile/
+sau-engine/cookies/
+sau-engine/videoFile/
+sau-engine/videos/
+sau-engine/logs/
+sau-engine/conf.py
+sau-engine/*.egg-info/

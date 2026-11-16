@@ -22,12 +22,17 @@ function isSauProjectDir(dir: string): boolean {
 }
 
 export function getDefaultInstallSauDir(): string {
-  return path.resolve(PROJECT_ROOT, '..', 'social-auto-upload');
+  return path.join(PROJECT_ROOT, 'sau-engine');
 }
 
 export function resolveSauDir(): string {
   const envDir = (process.env.MMW_SAU_DIR || '').trim();
   if (envDir) return path.resolve(envDir);
+
+  const embeddedDir = path.join(PROJECT_ROOT, 'sau-engine');
+  if (isSauProjectDir(embeddedDir)) {
+    return embeddedDir;
+  }
 
   try {
     const row = getDb()
@@ -41,6 +46,7 @@ export function resolveSauDir(): string {
   }
 
   const candidates = [
+    embeddedDir,
     path.join(PROJECT_ROOT, 'social-auto-upload'),
     getDefaultInstallSauDir(),
     'D:\\HeyGem\\social-auto-upload',
@@ -67,7 +73,11 @@ export function setConfiguredSauDir(dir: string): string {
 
 function getSauPaths() {
   const sauDir = resolveSauDir();
-  const pythonExe = path.join(sauDir, '.venv', 'Scripts', 'python.exe');
+  const candidates = [
+    path.join(sauDir, '.venv', 'Scripts', 'python.exe'),
+    'D:\\HeyGem\\social-auto-upload\\.venv\\Scripts\\python.exe',
+  ];
+  const pythonExe = candidates.find((p) => fs.existsSync(p)) || candidates[0];
   const backendScript = path.join(sauDir, 'sau_backend.py');
   return { sauDir, pythonExe, backendScript };
 }

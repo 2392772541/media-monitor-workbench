@@ -70,9 +70,11 @@ powershell -NoProfile -ExecutionPolicy Bypass -File "scripts\unregister-autostar
 - 独立浏览器隔离验证：`node tests/verify-browser-isolation.mjs`
 - 全流程真实 UI 端到端测试：`node tests/e2e-real-workbench.mjs`
 
-## 七、视频一键发布集成（SAU）
+## 七、一体化视频批量发布与标题文案库（已内置 `sau-engine`）
 
-工作台左侧菜单 **「视频发布」** 已原生整合 [social-auto-upload](https://github.com/2392772541/social-auto-upload) 发布引擎，支持抖音、快手、小红书、微信视频号的扫码账号管理、视频素材上传与立即/定时发布：
+本仓库已把原 `social-auto-upload` 发布引擎直接整合至 `sau-engine/` 目录，无需再开两个服务：
 
-- **自动探测路径**：依次查找环境变量 `MMW_SAU_DIR` → 数据库已保存路径 → `./social-auto-upload` → `../social-auto-upload` → `D:\HeyGem\social-auto-upload`。
-- **新电脑一键安装**：如果新电脑尚未安装发布引擎，打开工作台 **「视频发布」** 页面后直接点击 **「一键拉取并安装」**，工作台会自动克隆配套仓库并配好 Python `.venv` 环境与 Chromium 内核（需本机有 Python 3.10~3.12 与 Git）。
+- **单入口一键全启**：运行 `启动工作台.cmd` 打开 `http://127.0.0.1:18910` 后，工作台后台会自动静默拉起内置发布引擎；运行 `停止工作台.cmd` 时会一并关闭所有托管进程。
+- **多平台批量发布矩阵**：支持抖音、快手、小红书、微信视频号同时勾选账号、拖拽批量上传视频、按视频独立或统一配置标题/话题、并生成定时排期预览。
+- **独立标题文案库 & 发布历史**：内置 SQLite 标题文案模板库（按分类增删改查、批量顺序/随机分配）以及发布历史记录与一键复用重发。
+- **新电脑首次使用**：如果尚未配置 Python 环境，在工作台 **「视频发布」** 页面直接点击 **「一键配置发布环境」** 即可自动完成初始化。

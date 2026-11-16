@@ -546,6 +546,11 @@ export function registerRoutes(app: FastifyInstance, shutdownHandler: () => Prom
     return reply.code(res.status).send(res.payload);
   });
 
+  app.post('/api/sau/post-video-batch', async (req, reply) => {
+    const res = await proxySauJson('POST', '/postVideoBatch', req.body, 300000);
+    return reply.code(res.status).send(res.payload);
+  });
+
   app.get('/api/sau/publish-history', async (req, reply) => {
     const limit = Number((req.query as { limit?: string })?.limit || 50) || 50;
     const res = await proxySauJson('GET', `/getPublishHistory?limit=${limit}`);
@@ -557,6 +562,29 @@ export function registerRoutes(app: FastifyInstance, shutdownHandler: () => Prom
       return reply.code(400).send({ code: 400, msg: '非法记录 ID', data: null });
     }
     const res = await proxySauJson('GET', `/deletePublishRecord?id=${encodeURIComponent(req.params.id)}`);
+    return reply.code(res.status).send(res.payload);
+  });
+
+  app.get('/api/sau/title-templates', async (req, reply) => {
+    const q = (req.query as { category?: string; keyword?: string }) || {};
+    const qs = new URLSearchParams();
+    if (q.category) qs.set('category', q.category);
+    if (q.keyword) qs.set('keyword', q.keyword);
+    const suffix = qs.toString() ? `?${qs.toString()}` : '';
+    const res = await proxySauJson('GET', `/getTitleTemplates${suffix}`);
+    return reply.code(res.status).send(res.payload);
+  });
+
+  app.post('/api/sau/title-templates', async (req, reply) => {
+    const res = await proxySauJson('POST', '/saveTitleTemplate', req.body);
+    return reply.code(res.status).send(res.payload);
+  });
+
+  app.delete<{ Params: { id: string } }>('/api/sau/title-templates/:id', async (req, reply) => {
+    if (!/^\d+$/.test(req.params.id)) {
+      return reply.code(400).send({ code: 400, msg: '非法模板 ID', data: null });
+    }
+    const res = await proxySauJson('GET', `/deleteTitleTemplate?id=${encodeURIComponent(req.params.id)}`);
     return reply.code(res.status).send(res.payload);
   });
 
