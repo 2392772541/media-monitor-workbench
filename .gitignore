@@ -1,0 +1,12 @@
+node_modules/
+dist/
+frontend/dist/
+browser-profiles/
+data/
+logs/
+backups/
+tests/artifacts/
+*.db
+*.db-wal
+*.db-shm
+.env

@@ -1,0 +1,38 @@
+{
+  "name": "media-monitor-workbench",
+  "version": "1.0.0",
+  "description": "个人自媒体内容监控工作台 V1.0（本地运行、独立浏览器隔离）",
+  "main": "dist/server.js",
+  "type": "module",
+  "directories": {
+    "doc": "docs",
+    "test": "tests"
+  },
+  "scripts": {
+    "dev": "tsx watch src/server.ts",
+    "start": "tsx src/server.ts",
+    "build:server": "tsc",
+    "build:ui": "npm --prefix frontend run build",
+    "build": "npm run build:server && npm run build:ui",
+    "typecheck": "tsc --noEmit",
+    "test": "node --test tests/*.test.mjs"
+  },
+  "keywords": [],
+  "author": "",
+  "license": "ISC",
+  "dependencies": {
+    "@fastify/cors": "^11.4.3",
+    "@fastify/static": "^10.1.11",
+    "@mozilla/readability": "^0.6.0",
+    "fast-xml-parser": "^5.12.1",
+    "fastify": "^5.12.8",
+    "linkedom": "^0.18.15",
+    "playwright": "^1.65.1",
+    "undici": "^8.12.4"
+  },
+  "devDependencies": {
+    "@types/node": "^26.6.6",
+    "tsx": "^4.23.15",
+    "typescript": "^7.0.2"
+  }
+}

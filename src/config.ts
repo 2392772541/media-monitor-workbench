@@ -1,0 +1,67 @@
+import fs from 'node:fs';
+import path from 'node:path';
+
+export const PROJECT_ROOT = path.resolve(import.meta.dirname, '..');
+export const HOST = '127.0.0.1';
+export const PORT = Number(process.env.MMW_PORT || 18910);
+
+export const PATHS = {
+  dataDir: path.join(PROJECT_ROOT, 'data'),
+  dbFile: process.env.MMW_DB_PATH || path.join(PROJECT_ROOT, 'data', 'workbench.db'),
+  profilesRoot: path.join(PROJECT_ROOT, 'browser-profiles'),
+  logsDir: path.join(PROJECT_ROOT, 'logs'),
+  backupsDir: path.join(PROJECT_ROOT, 'backups'),
+  frontendDist: path.join(PROJECT_ROOT, 'frontend', 'dist'),
+};
+
+export const PLATFORM_PROFILES = ['douyin', 'kuaishou', 'wechat-channels', 'x', 'youtube', 'other'] as const;
+export type ProfilePlatform = (typeof PLATFORM_PROFILES)[number];
+
+export function ensureProjectDirs(): void {
+  for (const dir of [PATHS.dataDir, PATHS.profilesRoot, PATHS.logsDir, PATHS.backupsDir]) {
+    fs.mkdirSync(dir, { recursive: true });
+  }
+  for (const p of PLATFORM_PROFILES) {
+    fs.mkdirSync(path.join(PATHS.profilesRoot, p), { recursive: true });
+  }
+}
+
+export function getSafeProfileDir(platform: ProfilePlatform): string {
+  const target = path.resolve(PATHS.profilesRoot, platform);
+  const rootResolved = path.resolve(PATHS.profilesRoot);
+  if (!target.startsWith(rootResolved + path.sep)) {
+    throw new Error(`Unsafe browser profile path rejected: ${target}`);
+  }
+  // Explicit guard against touching daily Chrome User Data
+  const lower = target.toLowerCase();
+  if (lower.includes('google\\chrome\\user data') || lower.includes('google/chrome/user data')) {
+    throw new Error('Forbidden: cannot touch daily Chrome User Data directory.');
+  }
+  fs.mkdirSync(target, { recursive: true });
+  return target;
+}
+
+export function resolveChromiumExecutable(): string | undefined {
+  if (process.env.MMW_CHROMIUM_PATH && fs.existsSync(process.env.MMW_CHROMIUM_PATH)) {
+    return process.env.MMW_CHROMIUM_PATH;
+  }
+  const localAppData = process.env.LOCALAPPDATA;
+  if (!localAppData) return undefined;
+  const msPlaywright = path.join(localAppData, 'ms-playwright');
+  if (!fs.existsSync(msPlaywright)) return undefined;
+
+  const dirs = fs
+    .readdirSync(msPlaywright, { withFileTypes: true })
+    .filter((d) => d.isDirectory() && /^chromium-\d+$/.test(d.name))
+    .map((d) => ({
+      name: d.name,
+      num: Number(d.name.replace('chromium-', '')),
+    }))
+    .sort((a, b) => b.num - a.num);
+
+  for (const d of dirs) {
+    const exe = path.join(msPlaywright, d.name, 'chrome-win64', 'chrome.exe');
+    if (fs.existsSync(exe)) return exe;
+  }
+  return undefined;
+}
