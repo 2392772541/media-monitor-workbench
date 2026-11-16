@@ -546,6 +546,20 @@ export function registerRoutes(app: FastifyInstance, shutdownHandler: () => Prom
     return reply.code(res.status).send(res.payload);
   });
 
+  app.get('/api/sau/publish-history', async (req, reply) => {
+    const limit = Number((req.query as { limit?: string })?.limit || 50) || 50;
+    const res = await proxySauJson('GET', `/getPublishHistory?limit=${limit}`);
+    return reply.code(res.status).send(res.payload);
+  });
+
+  app.delete<{ Params: { id: string } }>('/api/sau/publish-history/:id', async (req, reply) => {
+    if (!/^\d+$/.test(req.params.id)) {
+      return reply.code(400).send({ code: 400, msg: '非法记录 ID', data: null });
+    }
+    const res = await proxySauJson('GET', `/deletePublishRecord?id=${encodeURIComponent(req.params.id)}`);
+    return reply.code(res.status).send(res.payload);
+  });
+
   app.register(async (scoped) => {
     scoped.addContentTypeParser('multipart/form-data', (_req, payload, done) => {
       done(null, payload);

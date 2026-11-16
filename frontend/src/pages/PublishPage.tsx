@@ -1,5 +1,5 @@
 import { useEffect, useRef, useState } from 'react';
-import { Play, Square, RefreshCw, Plus, Trash2, Upload, Send, ShieldCheck } from 'lucide-react';
+import { Play, Square, RefreshCw, Plus, Trash2, Upload, Send, ShieldCheck, Clock, ExternalLink, RotateCcw } from 'lucide-react';
 import { apiRequest } from '../api';
 
 interface SauStatus {
@@ -30,6 +30,28 @@ interface SauFile {
   file_path: string;
 }
 
+interface SauPublishRecord {
+  id: number;
+  platform_type: number;
+  platform_name: string;
+  title: string;
+  file_list: string[];
+  account_list: string[];
+  tags: string[];
+  enable_timer: number;
+  schedule_summary: string;
+  is_draft: number;
+  status: string;
+  message: string;
+  created_at: string;
+}
+
+const TITLE_TEMPLATES = [
+  { label: '干货拆解', title: '【干货必看】3分钟讲清楚核心逻辑，建议先收藏再慢慢看！', tags: '干货分享, 效率提升' },
+  { label: '好物测评', title: '真实体验一周后才敢说实话：到底值不值得入手？', tags: '好物推荐, 真实测评' },
+  { label: '教程实操', title: '保姆级手把手教学，跟着做一遍就能学会！', tags: '教程, 新手必看' },
+];
+
 const PLATFORM_OPTIONS = [
   { type: 3, label: '抖音', badge: 'badge-red' },
   { type: 4, label: '快手', badge: 'badge-amber' },
@@ -42,10 +64,11 @@ function getPlatformMeta(type: number) {
 }
 
 export function PublishPage({ onToast }: { onToast: (msg: string) => void }) {
-  const [subTab, setSubTab] = useState<'publish' | 'accounts' | 'materials'>('publish');
+  const [subTab, setSubTab] = useState<'publish' | 'accounts' | 'materials' | 'history'>('publish');
   const [status, setStatus] = useState<SauStatus | null>(null);
   const [accounts, setAccounts] = useState<SauAccount[]>([]);
   const [files, setFiles] = useState<SauFile[]>([]);
+  const [history, setHistory] = useState<SauPublishRecord[]>([]);
   const [loading, setLoading] = useState(false);
   const [validating, setValidating] = useState(false);
   const [engineBusy, setEngineBusy] = useState(false);
@@ -116,9 +139,16 @@ export function PublishPage({ onToast }: { onToast: (msg: string) => void }) {
         }));
         setAccounts(mappedAccounts);
         setFiles(fileRes.data || []);
+        try {
+          const histRes = await apiRequest<{ code: number; data: SauPublishRecord[] }>('/api/sau/publish-history');
+          setHistory(histRes.data || []);
+        } catch {
+          setHistory([]);
+        }
       } else {
         setAccounts([]);
         setFiles([]);
+        setHistory([]);
       }
     } catch (err) {
       if (!silent) onToast((err as Error).message);
@@ -383,10 +413,34 @@ export function PublishPage({ onToast }: { onToast: (msg: string) => void }) {
         }),
       });
       onToast(res.msg || '视频发布任务已完成提交');
+      await loadAll(true);
     } catch (err) {
       onToast((err as Error).message);
+      await loadAll(true);
     } finally {
       setPublishing(false);
+    }
+  };
+
+  const handleReuseHistory = (item: SauPublishRecord) => {
+    setPlatformType(item.platform_type || 3);
+    setSelectedAccounts(item.account_list || []);
+    setSelectedFiles(item.file_list || []);
+    setTitle(item.title || '');
+    setTagsText((item.tags || []).join(', '));
+    setEnableTimer(Boolean(item.enable_timer));
+    setIsDraft(Boolean(item.is_draft));
+    setSubTab('publish');
+    onToast('已把历史任务参数回填到发布表单');
+  };
+
+  const handleDeleteHistory = async (id: number) => {
+    try {
+      await apiRequest(`/api/sau/publish-history/${id}`, { method: 'DELETE' });
+      setHistory((prev) => prev.filter((item) => item.id !== id));
+      onToast('历史记录已删除');
+    } catch (err) {
+      onToast((err as Error).message);
     }
   };
 
@@ -442,6 +496,14 @@ export function PublishPage({ onToast }: { onToast: (msg: string) => void }) {
           <button className="btn btn-sm" disabled={validating || !status?.running} onClick={() => void handleValidateAccounts()}>
             {validating ? '检测中...' : '检测账号 Cookie'}
           </button>
+          <a
+            href={status?.frontendUrl || 'http://127.0.0.1:5173/'}
+            target="_blank"
+            rel="noreferrer"
+            className="btn btn-sm"
+          >
+            <ExternalLink size={13} /> 打开新版发布台
+          </a>
         </div>
       </div>
 
@@ -485,6 +547,12 @@ export function PublishPage({ onToast }: { onToast: (msg: string) => void }) {
           onClick={() => setSubTab('materials')}
         >
           视频素材 ({files.length})
+        </button>
+        <button
+          className={`btn ${subTab === 'history' ? 'btn-primary' : ''}`}
+          onClick={() => setSubTab('history')}
+        >
+          <Clock size={14} /> 发布历史 ({history.length})
         </button>
       </div>
 
@@ -585,7 +653,25 @@ export function PublishPage({ onToast }: { onToast: (msg: string) => void }) {
 
           <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 12 }}>
             <div>
-              <label style={{ display: 'block', fontSize: 13, fontWeight: 600, marginBottom: 6 }}>视频标题</label>
+              <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: 6 }}>
+                <label style={{ fontSize: 13, fontWeight: 600 }}>视频标题</label>
+                <div style={{ display: 'flex', gap: 4, flexWrap: 'wrap' }}>
+                  {TITLE_TEMPLATES.map((tpl) => (
+                    <button
+                      key={tpl.label}
+                      type="button"
+                      className="btn btn-sm"
+                      style={{ padding: '2px 7px', fontSize: 11 }}
+                      onClick={() => {
+                        setTitle(tpl.title);
+                        setTagsText(tpl.tags);
+                      }}
+                    >
+                      {tpl.label}
+                    </button>
+                  ))}
+                </div>
+              </div>
               <input
                 className="input"
                 value={title}
@@ -782,6 +868,62 @@ export function PublishPage({ onToast }: { onToast: (msg: string) => void }) {
                       <td>{f.upload_time}</td>
                       <td>
                         <button className="btn btn-danger btn-sm" onClick={() => void handleDeleteFile(f)}>
+                          <Trash2 size={13} /> 删除
+                        </button>
+                      </td>
+                    </tr>
+                  ))
+                )}
+              </tbody>
+            </table>
+          </div>
+        </div>
+      )}
+
+      {subTab === 'history' && (
+        <div className="card">
+          <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: 12 }}>
+            <div style={{ fontWeight: 600 }}>最近发布记录（支持一键复用重发）</div>
+            <button className="btn btn-sm" onClick={() => void loadAll(true)}>
+              <RefreshCw size={13} /> 刷新记录
+            </button>
+          </div>
+          <div className="table-wrap">
+            <table>
+              <thead>
+                <tr>
+                  <th>时间</th>
+                  <th>平台</th>
+                  <th>标题</th>
+                  <th>策略</th>
+                  <th>状态</th>
+                  <th>操作</th>
+                </tr>
+              </thead>
+              <tbody>
+                {history.length === 0 ? (
+                  <tr>
+                    <td colSpan={6} style={{ textAlign: 'center', color: 'var(--text-muted)' }}>
+                      暂无发布历史记录
+                    </td>
+                  </tr>
+                ) : (
+                  history.map((item) => (
+                    <tr key={item.id}>
+                      <td style={{ fontSize: 12 }}>{item.created_at}</td>
+                      <td>{item.platform_name}</td>
+                      <td>{item.title}</td>
+                      <td style={{ fontSize: 12 }}>{item.schedule_summary}</td>
+                      <td>
+                        <span className={`badge ${item.status === 'success' ? 'badge-green' : 'badge-red'}`}>
+                          {item.status === 'success' ? '已提交' : '失败'}
+                        </span>
+                      </td>
+                      <td style={{ display: 'flex', gap: 6 }}>
+                        <button className="btn btn-sm" onClick={() => handleReuseHistory(item)}>
+                          <RotateCcw size={13} /> 复用参数
+                        </button>
+                        <button className="btn btn-danger btn-sm" onClick={() => void handleDeleteHistory(item.id)}>
                           <Trash2 size={13} /> 删除
                         </button>
                       </td>
