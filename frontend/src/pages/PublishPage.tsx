@@ -289,6 +289,12 @@ export function PublishPage({ onToast }: { onToast: (msg: string) => void }) {
     es.onmessage = (evt) => {
       const raw = (evt.data || '').trim();
       if (!raw) return;
+      if (raw.startsWith('ERROR:')) {
+        clearSse();
+        setSseState('error');
+        setSseMsg(raw.slice(6) || '登录失败，请重试');
+        return;
+      }
       if (raw === '200') {
         clearSse();
         setSseState('success');
