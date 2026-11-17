@@ -41,6 +41,11 @@ async function bootstrap() {
       root: PATHS.frontendDist,
       prefix: '/',
       wildcard: false,
+      setHeaders(res, filePath) {
+        if (filePath.endsWith('index.html')) {
+          res.header('Cache-Control', 'no-store, no-cache, must-revalidate');
+        }
+      },
     });
     app.setNotFoundHandler((req, reply) => {
       if (req.url.startsWith('/api/') || req.url.startsWith('/assets/')) {
@@ -48,7 +53,10 @@ async function bootstrap() {
       }
       const indexPath = path.join(PATHS.frontendDist, 'index.html');
       if (fs.existsSync(indexPath)) {
-        return reply.type('text/html; charset=utf-8').send(fs.readFileSync(indexPath, 'utf8'));
+        return reply
+          .header('Cache-Control', 'no-store, no-cache, must-revalidate')
+          .type('text/html; charset=utf-8')
+          .send(fs.readFileSync(indexPath, 'utf8'));
       }
       return reply.code(404).send('Frontend not built');
     });

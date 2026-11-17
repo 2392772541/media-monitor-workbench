@@ -214,7 +214,13 @@ export function PublishPage({ onToast }: { onToast: (msg: string) => void }) {
 
   useEffect(() => {
     void loadAll();
-    return () => clearSse();
+    const retryTimer = window.setTimeout(() => {
+      void loadAll(true);
+    }, 2200);
+    return () => {
+      window.clearTimeout(retryTimer);
+      clearSse();
+    };
   }, []);
 
   const handleStartEngine = async () => {
@@ -784,29 +790,31 @@ export function PublishPage({ onToast }: { onToast: (msg: string) => void }) {
 
   return (
     <div>
-      <div
-        className="card"
-        style={{
-          marginBottom: 16,
-          display: 'flex',
-          justifyContent: 'space-between',
-          alignItems: 'center',
-          gap: 12,
-          flexWrap: 'wrap',
-          background: 'linear-gradient(135deg, #ffffff 0%, #f8fafc 100%)',
-        }}
-      >
-        <div style={{ display: 'flex', alignItems: 'center', gap: 10 }}>
-          <ShieldCheck size={20} color={status?.running ? '#16a34a' : '#d97706'} />
+      <div className="publish-hero">
+        <div style={{ display: 'flex', alignItems: 'center', gap: 12 }}>
+          <div
+            style={{
+              width: 42,
+              height: 42,
+              borderRadius: 12,
+              background: status?.running ? 'var(--success-soft)' : 'var(--warn-soft)',
+              display: 'flex',
+              alignItems: 'center',
+              justifyContent: 'center',
+              flexShrink: 0,
+            }}
+          >
+            <ShieldCheck size={22} color={status?.running ? '#16a34a' : '#d97706'} />
+          </div>
           <div>
-            <div style={{ fontWeight: 700 }}>
+            <div style={{ fontWeight: 700, fontSize: 15.5, display: 'flex', alignItems: 'center', gap: 8, flexWrap: 'wrap' }}>
               一体化视频发布引擎（已融合至本机工作台）
-              <span className={`badge ${status?.running ? 'badge-green' : 'badge-amber'}`} style={{ marginLeft: 8 }}>
+              <span className={`badge ${status?.running ? 'badge-green' : 'badge-amber'}`}>
                 {status?.running ? '随工作台运行中' : '未启动'}
               </span>
             </div>
-            <div style={{ fontSize: 12, color: 'var(--text-muted)', marginTop: 2 }}>
-              内置目录：{status?.sauDir || '自动检测中...'} · 账号 {accounts.length} 个 · 视频 {files.length} 条 · 标题模板 {templates.length} 套
+            <div style={{ fontSize: 12, color: 'var(--text-muted)', marginTop: 3 }}>
+              内置引擎：{status?.sauDir || '自动检测中...'} · 账号 {accounts.length} 个 · 视频 {files.length} 条 · 标题模板 {templates.length} 套
             </div>
           </div>
         </div>
@@ -856,20 +864,20 @@ export function PublishPage({ onToast }: { onToast: (msg: string) => void }) {
         </div>
       )}
 
-      <div style={{ display: 'flex', gap: 8, marginBottom: 16, flexWrap: 'wrap' }}>
-        <button className={`btn ${subTab === 'publish' ? 'btn-primary' : ''}`} onClick={() => setSubTab('publish')}>
+      <div className="tab-pill-bar">
+        <button className={`tab-pill ${subTab === 'publish' ? 'active' : ''}`} onClick={() => setSubTab('publish')}>
           <Layers size={14} /> 批量视频发布
         </button>
-        <button className={`btn ${subTab === 'titles' ? 'btn-primary' : ''}`} onClick={() => setSubTab('titles')}>
+        <button className={`tab-pill ${subTab === 'titles' ? 'active' : ''}`} onClick={() => setSubTab('titles')}>
           <BookOpen size={14} /> 标题文案库 ({templates.length})
         </button>
-        <button className={`btn ${subTab === 'accounts' ? 'btn-primary' : ''}`} onClick={() => setSubTab('accounts')}>
+        <button className={`tab-pill ${subTab === 'accounts' ? 'active' : ''}`} onClick={() => setSubTab('accounts')}>
           发布账号 ({accounts.length})
         </button>
-        <button className={`btn ${subTab === 'materials' ? 'btn-primary' : ''}`} onClick={() => setSubTab('materials')}>
+        <button className={`tab-pill ${subTab === 'materials' ? 'active' : ''}`} onClick={() => setSubTab('materials')}>
           视频素材 ({files.length})
         </button>
-        <button className={`btn ${subTab === 'history' ? 'btn-primary' : ''}`} onClick={() => setSubTab('history')}>
+        <button className={`tab-pill ${subTab === 'history' ? 'active' : ''}`} onClick={() => setSubTab('history')}>
           <Clock size={14} /> 发布历史 ({history.length})
         </button>
       </div>
@@ -899,25 +907,12 @@ export function PublishPage({ onToast }: { onToast: (msg: string) => void }) {
               </div>
             </div>
 
-            {accounts.length === 0 ? (
-              <div style={{ padding: 16, background: 'var(--surface-muted)', borderRadius: 8, fontSize: 13, color: 'var(--text-muted)' }}>
-                还没有绑定任何平台账号，请先点击右上角「扫码添加账号」。
-              </div>
-            ) : (
-              <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(230px, 1fr))', gap: 10 }}>
+              <div className="platform-grid">
                 {PLATFORM_OPTIONS.map((plat) => {
                   const pAccounts = accounts.filter((a) => a.type === plat.type);
                   return (
-                    <div
-                      key={plat.type}
-                      style={{
-                        border: '1px solid var(--border)',
-                        borderRadius: 10,
-                        padding: 12,
-                        background: 'var(--surface-muted)',
-                      }}
-                    >
-                      <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: 8 }}>
+                    <div key={plat.type} className="platform-box">
+                      <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: 10 }}>
                         <span className={`badge ${plat.badge}`}>{plat.label}</span>
                         <span style={{ fontSize: 11, color: 'var(--text-muted)' }}>{pAccounts.length} 个号</span>
                       </div>
@@ -958,7 +953,6 @@ export function PublishPage({ onToast }: { onToast: (msg: string) => void }) {
                   );
                 })}
               </div>
-            )}
           </div>
 
           <div className="card">
@@ -1355,7 +1349,7 @@ export function PublishPage({ onToast }: { onToast: (msg: string) => void }) {
                       </td>
                       <td style={{ fontSize: 12, color: 'var(--text-muted)' }}>{tpl.note || '-'}</td>
                       <td>
-                        <div style={{ display: 'flex', gap: 6, flexWrap: 'wrap' }}>
+                        <div style={{ display: 'flex', gap: 6, flexWrap: 'nowrap', whiteSpace: 'nowrap' }}>
                           <button className="btn btn-primary btn-sm" onClick={() => handleApplyTemplateToGlobal(tpl)}>
                             去发布套用
                           </button>

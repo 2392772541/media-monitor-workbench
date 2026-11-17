@@ -1,5 +1,5 @@
 import { useEffect, useState } from 'react';
-import { LayoutDashboard, Globe2, Newspaper, Send, Monitor, ListChecks, Settings } from 'lucide-react';
+import { LayoutDashboard, Globe2, Newspaper, Send, Monitor, ListChecks, Settings, Sparkles } from 'lucide-react';
 import { OverviewPage } from './pages/OverviewPage';
 import { SourcesPage } from './pages/SourcesPage';
 import { ContentsPage } from './pages/ContentsPage';
@@ -42,8 +42,13 @@ export function App() {
     <div className="app-shell">
       <aside className="sidebar">
         <div className="brand">
-          <div className="brand-title">自媒体监控工作台</div>
-          <div className="brand-sub">本地安全版 V1.0</div>
+          <div className="brand-logo">
+            <Sparkles size={19} />
+          </div>
+          <div>
+            <div className="brand-title">自媒体工作台</div>
+            <div className="brand-sub">监控 · 批量发布一体化</div>
+          </div>
         </div>
         <nav className="nav-list">
           {NAV_ITEMS.map((item) => {
@@ -63,16 +68,21 @@ export function App() {
         </nav>
         <div className="sidebar-footer">
           <div>服务绑定：127.0.0.1</div>
-          <div style={{ marginTop: 4 }}>
-            状态：{healthOk ? <span style={{ color: 'var(--success)' }}>● 后台运行中</span> : <span style={{ color: 'var(--danger)' }}>● 未连接</span>}
+          <div style={{ marginTop: 5 }}>
+            状态：{healthOk ? <span style={{ color: '#4ade80', fontWeight: 600 }}>● 后台运行中</span> : <span style={{ color: '#f87171', fontWeight: 600 }}>● 未连接</span>}
           </div>
         </div>
       </aside>
 
       <div className="main-area">
         <header className="topbar">
-          <div className="topbar-title">{activeLabel}</div>
-          <div style={{ fontSize: 12, color: 'var(--text-muted)' }}>主浏览器完全隔离 · 数据本地持久化</div>
+          <div className="topbar-inner">
+            <div className="topbar-title">{activeLabel}</div>
+            <div className="topbar-pill">
+              <span style={{ width: 7, height: 7, borderRadius: '50%', background: healthOk ? 'var(--success)' : 'var(--danger)' }} />
+              <span>主浏览器完全隔离 · 数据本地持久化</span>
+            </div>
+          </div>
         </header>
 
         <main className="page-body">
