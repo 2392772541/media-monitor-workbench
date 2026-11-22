@@ -18,6 +18,7 @@ test('URL platform recognition handles all target platforms', () => {
   assert.equal(recognizeSourceUrl('https://channels.weixin.qq.com/platform').platform, 'wechat-channels');
   assert.equal(recognizeSourceUrl('https://x.com/openai').platform, 'x');
   assert.equal(recognizeSourceUrl('https://www.youtube.com/@OpenAI').platform, 'youtube');
+  assert.equal(recognizeSourceUrl('https://www.xiaohongshu.com/user/profile/12345').platform, 'website');
   assert.equal(recognizeSourceUrl('https://example.com/feed.xml').platform, 'rss');
   assert.equal(recognizeSourceUrl('example.com/blog').platform, 'website');
 });

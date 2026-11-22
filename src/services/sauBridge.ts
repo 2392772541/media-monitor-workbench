@@ -16,6 +16,11 @@ export const SAU_BASE_URL = `http://${SAU_HOST}:${SAU_PORT}`;
 let managedChild: ChildProcess | null = null;
 let startingPromise: Promise<{ ok: boolean; running: boolean; message: string }> | null = null;
 let installingPromise: Promise<{ ok: boolean; sauDir: string; message: string }> | null = null;
+// 记录是否为主动停止以及最近一次异常退出信息，用于守护自愈与总览告警
+let intentionalStop = false;
+let lastExitError: string | null = null;
+let autoRestartCount = 0;
+let watchdogTimer: NodeJS.Timeout | null = null;
 
 function isSauProjectDir(dir: string): boolean {
   return Boolean(dir) && fs.existsSync(path.join(dir, 'sau_backend.py'));
@@ -98,7 +103,12 @@ export async function checkSauHealth(timeoutMs = 1500): Promise<boolean> {
 export async function getSauStatus() {
   const { sauDir, pythonExe, backendScript } = getSauPaths();
   const installed = fs.existsSync(pythonExe) && fs.existsSync(backendScript);
-  const running = await checkSauHealth();
+  let running = await checkSauHealth();
+  // 若引擎已安装、未被用户主动停止但意外掉线，自动触发一次静默恢复
+  if (installed && !running && !intentionalStop && autoRestartCount < 3) {
+    const recovered = await startSauBackend();
+    running = recovered.running;
+  }
   return {
     installed,
     repoPresent: fs.existsSync(backendScript),
@@ -110,6 +120,56 @@ export async function getSauStatus() {
     frontendPort: SAU_FRONTEND_PORT,
     backendUrl: SAU_BASE_URL,
     frontendUrl: `http://127.0.0.1:${SAU_FRONTEND_PORT}/`,
+    lastError: running ? null : lastExitError,
+  };
+}
+
+// 获取发布中心核心指标摘要，供一体化监控总览展示
+export async function getSauOverviewSummary() {
+  const st = await getSauStatus();
+  if (!st.running) {
+    return {
+      installed: st.installed,
+      running: false,
+      lastError: st.lastError,
+      totalAccounts: 0,
+      invalidAccounts: 0,
+      totalFiles: 0,
+      totalTemplates: 0,
+    };
+  }
+
+  const quickGet = async <T>(targetPath: string): Promise<T | null> => {
+    const ctrl = new AbortController();
+    const t = setTimeout(() => ctrl.abort(), 1500);
+    try {
+      const r = await fetch(`${SAU_BASE_URL}${targetPath}`, { signal: ctrl.signal });
+      if (!r.ok) return null;
+      return (await r.json()) as T;
+    } catch {
+      return null;
+    } finally {
+      clearTimeout(t);
+    }
+  };
+
+  const [accJson, fileJson, tplJson] = await Promise.all([
+    quickGet<{ data?: Array<[number, number, string, string, number]> }>('/getAccounts'),
+    quickGet<{ data?: unknown[] }>('/getFiles'),
+    quickGet<{ data?: unknown[] }>('/getTitleTemplates'),
+  ]);
+
+  const accRows = accJson?.data || [];
+  const invalidAccounts = accRows.filter((row) => row[4] !== 1).length;
+
+  return {
+    installed: st.installed,
+    running: true,
+    lastError: null,
+    totalAccounts: accRows.length,
+    invalidAccounts,
+    totalFiles: (fileJson?.data || []).length,
+    totalTemplates: (tplJson?.data || []).length,
   };
 }
 
@@ -208,7 +268,14 @@ export async function installSauEngine(customDir?: string): Promise<{ ok: boolea
 }
 
 export async function startSauBackend(): Promise<{ ok: boolean; running: boolean; message: string }> {
+  intentionalStop = false;
+  if (watchdogTimer) {
+    clearTimeout(watchdogTimer);
+    watchdogTimer = null;
+  }
   if (await checkSauHealth()) {
+    lastExitError = null;
+    autoRestartCount = 0;
     return { ok: true, running: true, message: '视频发布引擎已在运行中' };
   }
   if (startingPromise) {
@@ -228,13 +295,15 @@ export async function startSauBackend(): Promise<{ ok: boolean; running: boolean
     const logPath = path.join(PATHS.logsDir, 'sau-backend.log');
     const logFd = fs.openSync(logPath, 'a');
 
-    log('INFO', 'sau-bridge', `Starting SAU backend from ${sauDir} on port ${SAU_PORT}`);
+    log('INFO', 'sau-bridge', `Starting SAU backend from ${sauDir} on ${SAU_HOST}:${SAU_PORT}`);
     const child = spawn(pythonExe, ['sau_backend.py'], {
       cwd: sauDir,
       windowsHide: true,
       stdio: ['ignore', logFd, logFd],
       env: {
         ...process.env,
+        SAU_HOST,
+        SAU_PORT: String(SAU_PORT),
         PYTHONUNBUFFERED: '1',
         PYTHONIOENCODING: 'utf-8',
       },
@@ -248,7 +317,24 @@ export async function startSauBackend(): Promise<{ ok: boolean; running: boolean
       if (managedChild === child) {
         managedChild = null;
       }
-      log('INFO', 'sau-bridge', `SAU backend exited with code ${code ?? 'null'}`);
+      if (intentionalStop) {
+        log('INFO', 'sau-bridge', `SAU backend stopped intentionally (code=${code ?? 'null'})`);
+        return;
+      }
+      lastExitError = `视频发布引擎意外退出 (退出码: ${code ?? 'null'})`;
+      log('WARN', 'sau-bridge', `SAU backend exited unexpectedly with code ${code ?? 'null'}`);
+      // 自动守护拉起（最多重试 3 次，避免端口占用或坏环境无限循环）
+      if (autoRestartCount < 3) {
+        autoRestartCount += 1;
+        const delayMs = autoRestartCount * 3000;
+        log('INFO', 'sau-bridge', `Scheduling SAU backend auto-recovery #${autoRestartCount} in ${delayMs}ms`);
+        watchdogTimer = setTimeout(() => {
+          watchdogTimer = null;
+          if (!intentionalStop) {
+            void startSauBackend();
+          }
+        }, delayMs);
+      }
     });
 
     const deadline = Date.now() + 12000;
@@ -257,11 +343,14 @@ export async function startSauBackend(): Promise<{ ok: boolean; running: boolean
         return { ok: false, running: false, message: `发布引擎启动后意外退出，请查看日志: ${logPath}` };
       }
       if (await checkSauHealth(1000)) {
+        lastExitError = null;
+        autoRestartCount = 0;
         return { ok: true, running: true, message: '视频发布引擎已启动' };
       }
       await new Promise((r) => setTimeout(r, 400));
     }
 
+    lastExitError = '发布引擎启动超时';
     return { ok: false, running: false, message: `发布引擎启动超时，请查看日志: ${logPath}` };
   })();
 
@@ -273,6 +362,11 @@ export async function startSauBackend(): Promise<{ ok: boolean; running: boolean
 }
 
 export async function stopSauBackend(onlyIfManaged = false): Promise<{ ok: boolean; running: boolean; message: string }> {
+  intentionalStop = true;
+  if (watchdogTimer) {
+    clearTimeout(watchdogTimer);
+    watchdogTimer = null;
+  }
   if (managedChild && managedChild.exitCode === null && managedChild.pid) {
     const pid = managedChild.pid;
     managedChild = null;

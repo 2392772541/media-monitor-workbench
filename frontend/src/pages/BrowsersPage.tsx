@@ -1,5 +1,5 @@
 import { useEffect, useState } from 'react';
-import { ExternalLink, RefreshCw, XCircle, ShieldCheck } from 'lucide-react';
+import { ExternalLink, RefreshCw, XCircle, ShieldCheck, Copy, Send } from 'lucide-react';
 import { apiRequest, fmtTime } from '../api';
 import type { BrowserProfile } from '../types';
 
@@ -15,7 +15,13 @@ function loginStatusLabel(s: string) {
   return map[s] || { text: s, cls: 'badge badge-gray' };
 }
 
-export function BrowsersPage({ onToast }: { onToast: (msg: string) => void }) {
+export function BrowsersPage({
+  onToast,
+  onNavigate,
+}: {
+  onToast: (msg: string) => void;
+  onNavigate?: (tab: string) => void;
+}) {
   const [profiles, setProfiles] = useState<BrowserProfile[]>([]);
   const [busyPlatform, setBusyPlatform] = useState<string | null>(null);
 
@@ -74,17 +80,25 @@ export function BrowsersPage({ onToast }: { onToast: (msg: string) => void }) {
   return (
     <div>
       <div className="card" style={{ marginBottom: 16, background: '#f0f9ff', borderColor: '#bae6fd' }}>
-        <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', gap: 12 }}>
-          <div style={{ display: 'flex', alignItems: 'center', gap: 10 }}>
-          <ShieldCheck size={20} color="#0284c7" />
-          <div>
-            <div style={{ fontWeight: 600, color: '#0369a1' }}>主浏览器完全隔离保护中</div>
-            <div style={{ fontSize: 13, color: '#0c4a6e' }}>
-              此处管理的是独立自动化专用 Chromium 配置目录，绝不读取、复制或控制你的日常 Google Chrome。扫码或人工验证请在下方打开对应平台的独立窗口，完成后关闭窗口即可持久化保留状态。
+        <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', gap: 12, flexWrap: 'wrap' }}>
+          <div style={{ display: 'flex', alignItems: 'flex-start', gap: 10, flex: '1 1 420px' }}>
+            <ShieldCheck size={20} color="#0284c7" style={{ marginTop: 2, flexShrink: 0 }} />
+            <div>
+              <div style={{ fontWeight: 600, color: '#0369a1' }}>监控采集专用浏览器环境（主浏览器完全隔离保护中）</div>
+              <div style={{ fontSize: 13, color: '#0c4a6e', marginTop: 2 }}>
+                此处管理<strong>「对标内容监控采集」</strong>专用的独立 Chromium 配置目录，绝不触碰你的日常 Google Chrome。
+                若你需要绑定用于<strong>「多平台发视频」</strong>的矩阵账号（含小红书），请点击右侧前往发布账号管理。
+              </div>
             </div>
           </div>
+          <div style={{ display: 'flex', gap: 8, flexWrap: 'wrap' }}>
+            {onNavigate && (
+              <button className="btn btn-primary btn-sm" onClick={() => onNavigate('publish:accounts')}>
+                <Send size={13} /> 管理视频发布账号
+              </button>
+            )}
+            <button className="btn btn-sm" onClick={() => void load()}><RefreshCw size={13} /> 刷新</button>
           </div>
-          <button className="btn btn-sm" onClick={() => void load()}><RefreshCw size={13} /> 刷新</button>
         </div>
       </div>
 
@@ -92,19 +106,20 @@ export function BrowsersPage({ onToast }: { onToast: (msg: string) => void }) {
         <table>
           <thead>
             <tr>
-              <th>平台</th>
-              <th>浏览器运行状态</th>
-              <th>登录状态</th>
-              <th>能力状态</th>
-              <th>独立配置目录</th>
-              <th>最近检查 / 使用</th>
-              <th>操作</th>
+              <th style={{ minWidth: 140 }}>平台</th>
+              <th style={{ whiteSpace: 'nowrap' }}>运行状态</th>
+              <th style={{ whiteSpace: 'nowrap' }}>登录状态</th>
+              <th style={{ whiteSpace: 'nowrap' }}>能力状态</th>
+              <th>配置目录（点击复制）</th>
+              <th style={{ whiteSpace: 'nowrap' }}>检查 / 使用</th>
+              <th style={{ whiteSpace: 'nowrap' }}>操作</th>
             </tr>
           </thead>
           <tbody>
             {profiles.map((p) => {
               const st = loginStatusLabel(p.login_status);
               const isBusy = busyPlatform === p.platform;
+              const isOptional = p.login_status === 'optional';
               return (
                 <tr key={p.platform}>
                   <td>
@@ -123,15 +138,31 @@ export function BrowsersPage({ onToast }: { onToast: (msg: string) => void }) {
                     {p.needs_attention === 1 && <div style={{ fontSize: 11, color: 'var(--warn)', marginTop: 2 }}>需人工维护</div>}
                   </td>
                   <td><span className="badge badge-gray">{p.capability_status}</span></td>
-                  <td style={{ fontSize: 11, color: 'var(--text-muted)', maxWidth: 240, wordBreak: 'break-all' }}>{p.profile_dir}</td>
-                  <td style={{ fontSize: 12 }}>
+                  <td>
+                    <span
+                      className="path-ellipsis"
+                      title={`点击复制完整路径：${p.profile_dir}`}
+                      onClick={() => {
+                        void navigator.clipboard?.writeText(p.profile_dir);
+                        onToast('已复制独立配置目录路径');
+                      }}
+                    >
+                      <Copy size={11} style={{ marginRight: 4, verticalAlign: '-1px' }} />
+                      {p.profile_dir}
+                    </span>
+                  </td>
+                  <td style={{ fontSize: 12, whiteSpace: 'nowrap' }}>
                     <div>检：{fmtTime(p.last_checked_at)}</div>
                     <div style={{ color: 'var(--text-muted)' }}>用：{fmtTime(p.last_used_at)}</div>
                   </td>
                   <td>
-                    <div style={{ display: 'flex', flexWrap: 'wrap', gap: 6 }}>
-                      <button className="btn btn-sm btn-primary" disabled={isBusy} onClick={() => void openWindow(p.platform)}>
-                        <ExternalLink size={12} /> 打开登录窗口
+                    <div style={{ display: 'flex', flexWrap: 'nowrap', gap: 6 }}>
+                      <button
+                        className={`btn btn-sm ${isOptional ? '' : 'btn-primary'}`}
+                        disabled={isBusy}
+                        onClick={() => void openWindow(p.platform)}
+                      >
+                        <ExternalLink size={12} /> {isOptional ? '打开独立浏览器' : '打开登录窗口'}
                       </button>
                       <button className="btn btn-sm" disabled={isBusy} onClick={() => void checkLogin(p.platform)}>
                         <RefreshCw size={12} /> 检查状态

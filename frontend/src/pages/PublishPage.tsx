@@ -18,6 +18,7 @@ import {
   Layers,
 } from 'lucide-react';
 import { apiRequest } from '../api';
+import type { PublishInspirationDraft } from '../types';
 
 interface SauStatus {
   installed: boolean;
@@ -104,8 +105,27 @@ function stripFileExt(name: string) {
   return name.replace(/\.[^.]+$/, '');
 }
 
-export function PublishPage({ onToast }: { onToast: (msg: string) => void }) {
-  const [subTab, setSubTab] = useState<'publish' | 'titles' | 'accounts' | 'materials' | 'history'>('publish');
+type PublishSubTab = 'publish' | 'titles' | 'accounts' | 'materials' | 'history';
+
+export function PublishPage({
+  onToast,
+  activeSubTab,
+  onSubTabChange,
+  inspirationDraft,
+  onClearInspiration,
+}: {
+  onToast: (msg: string) => void;
+  activeSubTab?: PublishSubTab;
+  onSubTabChange?: (sub: PublishSubTab) => void;
+  inspirationDraft?: PublishInspirationDraft | null;
+  onClearInspiration?: () => void;
+}) {
+  const [internalSubTab, setInternalSubTab] = useState<PublishSubTab>('publish');
+  const subTab = activeSubTab || internalSubTab;
+  const setSubTab = (next: PublishSubTab) => {
+    setInternalSubTab(next);
+    onSubTabChange?.(next);
+  };
   const [status, setStatus] = useState<SauStatus | null>(null);
   const [accounts, setAccounts] = useState<SauAccount[]>([]);
   const [files, setFiles] = useState<SauFile[]>([]);
@@ -222,6 +242,33 @@ export function PublishPage({ onToast }: { onToast: (msg: string) => void }) {
       clearSse();
     };
   }, []);
+
+  // 接收来自「最新内容」监控流的爆款选题灵感，自动预填到统一标题与话题
+  useEffect(() => {
+    if (!inspirationDraft) return;
+    const nextTitle = inspirationDraft.title.trim();
+    const nextTags = (inspirationDraft.tags || []).join(', ');
+    if (nextTitle) setGlobalTitle(nextTitle);
+    if (nextTags) setGlobalTagsText(nextTags);
+    setVideoDrafts((prev) =>
+      prev.map((d) => ({
+        ...d,
+        title: nextTitle || d.title,
+        tagsText: nextTags || d.tagsText,
+      }))
+    );
+  }, [inspirationDraft]);
+
+  // 打开扫码绑定弹窗前，若发布引擎未运行则自动拉起，保持交互状态一致
+  const openBindAccountModal = async (platformType?: number) => {
+    if (platformType) setNewPlatform(platformType);
+    setShowAddModal(true);
+    if (status && !status.running && status.installed) {
+      onToast('正在后台自动唤醒视频发布引擎...');
+      await apiRequest('/api/sau/start', { method: 'POST' }).catch(() => {});
+      await loadAll(true);
+    }
+  };
 
   const handleStartEngine = async () => {
     setEngineBusy(true);
@@ -813,8 +860,21 @@ export function PublishPage({ onToast }: { onToast: (msg: string) => void }) {
                 {status?.running ? '随工作台运行中' : '未启动'}
               </span>
             </div>
-            <div style={{ fontSize: 12, color: 'var(--text-muted)', marginTop: 3 }}>
-              内置引擎：{status?.sauDir || '自动检测中...'} · 账号 {accounts.length} 个 · 视频 {files.length} 条 · 标题模板 {templates.length} 套
+            <div style={{ fontSize: 12, color: 'var(--text-muted)', marginTop: 3, display: 'flex', alignItems: 'center', gap: 6, flexWrap: 'wrap' }}>
+              <span>内置引擎：</span>
+              <span
+                className="path-ellipsis"
+                title={`点击复制路径：${status?.sauDir || ''}`}
+                onClick={() => {
+                  if (status?.sauDir) {
+                    void navigator.clipboard?.writeText(status.sauDir);
+                    onToast('已复制发布引擎目录路径');
+                  }
+                }}
+              >
+                {status?.sauDir || '自动检测中...'}
+              </span>
+              <span>· 账号 {accounts.length} 个 · 视频 {files.length} 条 · 标题模板 {templates.length} 套</span>
             </div>
           </div>
         </div>
@@ -884,6 +944,28 @@ export function PublishPage({ onToast }: { onToast: (msg: string) => void }) {
 
       {subTab === 'publish' && (
         <div style={{ display: 'grid', gap: 16 }}>
+          {inspirationDraft && (
+            <div className="card" style={{ background: '#eef2ff', borderColor: '#c7d2fe', padding: '12px 18px' }}>
+              <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', gap: 12, flexWrap: 'wrap' }}>
+                <div style={{ fontSize: 13 }}>
+                  <span className="badge badge-blue" style={{ marginRight: 8 }}>对标选题联动</span>
+                  已带入来自「<strong>{inspirationDraft.sourceName || '监控内容'}</strong>」的选题：
+                  <strong style={{ marginLeft: 4 }}>{inspirationDraft.title}</strong>
+                </div>
+                <div style={{ display: 'flex', gap: 8 }}>
+                  {inspirationDraft.sourceUrl && (
+                    <a className="btn btn-sm" href={inspirationDraft.sourceUrl} target="_blank" rel="noreferrer">
+                      查看原帖
+                    </a>
+                  )}
+                  <button className="btn btn-sm" onClick={() => onClearInspiration?.()}>
+                    清除提示
+                  </button>
+                </div>
+              </div>
+            </div>
+          )}
+
           <div className="card">
             <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: 12, flexWrap: 'wrap', gap: 8 }}>
               <div>
@@ -901,7 +983,7 @@ export function PublishPage({ onToast }: { onToast: (msg: string) => void }) {
                 {selectedAccountKeys.length > 0 && (
                   <button className="btn btn-sm" onClick={() => setSelectedAccountKeys([])}>清空账号</button>
                 )}
-                <button className="btn btn-primary btn-sm" onClick={() => setShowAddModal(true)}>
+                <button className="btn btn-primary btn-sm" onClick={() => void openBindAccountModal()}>
                   <Plus size={13} /> 扫码添加账号
                 </button>
               </div>
@@ -920,10 +1002,7 @@ export function PublishPage({ onToast }: { onToast: (msg: string) => void }) {
                         <button
                           className="btn btn-sm"
                           style={{ width: '100%' }}
-                          onClick={() => {
-                            setNewPlatform(plat.type);
-                            setShowAddModal(true);
-                          }}
+                          onClick={() => void openBindAccountModal(plat.type)}
                         >
                           + 绑定{plat.label}
                         </button>
@@ -1243,8 +1322,8 @@ export function PublishPage({ onToast }: { onToast: (msg: string) => void }) {
 
             <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', flexWrap: 'wrap', gap: 10, paddingTop: 6, borderTop: '1px solid var(--border)' }}>
               <div style={{ fontSize: 13, color: 'var(--text-muted)' }}>
-                预计生成任务数：<strong>{groupedSelectedAccounts.length * videoDrafts.length}</strong> 个
-                （{groupedSelectedAccounts.length} 个平台 × {videoDrafts.length} 条视频）
+                预计分发总任务数：<strong>{selectedAccountKeys.length * videoDrafts.length}</strong> 个
+                （已选 {selectedAccountKeys.length} 个账号 / 覆盖 {groupedSelectedAccounts.length} 个平台 × {videoDrafts.length} 条视频）
               </div>
               <button
                 className="btn btn-primary"
@@ -1383,7 +1462,7 @@ export function PublishPage({ onToast }: { onToast: (msg: string) => void }) {
         <div className="card">
           <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: 12 }}>
             <div style={{ fontWeight: 600 }}>已绑定发布账号</div>
-            <button className="btn btn-primary btn-sm" onClick={() => setShowAddModal(true)}>
+            <button className="btn btn-primary btn-sm" onClick={() => void openBindAccountModal()}>
               <Plus size={13} /> 扫码添加账号
             </button>
           </div>

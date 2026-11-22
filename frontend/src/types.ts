@@ -91,6 +91,13 @@ export interface CollectionTask {
   created_at: string;
 }
 
+export interface PublishInspirationDraft {
+  title: string;
+  tags: string[];
+  sourceName?: string;
+  sourceUrl?: string;
+}
+
 export interface OverviewData {
   stats: {
     totalSources: number;
@@ -103,6 +110,15 @@ export interface OverviewData {
     successCount: number;
     failedCount: number;
     authAlertCount: number;
+  };
+  publishSummary?: {
+    installed: boolean;
+    running: boolean;
+    lastError: string | null;
+    totalAccounts: number;
+    invalidAccounts: number;
+    totalFiles: number;
+    totalTemplates: number;
   };
   adapters: Array<{ platform: string; displayName: string; defaultCapability: string }>;
   profiles: BrowserProfile[];

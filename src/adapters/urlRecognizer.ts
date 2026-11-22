@@ -36,6 +36,10 @@ export function recognizeSourceUrl(rawUrl: string): RecognizedSource {
   if (host.includes('youtube.com') || host === 'youtu.be') {
     return { platform: 'youtube', sourceType: 'creator', normalizedUrl: u.toString() };
   }
+  // 识别小红书主页或作品链接，归入动态网页提取链路
+  if (host.includes('xiaohongshu.com') || host.includes('xhslink.com')) {
+    return { platform: 'website', sourceType: 'social', normalizedUrl: u.toString() };
+  }
   if (
     pathname.endsWith('.xml') ||
     pathname.endsWith('.rss') ||

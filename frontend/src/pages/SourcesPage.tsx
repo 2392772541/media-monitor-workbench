@@ -1,14 +1,21 @@
 import { useEffect, useState } from 'react';
-import { Play, Pause, Trash2, Plus, RefreshCw, Search, Pencil } from 'lucide-react';
+import { Play, Pause, Trash2, Plus, RefreshCw, Search, Pencil, Sparkles } from 'lucide-react';
 import { apiRequest, fmtTime, PLATFORM_LABELS } from '../api';
 import type { Category, SourceItem } from '../types';
 
-export function SourcesPage({ onToast }: { onToast: (msg: string) => void }) {
+export function SourcesPage({
+  onToast,
+}: {
+  onToast: (msg: string) => void;
+  onNavigate?: (tab: string) => void;
+}) {
   const [sources, setSources] = useState<SourceItem[]>([]);
   const [categories, setCategories] = useState<Category[]>([]);
+  const [defaultIntervals, setDefaultIntervals] = useState<{ website: number; creator: number }>({ website: 60, creator: 120 });
   const [filterKind, setFilterKind] = useState<'all' | 'website' | 'creator'>('all');
   const [showAdd, setShowAdd] = useState(false);
   const [newCatName, setNewCatName] = useState('');
+  const [seeding, setSeeding] = useState(false);
   const [editing, setEditing] = useState<SourceItem | null>(null);
   const [editName, setEditName] = useState('');
   const [editUrl, setEditUrl] = useState('');
@@ -27,20 +34,34 @@ export function SourcesPage({ onToast }: { onToast: (msg: string) => void }) {
   const [submitting, setSubmitting] = useState(false);
 
   const load = async () => {
-    const [s, c] = await Promise.all([
+    const [s, c, st] = await Promise.all([
       apiRequest<SourceItem[]>('/api/sources'),
       apiRequest<Category[]>('/api/categories'),
+      apiRequest<{ settings: Record<string, string> }>('/api/settings').catch(() => ({ settings: {} as Record<string, string> })),
     ]);
     setSources(s);
     setCategories(c);
+    const webMins = Number(st.settings?.default_website_interval) > 0 ? Number(st.settings.default_website_interval) : 60;
+    const creatorMins = Number(st.settings?.default_creator_interval) > 0 ? Number(st.settings.default_creator_interval) : 120;
+    setDefaultIntervals({ website: webMins, creator: creatorMins });
   };
 
   useEffect(() => {
     void load();
   }, []);
 
+  const handleOpenAddModal = () => {
+    setIntervalMinutes(defaultIntervals.website);
+    setProbeMsg('');
+    setShowAdd(true);
+  };
+
   const handleProbe = async () => {
-    if (!url.trim()) return;
+    if (!url.trim()) {
+      onToast('请先填写主页或网站链接');
+      setProbeMsg('请先粘贴需要检测的主页或订阅链接');
+      return;
+    }
     setProbing(true);
     setProbeMsg('');
     try {
@@ -56,8 +77,13 @@ export function SourcesPage({ onToast }: { onToast: (msg: string) => void }) {
       if (!name.trim() && res.availability.detectedTitle) {
         setName(res.availability.detectedTitle);
       }
-      setIntervalMinutes(res.recognized.platform === 'website' || res.recognized.platform === 'rss' ? 60 : 120);
-      setProbeMsg(`识别平台: ${PLATFORM_LABELS[res.recognized.platform] || res.recognized.platform} ｜ ${res.availability.message}`);
+      const isWeb = res.recognized.platform === 'website' || res.recognized.platform === 'rss';
+      setIntervalMinutes(isWeb ? defaultIntervals.website : defaultIntervals.creator);
+      const xhsNote =
+        url.includes('xiaohongshu.com') || url.includes('xhslink.com')
+          ? '（提示：小红书监控走公开动态网页提取；小红书账号发布已在「视频发布」完整支持）'
+          : '';
+      setProbeMsg(`识别平台: ${PLATFORM_LABELS[res.recognized.platform] || res.recognized.platform} ｜ ${res.availability.message}${xhsNote}`);
     } catch (err) {
       setProbeMsg(`检测失败: ${(err as Error).message}`);
     } finally {
@@ -105,11 +131,33 @@ export function SourcesPage({ onToast }: { onToast: (msg: string) => void }) {
   };
 
   const handleAddCategory = async () => {
-    if (!newCatName.trim()) return;
-    await apiRequest('/api/categories', { method: 'POST', body: JSON.stringify({ name: newCatName.trim() }) });
+    if (!newCatName.trim()) {
+      onToast('请输入新分类名称');
+      return;
+    }
+    const res = await apiRequest<{ created: boolean }>('/api/categories', {
+      method: 'POST',
+      body: JSON.stringify({ name: newCatName.trim() }),
+    });
     setNewCatName('');
-    onToast('分类已添加');
+    onToast(res.created ? '分类已添加' : '该分类已存在');
     await load();
+  };
+
+  const handleSeedExamples = async () => {
+    setSeeding(true);
+    try {
+      const res = await apiRequest<{ message: string }>('/api/sources/seed-examples', {
+        method: 'POST',
+        body: JSON.stringify({}),
+      });
+      onToast(res.message);
+      await load();
+    } catch (err) {
+      onToast((err as Error).message);
+    } finally {
+      setSeeding(false);
+    }
   };
 
   const handleToggleStatus = async (s: SourceItem) => {
@@ -163,6 +211,9 @@ export function SourcesPage({ onToast }: { onToast: (msg: string) => void }) {
     await load();
   };
 
+  // 过滤与空值占位重复的「默认分类」，避免下拉框出现两次默认分类
+  const selectableCategories = categories.filter((c) => c.name !== '默认分类');
+
   const filtered = sources.filter((s) => {
     if (filterKind === 'website') return s.platform === 'website' || s.platform === 'rss';
     if (filterKind === 'creator') return s.platform !== 'website' && s.platform !== 'rss';
@@ -172,7 +223,7 @@ export function SourcesPage({ onToast }: { onToast: (msg: string) => void }) {
   return (
     <div>
       <div className="toolbar" style={{ justifyContent: 'space-between' }}>
-        <div style={{ display: 'flex', gap: 8 }}>
+        <div style={{ display: 'flex', gap: 8, flexWrap: 'wrap' }}>
           <button className={`btn ${filterKind === 'all' ? 'btn-primary' : ''}`} onClick={() => setFilterKind('all')}>
             全部 ({sources.length})
           </button>
@@ -184,16 +235,17 @@ export function SourcesPage({ onToast }: { onToast: (msg: string) => void }) {
           </button>
         </div>
 
-        <div style={{ display: 'flex', gap: 8, alignItems: 'center' }}>
+        <div style={{ display: 'flex', gap: 8, alignItems: 'center', flexWrap: 'wrap' }}>
           <input
             className="input"
             style={{ width: 140 }}
             placeholder="新分类名称"
             value={newCatName}
             onChange={(e) => setNewCatName(e.target.value)}
+            onKeyDown={(e) => e.key === 'Enter' && void handleAddCategory()}
           />
           <button className="btn" onClick={() => void handleAddCategory()}>新建分类</button>
-          <button className="btn btn-primary" data-testid="btn-open-add-source" onClick={() => setShowAdd(true)}>
+          <button className="btn btn-primary" data-testid="btn-open-add-source" onClick={handleOpenAddModal}>
             <Plus size={15} /> 添加监控对象
           </button>
         </div>
@@ -217,7 +269,17 @@ export function SourcesPage({ onToast }: { onToast: (msg: string) => void }) {
             {filtered.length === 0 ? (
               <tr>
                 <td colSpan={8} style={{ textAlign: 'center', color: 'var(--text-muted)', padding: 32 }}>
-                  暂无监控对象，请点击右上角「添加监控对象」开始。
+                  <div>暂无监控对象，请点击右上角「添加监控对象」开始，或一键导入公开示例源快速体验。</div>
+                  {sources.length === 0 && (
+                    <button
+                      className="btn btn-sm"
+                      style={{ marginTop: 12 }}
+                      disabled={seeding}
+                      onClick={() => void handleSeedExamples()}
+                    >
+                      <Sparkles size={13} /> {seeding ? '正在导入...' : '一键导入精选示例订阅源'}
+                    </button>
+                  )}
                 </td>
               </tr>
             ) : (
@@ -335,7 +397,7 @@ export function SourcesPage({ onToast }: { onToast: (msg: string) => void }) {
                   <label className="form-label">分类</label>
                   <select className="select" value={categoryId} onChange={(e) => setCategoryId(e.target.value)}>
                     <option value="">默认分类</option>
-                    {categories.map((c) => (
+                    {selectableCategories.map((c) => (
                       <option key={c.id} value={c.id}>{c.name}</option>
                     ))}
                   </select>
@@ -343,11 +405,15 @@ export function SourcesPage({ onToast }: { onToast: (msg: string) => void }) {
                 <div className="form-row">
                   <label className="form-label">监控频率</label>
                   <select className="select" value={intervalMinutes} onChange={(e) => setIntervalMinutes(Number(e.target.value))}>
+                    {![30, 60, 120, 180, 360, 1440].includes(intervalMinutes) && (
+                      <option value={intervalMinutes}>每 {intervalMinutes} 分钟（系统默认）</option>
+                    )}
                     <option value={30}>每 30 分钟</option>
                     <option value={60}>每 60 分钟</option>
                     <option value={120}>每 2 小时</option>
                     <option value={180}>每 3 小时</option>
                     <option value={360}>每 6 小时</option>
+                    <option value={1440}>每 24 小时</option>
                   </select>
                 </div>
               </div>
@@ -388,7 +454,7 @@ export function SourcesPage({ onToast }: { onToast: (msg: string) => void }) {
                   <label className="form-label">分类</label>
                   <select className="select" value={editCatId} onChange={(e) => setEditCatId(e.target.value)}>
                     <option value="">默认分类</option>
-                    {categories.map((c) => (
+                    {selectableCategories.map((c) => (
                       <option key={c.id} value={c.id}>{c.name}</option>
                     ))}
                   </select>

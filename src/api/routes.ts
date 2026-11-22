@@ -12,6 +12,7 @@ import {
 import { cancelCollection, enqueueCollection } from '../scheduler/taskRunner.js';
 import { readRecentLogs } from '../utils/logger.js';
 import {
+  getSauOverviewSummary,
   getSauStatus,
   installSauEngine,
   proxySauFileDownload,
@@ -71,6 +72,7 @@ export function registerRoutes(app: FastifyInstance, shutdownHandler: () => Prom
         LIMIT 8
       `)
       .all();
+    const publishSummary = await getSauOverviewSummary();
 
     return {
       stats: {
@@ -85,6 +87,7 @@ export function registerRoutes(app: FastifyInstance, shutdownHandler: () => Prom
         failedCount,
         authAlertCount,
       },
+      publishSummary,
       adapters,
       profiles,
       recentFailures,
@@ -162,7 +165,11 @@ export function registerRoutes(app: FastifyInstance, shutdownHandler: () => Prom
 
     const db = getDb();
     const now = new Date().toISOString();
-    const defaultInterval = platform === 'website' || platform === 'rss' ? 60 : 120;
+    // 读取用户在系统设置中配置的默认采集频率
+    const settingKey = platform === 'website' || platform === 'rss' ? 'default_website_interval' : 'default_creator_interval';
+    const settingRow = db.prepare('SELECT value FROM app_settings WHERE key = ?').get(settingKey) as { value?: string } | undefined;
+    const fallbackInterval = platform === 'website' || platform === 'rss' ? 60 : 120;
+    const defaultInterval = Number(settingRow?.value) > 0 ? Number(settingRow?.value) : fallbackInterval;
     const interval = Math.max(5, Number(req.body.interval_minutes || defaultInterval));
     const priority = Number(req.body.priority || 2);
 
@@ -194,6 +201,66 @@ export function registerRoutes(app: FastifyInstance, shutdownHandler: () => Prom
     }
     const created = db.prepare('SELECT * FROM sources WHERE id = ?').get(sourceId);
     return { source: created, probe, queuedTask };
+  });
+
+  // 一键导入精选公开示例源，解决首次使用冷启动空状态痛点
+  app.post('/api/sources/seed-examples', async () => {
+    const db = getDb();
+    const now = new Date().toISOString();
+    const examples = [
+      {
+        name: '阮一峰的网络日志',
+        platform: 'rss',
+        url: 'https://www.ruanyifeng.com/blog/atom.xml',
+        sourceType: 'rss',
+        catName: '科技资讯',
+        interval: 120,
+        notes: '科技周刊与开发工具精选',
+      },
+      {
+        name: '少数派 Matrix 精选',
+        platform: 'rss',
+        url: 'https://sspai.com/feed',
+        sourceType: 'rss',
+        catName: '效率工具',
+        interval: 120,
+        notes: '效率工具、数字生活与创作者经验',
+      },
+      {
+        name: 'Google Developers (YouTube)',
+        platform: 'youtube',
+        url: 'https://www.youtube.com/channel/UC_x5XG1OV2P6uZZ5FSM9Ttw',
+        sourceType: 'creator',
+        catName: '视频博主',
+        interval: 180,
+        notes: '官方技术频道（免登录 RSS 自动追踪）',
+      },
+    ];
+
+    let addedCount = 0;
+    for (const ex of examples) {
+      const exists = db.prepare('SELECT id FROM sources WHERE url = ? LIMIT 1').get(ex.url) as { id: number } | undefined;
+      if (exists) continue;
+      db.prepare('INSERT OR IGNORE INTO categories (name, sort_order, created_at) VALUES (?, 50, ?)').run(ex.catName, now);
+      const catRow = db.prepare('SELECT id FROM categories WHERE name = ?').get(ex.catName) as { id: number } | undefined;
+      const ins = db
+        .prepare(`
+          INSERT INTO sources (
+            name, platform, url, source_type, category_id, priority,
+            interval_minutes, status, capability_status, notes, created_at, updated_at
+          ) VALUES (?, ?, ?, ?, ?, 2, ?, 'active', '已接入并验证', ?, ?, ?)
+        `)
+        .run(ex.name, ex.platform, ex.url, ex.sourceType, catRow?.id || null, ex.interval, ex.notes, now, now);
+      const sid = Number(ins.lastInsertRowid);
+      enqueueCollection(sid, 'manual');
+      addedCount += 1;
+    }
+
+    return {
+      ok: true,
+      addedCount,
+      message: addedCount > 0 ? `已导入 ${addedCount} 个示例监控源并启动后台采集` : '示例监控源已存在，无需重复导入',
+    };
   });
 
   app.patch<{
@@ -263,6 +330,7 @@ export function registerRoutes(app: FastifyInstance, shutdownHandler: () => Prom
       isRead?: string;
       q?: string;
       days?: string;
+      sort?: string;
       limit?: string;
       offset?: string;
     };
@@ -307,6 +375,13 @@ export function registerRoutes(app: FastifyInstance, shutdownHandler: () => Prom
     const whereSql = conditions.length > 0 ? `WHERE ${conditions.join(' AND ')}` : '';
     const limit = Math.min(100, Math.max(1, Number(q.limit || 30)));
     const offset = Math.max(0, Number(q.offset || 0));
+    // 支持按互动指标排序筛选对标爆款
+    const orderBySql =
+      q.sort === 'likes'
+        ? 'COALESCE(latest_likes, -1) DESC, COALESCE(c.published_at, c.discovered_at) DESC, c.id DESC'
+        : q.sort === 'views'
+          ? 'COALESCE(latest_views, -1) DESC, COALESCE(c.published_at, c.discovered_at) DESC, c.id DESC'
+          : 'COALESCE(c.published_at, c.discovered_at) DESC, c.id DESC';
 
     const items = db
       .prepare(`
@@ -322,7 +397,7 @@ export function registerRoutes(app: FastifyInstance, shutdownHandler: () => Prom
         FROM contents c
         JOIN sources s ON s.id = c.source_id
         ${whereSql}
-        ORDER BY COALESCE(c.published_at, c.discovered_at) DESC, c.id DESC
+        ORDER BY ${orderBySql}
         LIMIT ? OFFSET ?
       `)
       .all(...params, limit, offset);
@@ -375,6 +450,23 @@ export function registerRoutes(app: FastifyInstance, shutdownHandler: () => Prom
       return { id, is_read: Boolean(isRead), is_favorite: Boolean(isFav) };
     }
   );
+
+  // 一键批量标为已读，降低海量资讯积压带来的未读焦虑
+  app.post<{ Body: { platform?: string; sourceId?: number } }>('/api/contents/mark-all-read', async (req) => {
+    const db = getDb();
+    const conds = ['is_read = 0'];
+    const vals: Array<string | number> = [];
+    if (req.body?.platform && req.body.platform !== 'all') {
+      conds.push('platform = ?');
+      vals.push(req.body.platform);
+    }
+    if (req.body?.sourceId) {
+      conds.push('source_id = ?');
+      vals.push(Number(req.body.sourceId));
+    }
+    const res = db.prepare(`UPDATE contents SET is_read = 1 WHERE ${conds.join(' AND ')}`).run(...vals);
+    return { ok: true, updated: res.changes };
+  });
 
   app.get('/api/browsers', async () => {
     return listBrowserProfilesWithRuntime();

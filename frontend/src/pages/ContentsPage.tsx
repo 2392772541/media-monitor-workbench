@@ -1,9 +1,25 @@
 import { useEffect, useState } from 'react';
-import { Star, ExternalLink, Search, CheckCircle2 } from 'lucide-react';
+import { Star, ExternalLink, Search, CheckCircle2, BookOpen, Send, CheckCheck } from 'lucide-react';
 import { apiRequest, fmtNum, fmtTime, PLATFORM_LABELS } from '../api';
-import type { Category, ContentSummary, MetricSnapshot, SourceItem } from '../types';
+import type { Category, ContentSummary, MetricSnapshot, PublishInspirationDraft, SourceItem } from '../types';
 
-export function ContentsPage({ onToast }: { onToast: (msg: string) => void }) {
+function parseTagsJson(raw?: string): string[] {
+  if (!raw) return [];
+  try {
+    const arr = JSON.parse(raw);
+    return Array.isArray(arr) ? arr.map((x) => String(x).trim()).filter(Boolean) : [];
+  } catch {
+    return [];
+  }
+}
+
+export function ContentsPage({
+  onToast,
+  onSendToPublish,
+}: {
+  onToast: (msg: string) => void;
+  onSendToPublish?: (draft: PublishInspirationDraft) => void;
+}) {
   const [items, setItems] = useState<ContentSummary[]>([]);
   const [total, setTotal] = useState(0);
   const [sources, setSources] = useState<SourceItem[]>([]);
@@ -14,8 +30,10 @@ export function ContentsPage({ onToast }: { onToast: (msg: string) => void }) {
   const [isFavorite, setIsFavorite] = useState(false);
   const [isRead, setIsRead] = useState<'all' | '0' | '1'>('all');
   const [days, setDays] = useState('');
+  const [sort, setSort] = useState<'latest' | 'likes' | 'views'>('latest');
   const [query, setQuery] = useState('');
   const [loading, setLoading] = useState(false);
+  const [savingTplId, setSavingTplId] = useState<number | null>(null);
 
   const [detail, setDetail] = useState<{ item: ContentSummary & { body?: string; source_url?: string }; metricsHistory: MetricSnapshot[] } | null>(null);
 
@@ -29,6 +47,7 @@ export function ContentsPage({ onToast }: { onToast: (msg: string) => void }) {
       if (isFavorite) params.set('isFavorite', '1');
       if (isRead !== 'all') params.set('isRead', isRead);
       if (days) params.set('days', days);
+      if (sort !== 'latest') params.set('sort', sort);
       if (query.trim()) params.set('q', query.trim());
       params.set('limit', '50');
       const res = await apiRequest<{ items: ContentSummary[]; total: number }>(`/api/contents?${params.toString()}`);
@@ -46,7 +65,7 @@ export function ContentsPage({ onToast }: { onToast: (msg: string) => void }) {
 
   useEffect(() => {
     void load();
-  }, [platform, sourceId, categoryId, isFavorite, isRead, days]);
+  }, [platform, sourceId, categoryId, isFavorite, isRead, days, sort]);
 
   const openDetail = async (item: ContentSummary) => {
     const res = await apiRequest<{ item: ContentSummary & { body?: string; source_url?: string }; metricsHistory: MetricSnapshot[] }>(
@@ -70,6 +89,58 @@ export function ContentsPage({ onToast }: { onToast: (msg: string) => void }) {
     onToast(next ? '已加入收藏' : '已取消收藏');
   };
 
+  // 一键将当前列表未读内容标为已读
+  const handleMarkAllRead = async () => {
+    const res = await apiRequest<{ ok: boolean; updated: number }>('/api/contents/mark-all-read', {
+      method: 'POST',
+      body: JSON.stringify({
+        platform: platform !== 'all' ? platform : undefined,
+        sourceId: sourceId ? Number(sourceId) : undefined,
+      }),
+    });
+    setItems((prev) => prev.map((x) => ({ ...x, is_read: 1 })));
+    onToast(res.updated > 0 ? `已将 ${res.updated} 条内容标为已读` : '当前筛选下没有未读内容');
+  };
+
+  // 将监控到的对标爆款标题直接提取存入视频发布「标题文案库」
+  const handleSaveAsTemplate = async (item: ContentSummary, e?: React.MouseEvent) => {
+    e?.stopPropagation();
+    setSavingTplId(item.id);
+    try {
+      const tags = parseTagsJson(item.tags_json);
+      const fallbackTags = tags.length > 0 ? tags : [PLATFORM_LABELS[item.platform] || item.platform];
+      await apiRequest('/api/sau/title-templates', {
+        method: 'POST',
+        body: JSON.stringify({
+          category: '干货拆解',
+          title: item.title,
+          tags: fallbackTags,
+          note: `对标灵感：${item.source_name}`,
+        }),
+      });
+      onToast('已提取存入「视频发布 → 标题文案库」');
+    } catch (err) {
+      onToast(`存入标题库失败：${(err as Error).message}`);
+    } finally {
+      setSavingTplId(null);
+    }
+  };
+
+  // 一键携带标题与标签跳转至批量视频发布页进行二创跟进
+  const handleJumpToPublish = (item: ContentSummary, e?: React.MouseEvent) => {
+    e?.stopPropagation();
+    if (!onSendToPublish) return;
+    const tags = parseTagsJson(item.tags_json);
+    onSendToPublish({
+      title: item.title,
+      tags,
+      sourceName: item.source_name,
+      sourceUrl: item.canonical_url,
+    });
+  };
+
+  const unreadInView = items.filter((x) => !x.is_read).length;
+
   return (
     <div>
       <div className="card" style={{ marginBottom: 16 }}>
@@ -88,17 +159,18 @@ export function ContentsPage({ onToast }: { onToast: (msg: string) => void }) {
             </button>
           </div>
 
-          <select className="select" style={{ width: 130 }} value={platform} onChange={(e) => setPlatform(e.target.value)}>
+          <select className="select" style={{ width: 132 }} value={platform} onChange={(e) => setPlatform(e.target.value)}>
             <option value="all">全部平台</option>
             <option value="website">普通网站</option>
             <option value="rss">RSS 订阅</option>
             <option value="douyin">抖音</option>
             <option value="kuaishou">快手</option>
+            <option value="wechat-channels">微信视频号</option>
             <option value="x">X (Twitter)</option>
             <option value="youtube">YouTube</option>
           </select>
 
-          <select className="select" style={{ width: 160 }} value={sourceId} onChange={(e) => setSourceId(e.target.value)}>
+          <select className="select" style={{ width: 155 }} value={sourceId} onChange={(e) => setSourceId(e.target.value)}>
             <option value="">全部博主/网站</option>
             {sources.map((s) => (
               <option key={s.id} value={String(s.id)}>{s.name}</option>
@@ -112,14 +184,20 @@ export function ContentsPage({ onToast }: { onToast: (msg: string) => void }) {
             ))}
           </select>
 
-          <select className="select" style={{ width: 110 }} value={days} onChange={(e) => setDays(e.target.value)}>
+          <select className="select" style={{ width: 112 }} value={days} onChange={(e) => setDays(e.target.value)}>
             <option value="">全部时间</option>
             <option value="1">近 24 小时</option>
             <option value="7">近 7 天</option>
             <option value="30">近 30 天</option>
           </select>
 
-          <select className="select" style={{ width: 110 }} value={isRead} onChange={(e) => setIsRead(e.target.value as 'all' | '0' | '1')}>
+          <select className="select" style={{ width: 132 }} value={sort} onChange={(e) => setSort(e.target.value as 'latest' | 'likes' | 'views')}>
+            <option value="latest">按最新发布</option>
+            <option value="likes">按最高点赞（爆款）</option>
+            <option value="views">按最高播放（爆款）</option>
+          </select>
+
+          <select className="select" style={{ width: 108 }} value={isRead} onChange={(e) => setIsRead(e.target.value as 'all' | '0' | '1')}>
             <option value="all">全部状态</option>
             <option value="0">仅未读</option>
             <option value="1">仅已读</option>
@@ -131,8 +209,15 @@ export function ContentsPage({ onToast }: { onToast: (msg: string) => void }) {
         </div>
       </div>
 
-      <div style={{ marginBottom: 10, fontSize: 13, color: 'var(--text-muted)' }}>
-        共匹配 {total} 条内容 {loading ? '（加载中...）' : ''}
+      <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: 10, gap: 10, flexWrap: 'wrap' }}>
+        <div style={{ fontSize: 13, color: 'var(--text-muted)' }}>
+          共匹配 {total} 条内容 {loading ? '（加载中...）' : ''}
+        </div>
+        {unreadInView > 0 && (
+          <button className="btn btn-sm" onClick={() => void handleMarkAllRead()}>
+            <CheckCheck size={13} /> 当前全部标为已读
+          </button>
+        )}
       </div>
 
       <div className="content-list">
@@ -176,21 +261,43 @@ export function ContentsPage({ onToast }: { onToast: (msg: string) => void }) {
                   {item.summary || '点击查看详细正文与来源链接'}
                 </div>
 
-                <div style={{ display: 'flex', flexWrap: 'wrap', gap: 10, marginTop: 10, fontSize: 12, color: 'var(--text-muted)', alignItems: 'center' }}>
-                  <span className="badge badge-blue">{PLATFORM_LABELS[item.platform] || item.platform}</span>
-                  <span>来源：{item.source_name}</span>
-                  {item.author && <span>作者：{item.author}</span>}
-                  <span>发布：{fmtTime(item.published_at)}</span>
-                  <span>发现：{fmtTime(item.discovered_at)}</span>
-                  {item.latest_likes !== null && <span>赞 {fmtNum(item.latest_likes)}</span>}
-                  {item.latest_views !== null && <span>播放 {fmtNum(item.latest_views)}</span>}
-                  {item.is_read ? (
-                    <span style={{ display: 'inline-flex', alignItems: 'center', gap: 3 }}>
-                      <CheckCircle2 size={12} /> 已读
-                    </span>
-                  ) : (
-                    <span className="badge badge-amber">未读</span>
-                  )}
+                <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', flexWrap: 'wrap', gap: 10, marginTop: 10 }}>
+                  <div style={{ display: 'flex', flexWrap: 'wrap', gap: 10, fontSize: 12, color: 'var(--text-muted)', alignItems: 'center' }}>
+                    <span className="badge badge-blue">{PLATFORM_LABELS[item.platform] || item.platform}</span>
+                    <span>来源：{item.source_name}</span>
+                    {item.author && <span>作者：{item.author}</span>}
+                    <span>发布：{fmtTime(item.published_at)}</span>
+                    <span>发现：{fmtTime(item.discovered_at)}</span>
+                    {item.latest_likes !== null && <span>赞 {fmtNum(item.latest_likes)}</span>}
+                    {item.latest_views !== null && <span>播放 {fmtNum(item.latest_views)}</span>}
+                    {item.is_read ? (
+                      <span style={{ display: 'inline-flex', alignItems: 'center', gap: 3 }}>
+                        <CheckCircle2 size={12} /> 已读
+                      </span>
+                    ) : (
+                      <span className="badge badge-amber">未读</span>
+                    )}
+                  </div>
+
+                  <div style={{ display: 'flex', gap: 6 }}>
+                    <button
+                      className="btn btn-sm"
+                      disabled={savingTplId === item.id}
+                      onClick={(e) => void handleSaveAsTemplate(item, e)}
+                      title="提取标题与标签存入视频发布标题文案库"
+                    >
+                      <BookOpen size={12} /> 存入标题库
+                    </button>
+                    {onSendToPublish && (
+                      <button
+                        className="btn btn-sm btn-primary"
+                        onClick={(e) => handleJumpToPublish(item, e)}
+                        title="携带该爆款选题直接进入批量视频发布"
+                      >
+                        <Send size={12} /> 去二创发布
+                      </button>
+                    )}
+                  </div>
                 </div>
               </div>
             </div>
@@ -206,7 +313,21 @@ export function ContentsPage({ onToast }: { onToast: (msg: string) => void }) {
                 <span className="badge badge-blue">{PLATFORM_LABELS[detail.item.platform] || detail.item.platform}</span>
                 <strong>内容详情</strong>
               </div>
-              <div style={{ display: 'flex', gap: 8 }}>
+              <div style={{ display: 'flex', gap: 8, flexWrap: 'wrap' }}>
+                <button className="btn btn-sm" onClick={(e) => void handleSaveAsTemplate(detail.item, e)}>
+                  <BookOpen size={14} /> 存入标题库
+                </button>
+                {onSendToPublish && (
+                  <button
+                    className="btn btn-sm"
+                    onClick={(e) => {
+                      setDetail(null);
+                      handleJumpToPublish(detail.item, e);
+                    }}
+                  >
+                    <Send size={14} /> 去二创发布
+                  </button>
+                )}
                 <button className="btn btn-sm" onClick={(e) => void toggleFavorite(detail.item.id, detail.item.is_favorite, e)}>
                   <Star size={14} fill={detail.item.is_favorite ? '#eab308' : 'none'} color={detail.item.is_favorite ? '#eab308' : 'currentColor'} />
                   {detail.item.is_favorite ? '已收藏' : '收藏'}

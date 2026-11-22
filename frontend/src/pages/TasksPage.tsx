@@ -1,5 +1,5 @@
 import { useEffect, useState } from 'react';
-import { RefreshCw, StopCircle, FileText } from 'lucide-react';
+import { RefreshCw, StopCircle, FileText, Clock } from 'lucide-react';
 import { apiRequest, fmtTime, PLATFORM_LABELS } from '../api';
 import type { CollectionTask } from '../types';
 
@@ -21,8 +21,15 @@ function calcNextRun(lastChecked: string | null, intervalMinutes: number): strin
   return next.toLocaleString('zh-CN', { month: '2-digit', day: '2-digit', hour: '2-digit', minute: '2-digit' });
 }
 
-export function TasksPage({ onToast }: { onToast: (msg: string) => void }) {
+export function TasksPage({
+  onToast,
+  onNavigate,
+}: {
+  onToast: (msg: string) => void;
+  onNavigate?: (tab: string) => void;
+}) {
   const [tasks, setTasks] = useState<CollectionTask[]>([]);
+  const [statusFilter, setStatusFilter] = useState<'all' | 'active' | 'done' | 'issue'>('all');
   const [logsModal, setLogsModal] = useState<{ taskId: number; rows: Array<{ id: number; level: string; message: string; created_at: string }> } | null>(null);
 
   const load = async () => {
@@ -46,11 +53,39 @@ export function TasksPage({ onToast }: { onToast: (msg: string) => void }) {
     setLogsModal({ taskId: id, rows });
   };
 
+  const filteredTasks = tasks.filter((t) => {
+    if (statusFilter === 'active') return t.status === 'queued' || t.status === 'running';
+    if (statusFilter === 'done') return t.status === 'success';
+    if (statusFilter === 'issue') return t.status === 'failed' || t.status === 'auth_required';
+    return true;
+  });
+
   return (
     <div>
       <div className="toolbar" style={{ justifyContent: 'space-between' }}>
-        <div style={{ fontSize: 13, color: 'var(--text-muted)' }}>每 4 秒自动刷新任务队列状态（最多展示最近 80 条记录）</div>
-        <button className="btn" onClick={() => void load()}><RefreshCw size={14} /> 立即刷新</button>
+        <div style={{ display: 'flex', gap: 6, alignItems: 'center', flexWrap: 'wrap' }}>
+          <button className={`btn btn-sm ${statusFilter === 'all' ? 'btn-primary' : ''}`} onClick={() => setStatusFilter('all')}>
+            全部采集任务 ({tasks.length})
+          </button>
+          <button className={`btn btn-sm ${statusFilter === 'active' ? 'btn-primary' : ''}`} onClick={() => setStatusFilter('active')}>
+            进行中 ({tasks.filter((t) => t.status === 'queued' || t.status === 'running').length})
+          </button>
+          <button className={`btn btn-sm ${statusFilter === 'done' ? 'btn-primary' : ''}`} onClick={() => setStatusFilter('done')}>
+            已完成 ({tasks.filter((t) => t.status === 'success').length})
+          </button>
+          <button className={`btn btn-sm ${statusFilter === 'issue' ? 'btn-primary' : ''}`} onClick={() => setStatusFilter('issue')}>
+            异常/待登录 ({tasks.filter((t) => t.status === 'failed' || t.status === 'auth_required').length})
+          </button>
+          <span style={{ fontSize: 12, color: 'var(--text-muted)', marginLeft: 6 }}>每 4 秒自动刷新</span>
+        </div>
+        <div style={{ display: 'flex', gap: 8, flexWrap: 'wrap' }}>
+          {onNavigate && (
+            <button className="btn btn-sm" onClick={() => onNavigate('publish:history')}>
+              <Clock size={13} /> 查看视频发布历史
+            </button>
+          )}
+          <button className="btn btn-sm" onClick={() => void load()}><RefreshCw size={14} /> 立即刷新</button>
+        </div>
       </div>
 
       <div className="card table-wrap">
@@ -68,12 +103,12 @@ export function TasksPage({ onToast }: { onToast: (msg: string) => void }) {
             </tr>
           </thead>
           <tbody>
-            {tasks.length === 0 ? (
+            {filteredTasks.length === 0 ? (
               <tr>
-                <td colSpan={8} style={{ textAlign: 'center', color: 'var(--text-muted)', padding: 32 }}>暂无采集任务记录</td>
+                <td colSpan={8} style={{ textAlign: 'center', color: 'var(--text-muted)', padding: 32 }}>暂无匹配的采集任务记录</td>
               </tr>
             ) : (
-              tasks.map((t) => {
+              filteredTasks.map((t) => {
                 const st = statusBadge(t.status);
                 return (
                   <tr key={t.id}>

@@ -140,8 +140,8 @@ def record_publish_history(
         )
         conn.commit()
 
-#允许所有来源跨域访问
-CORS(app)
+# 仅允许本机回环来源跨域访问，保障本地账号凭证安全
+CORS(app, resources={r"/*": {"origins": [r"^http://127\.0\.0\.1(:\d+)?$", r"^http://localhost(:\d+)?$"]}})
 
 # 限制上传文件大小为160MB
 app.config['MAX_CONTENT_LENGTH'] = 160 * 1024 * 1024
@@ -1042,4 +1042,7 @@ def sse_stream(status_queue, queue_key=None, timeout_seconds=240):
 
 if __name__ == '__main__':
     ensure_runtime_ready()
-    app.run(host='0.0.0.0' ,port=5409)
+    # 默认仅监听本地回环地址并启用多线程，防止 SSE 登录流阻塞常规请求
+    bind_host = os.environ.get('SAU_HOST', '127.0.0.1')
+    bind_port = int(os.environ.get('SAU_PORT', '5409'))
+    app.run(host=bind_host, port=bind_port, threaded=True)
