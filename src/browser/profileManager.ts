@@ -14,6 +14,7 @@ const activeLocks = new Map<ProfilePlatform, LockEntry>();
 
 export const PLATFORM_LOGIN_URLS: Record<ProfilePlatform, string> = {
   douyin: 'https://www.douyin.com/',
+  bilibili: 'https://www.bilibili.com/',
   kuaishou: 'https://www.kuaishou.com/',
   'wechat-channels': 'https://channels.weixin.qq.com/',
   x: 'https://x.com/i/flow/login',

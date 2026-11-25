@@ -73,6 +73,11 @@ export const douyinAdapter: PlatformAdapter = {
             const authorName =
               document.querySelector('h1')?.textContent?.trim() ||
               document.title.replace(/的主页.*| - 抖音.*/g, '').trim();
+            // 尝试提取博主主页粉丝数与简介（提不到则留空，绝不造假）
+            const fansMatch = text.match(/粉丝\s*([\d.]+[万亿wW]?)/) || text.match(/([\d.]+[万亿wW]?)\s*粉丝/);
+            const fansText = fansMatch ? fansMatch[1] : '';
+            const bioEl = document.querySelector('[class*="signature"], [class*="desc"], [data-e2e="user-info-desc"]');
+            const bio = (bioEl?.textContent || '').trim().slice(0, 300);
 
             const cards = Array.from(document.querySelectorAll('a[href*="/video/"]'));
             const seen = new Set<string>();
@@ -106,7 +111,7 @@ export const douyinAdapter: PlatformAdapter = {
               if (videos.length >= 20) break;
             }
 
-            return { hasCaptcha, hasLoginWall, authorName, videos };
+            return { hasCaptcha, hasLoginWall, authorName, fansText, bio, videos };
           });
 
           return state;
@@ -136,12 +141,15 @@ export const douyinAdapter: PlatformAdapter = {
         summary: v.title,
         body: v.title,
         coverUrl: v.coverUrl,
+        contentType: 'video',
         metrics: {
+          // 抖音网页主页卡片通常仅公开点赞数；播放/评论/收藏/转发若未采集到严格保持 null
           likes: parseCountText(v.likesText),
         },
       }));
 
-      writeLog(`采集完成，提取到 ${items.length} 条可访问抖音作品`);
+      const followerCount = parseCountText(result.fansText);
+      writeLog(`采集完成，提取到 ${items.length} 条可访问抖音作品${followerCount != null ? `，粉丝数 ${followerCount}` : ''}`);
       if (items.length > 0) {
         updateProfileStatus('douyin', { login_status: 'logged_in', capability_status: '已接入并验证', needs_attention: 0 });
       }
@@ -149,6 +157,11 @@ export const douyinAdapter: PlatformAdapter = {
         ok: true,
         capabilityStatus: items.length > 0 ? '已接入并验证' : '暂时不可用',
         items,
+        authorProfile: {
+          name: result.authorName || undefined,
+          followerCount,
+          bio: result.bio || '',
+        },
         logs,
         errorMessage: items.length === 0 ? '页面未返回可解析的作品列表（可能需要登录后查看或主页暂无公开作品）' : undefined,
       };

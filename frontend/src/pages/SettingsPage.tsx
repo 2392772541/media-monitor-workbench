@@ -1,6 +1,7 @@
 import { useEffect, useState } from 'react';
-import { Save, Database } from 'lucide-react';
+import { Save, Database, Sparkles, RefreshCw } from 'lucide-react';
 import { apiRequest } from '../api';
+import type { IntegrationsStatus } from '../types';
 
 interface SettingsPayload {
   settings: Record<string, string>;
@@ -17,11 +18,26 @@ interface SettingsPayload {
 export function SettingsPage({ onToast }: { onToast: (msg: string) => void }) {
   const [data, setData] = useState<SettingsPayload | null>(null);
   const [form, setForm] = useState<Record<string, string>>({});
+  const [integrations, setIntegrations] = useState<IntegrationsStatus | null>(null);
+  const [models, setModels] = useState<string[]>([]);
 
   const load = async () => {
-    const res = await apiRequest<SettingsPayload>('/api/settings');
+    const [res, integ] = await Promise.all([
+      apiRequest<SettingsPayload>('/api/settings'),
+      apiRequest<IntegrationsStatus>('/api/radar/integrations').catch(() => null),
+    ]);
     setData(res);
     setForm(res.settings);
+    if (integ) setIntegrations(integ);
+  };
+
+  const loadModels = async () => {
+    const r = await apiRequest<{ models: string[]; error?: string }>('/api/radar/ai/models');
+    if (r.error) onToast(`拉取模型列表失败：${r.error}`);
+    else {
+      setModels(r.models);
+      onToast(`已从当前接口读取 ${r.models.length} 个可用模型`);
+    }
   };
 
   useEffect(() => {
@@ -43,6 +59,83 @@ export function SettingsPage({ onToast }: { onToast: (msg: string) => void }) {
 
   return (
     <div style={{ display: 'grid', gap: 16 }}>
+      <div className="card">
+        <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: 12 }}>
+          <h3 style={{ margin: 0, fontSize: 15, display: 'flex', alignItems: 'center', gap: 6 }}>
+            <Sparkles size={16} color="#4f46e5" /> AI 选题分析引擎与防重复缓存配置
+          </h3>
+          {integrations && (
+            <span className="metric-chip" style={{ color: integrations.ai.configured ? '#16a34a' : '#dc2626' }}>
+              {integrations.ai.configured
+                ? `已就绪 (${integrations.ai.keySource}) · 缓存回执 ${integrations.ai.okReceipts} 次 · 已分析 ${integrations.ai.analyzedCount} 篇`
+                : '未检测到可用 API Key'}
+            </span>
+          )}
+        </div>
+        <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr 1fr', gap: 12 }}>
+          <div className="form-row">
+            <label className="form-label">OpenAI 兼容接口地址（默认本机 8317 中转）</label>
+            <input
+              className="input"
+              value={form.ai_base_url || 'http://127.0.0.1:8317/v1'}
+              onChange={(e) => setForm({ ...form, ai_base_url: e.target.value })}
+            />
+          </div>
+          <div className="form-row">
+            <label className="form-label">当前使用模型（可点右侧加载列表切换）</label>
+            {models.length > 0 ? (
+              <select className="select" value={form.ai_model || ''} onChange={(e) => setForm({ ...form, ai_model: e.target.value })}>
+                {models.map((m) => (
+                  <option key={m} value={m}>
+                    {m}
+                  </option>
+                ))}
+              </select>
+            ) : (
+              <input
+                className="input"
+                value={form.ai_model || 'grok-4.20-0309-non-reasoning'}
+                onChange={(e) => setForm({ ...form, ai_model: e.target.value })}
+              />
+            )}
+          </div>
+          <div className="form-row">
+            <label className="form-label">自定义 API Key（留空自动复用本机 8317）</label>
+            <input
+              className="input"
+              type="password"
+              placeholder="留空自动读 8317 配置"
+              value={form.ai_api_key || ''}
+              onChange={(e) => setForm({ ...form, ai_api_key: e.target.value })}
+            />
+          </div>
+          <div className="form-row">
+            <label className="form-label">MediaCrawler 评论采集中心目录（无端口直连）</label>
+            <input
+              className="input"
+              value={form.media_crawler_dir || 'E:\\app\\评论爬取'}
+              onChange={(e) => setForm({ ...form, media_crawler_dir: e.target.value })}
+            />
+          </div>
+          <div className="form-row" style={{ gridColumn: 'span 2' }}>
+            <label className="form-label">通义听悟批量转写目录（自动消耗网页时长）</label>
+            <input
+              className="input"
+              value={form.tingwu_dir || 'E:\\工程项目\\codex项目合集\\个人用\\tingwu-web-batch'}
+              onChange={(e) => setForm({ ...form, tingwu_dir: e.target.value })}
+            />
+          </div>
+        </div>
+        <div style={{ display: 'flex', gap: 10 }}>
+          <button className="btn btn-primary" onClick={() => void handleSave()}>
+            <Save size={14} /> 保存模型与集成配置
+          </button>
+          <button className="btn btn-secondary" onClick={() => void loadModels()}>
+            <RefreshCw size={14} /> 读取 8317 可用模型列表
+          </button>
+        </div>
+      </div>
+
       <div className="card">
         <h3 style={{ margin: '0 0 14px', fontSize: 15 }}>采集与调度设置</h3>
         <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 14 }}>

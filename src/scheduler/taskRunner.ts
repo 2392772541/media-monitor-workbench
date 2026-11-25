@@ -1,6 +1,7 @@
-import { getDb, upsertContentWithMetrics } from '../db/database.js';
+import { getDb, updateSourceAuthorProfile, upsertContentWithMetrics } from '../db/database.js';
 import { getAdapter } from '../adapters/index.js';
 import type { SourceRecord } from '../adapters/types.js';
+import { recomputeSourceBreakout } from '../services/breakoutService.js';
 import { log } from '../utils/logger.js';
 
 interface RunningTask {
@@ -150,6 +151,10 @@ async function executeCollection(collectionId: number) {
       return;
     }
 
+    if (res.authorProfile) {
+      updateSourceAuthorProfile(source.id, res.authorProfile);
+    }
+
     let itemsNew = 0;
     let itemsUpdated = 0;
     for (const item of res.items) {
@@ -166,11 +171,17 @@ async function executeCollection(collectionId: number) {
         tags: item.tags,
         publishedAt: item.publishedAt,
         pageUpdatedAt: item.pageUpdatedAt,
+        contentType: item.contentType,
         rawMeta: item.rawMeta,
         metrics: item.metrics,
       });
       if (saved.isNew) itemsNew++;
       else if (saved.metricsUpdated) itemsUpdated++;
+    }
+
+    // 采集完成后自动刷新博主历史作品基线与潜力爆款指数
+    if (res.items.length > 0) {
+      recomputeSourceBreakout(source.id);
     }
 
     const finishedAt = new Date().toISOString();

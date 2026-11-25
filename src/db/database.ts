@@ -4,7 +4,7 @@ import crypto from 'node:crypto';
 import { DatabaseSync } from 'node:sqlite';
 import { PATHS, PLATFORM_PROFILES, getSafeProfileDir } from '../config.js';
 import { log } from '../utils/logger.js';
-import { MIGRATION_V1_SQL } from './schema.js';
+import { MIGRATION_V1_SQL, MIGRATION_V2_SQL } from './schema.js';
 
 let dbInstance: DatabaseSync | null = null;
 
@@ -47,6 +47,7 @@ function runMigrations(db: DatabaseSync): void {
 
   const migrations: Array<{ version: number; name: string; sql: string }> = [
     { version: 1, name: 'initial_schema', sql: MIGRATION_V1_SQL },
+    { version: 2, name: 'topic_radar_v2', sql: MIGRATION_V2_SQL },
   ];
 
   for (const m of migrations) {
@@ -79,6 +80,7 @@ function seedDefaults(db: DatabaseSync): void {
 
   const platformDisplay: Record<string, { name: string; cap: string; note: string }> = {
     douyin: { name: '抖音', cap: '需要登录', note: '独立浏览器配置，首次需扫码登录后方可访问受限主页' },
+    bilibili: { name: 'B站', cap: '已接入并验证', note: '公开接口可直接拉取 UP 主投稿与热榜；扫码登录可提升高频抓取稳定性' },
     kuaishou: { name: '快手', cap: '需要登录', note: '独立浏览器配置，支持扫码维护登录状态' },
     'wechat-channels': { name: '微信视频号', cap: '需要登录', note: '受微信生态限制，需扫码登录视频号助手/网页端并验证权限范围' },
     x: { name: 'X (Twitter)', cap: '需要登录', note: '独立浏览器配置，登录后可查看关注或公开博主时间线' },
@@ -98,7 +100,7 @@ function seedDefaults(db: DatabaseSync): void {
       p,
       meta.name,
       getSafeProfileDir(p),
-      p === 'other' || p === 'youtube' ? 'optional' : 'unknown',
+      p === 'other' || p === 'youtube' || p === 'bilibili' ? 'optional' : 'unknown',
       meta.cap,
       meta.note
     );
@@ -110,10 +112,39 @@ function seedDefaults(db: DatabaseSync): void {
     browser_mode: 'headless',
     scheduler_enabled: 'true',
     auto_backup_enabled: 'true',
+    ai_base_url: 'http://127.0.0.1:8317/v1',
+    ai_model: 'grok-4.20-0309-non-reasoning',
+    ai_api_key: '',
+    ai_auto_analyze: 'true',
+    media_crawler_dir: PATHS.defaultMediaCrawlerDir,
+    tingwu_dir: PATHS.defaultTingwuDir,
   };
   const insertSet = db.prepare('INSERT OR IGNORE INTO app_settings (key, value, updated_at) VALUES (?, ?, ?)');
   for (const [k, v] of Object.entries(defaults)) {
     insertSet.run(k, v, now);
+  }
+
+  // 若尚无自媒体账号定位，自动初始化一条可随时在页面修改的默认配置
+  const accCount = (db.prepare('SELECT COUNT(*) AS c FROM creator_accounts').get() as { c: number }).c;
+  if (accCount === 0) {
+    db.prepare(`
+      INSERT INTO creator_accounts (
+        name, platform_focus, niche, target_audience, content_direction,
+        personal_expertise, style_preferences, is_active,
+        weight_match, weight_heat, weight_diff, weight_experience, weight_timeliness, weight_feasibility,
+        created_at, updated_at
+      ) VALUES (?, ?, ?, ?, ?, ?, ?, 1, 25, 25, 20, 15, 10, 5, ?, ?)
+    `).run(
+      '默认主力账号（可随时修改）',
+      '抖音 / B站 / YouTube',
+      'AI 应用、效率工具、科技与个人成长实操',
+      '对新技术与提效方法感兴趣的上班族、创作者与技术从业者',
+      '实战拆解、真实案例评测、热点背后的原理与落地方法',
+      '具备技术开发底子与视频内容制作经验，擅长把复杂技术讲成大白话实操',
+      '有干货、少废话、强切入点、拒绝纯搬运新闻',
+      now,
+      now
+    );
   }
 }
 
@@ -154,6 +185,7 @@ export interface UpsertContentInput {
   tags?: string[];
   publishedAt?: string | null;
   pageUpdatedAt?: string | null;
+  contentType?: 'video' | 'article' | 'short_post' | 'hot_topic';
   rawMeta?: Record<string, unknown>;
   metrics?: {
     views?: number | null;
@@ -164,11 +196,52 @@ export interface UpsertContentInput {
   };
 }
 
+// 根据平台自动推断默认内容形态
+function inferContentType(platform: string, explicit?: string): 'video' | 'article' | 'short_post' | 'hot_topic' {
+  if (explicit === 'video' || explicit === 'article' || explicit === 'short_post' || explicit === 'hot_topic') {
+    return explicit;
+  }
+  if (['douyin', 'bilibili', 'youtube', 'kuaishou', 'wechat-channels'].includes(platform)) return 'video';
+  if (platform === 'x') return 'short_post';
+  return 'article';
+}
+
+// 更新监控对象（博主）的真实档案字段（粉丝数、头像、简介）
+export function updateSourceAuthorProfile(
+  sourceId: number,
+  profile?: { followerCount?: number | null; avatarUrl?: string; bio?: string }
+): void {
+  if (!profile) return;
+  const db = getDb();
+  const hasFollower = typeof profile.followerCount === 'number' && Number.isFinite(profile.followerCount);
+  const avatar = (profile.avatarUrl || '').trim();
+  const bio = (profile.bio || '').trim();
+  if (!hasFollower && !avatar && !bio) return;
+  db.prepare(`
+    UPDATE sources SET
+      follower_count = CASE WHEN ? IS NOT NULL THEN ? ELSE follower_count END,
+      avatar_url = CASE WHEN ? != '' THEN ? ELSE avatar_url END,
+      bio = CASE WHEN ? != '' THEN ? ELSE bio END,
+      updated_at = ?
+    WHERE id = ?
+  `).run(
+    hasFollower ? profile.followerCount! : null,
+    hasFollower ? profile.followerCount! : null,
+    avatar,
+    avatar,
+    bio,
+    bio,
+    new Date().toISOString(),
+    sourceId
+  );
+}
+
 export function upsertContentWithMetrics(input: UpsertContentInput): { contentId: number; isNew: boolean; metricsUpdated: boolean } {
   const db = getDb();
   const now = new Date().toISOString();
   const canonicalUrl = canonicalizeUrl(input.url);
   const contentHash = computeContentHash(input.title, input.body || input.summary || '', canonicalUrl);
+  const contentType = inferContentType(input.platform, input.contentType);
 
   let existing: { id: number; title: string; body: string } | undefined;
 
@@ -197,8 +270,8 @@ export function upsertContentWithMetrics(input: UpsertContentInput): { contentId
         INSERT INTO contents (
           source_id, platform, platform_item_id, canonical_url, content_hash,
           title, author, summary, body, cover_url, tags_json,
-          published_at, page_updated_at, discovered_at, raw_meta_json
-        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+          published_at, page_updated_at, discovered_at, raw_meta_json, content_type
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
       `)
       .run(
         input.sourceId,
@@ -215,7 +288,8 @@ export function upsertContentWithMetrics(input: UpsertContentInput): { contentId
         input.publishedAt || null,
         input.pageUpdatedAt || null,
         now,
-        JSON.stringify(input.rawMeta || {})
+        JSON.stringify(input.rawMeta || {}),
+        contentType
       );
     contentId = Number(res.lastInsertRowid);
     isNew = true;

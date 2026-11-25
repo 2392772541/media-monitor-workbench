@@ -23,6 +23,7 @@ import {
   startSauBackend,
   stopSauBackend,
 } from '../services/sauBridge.js';
+import { registerRadarRoutes } from './radarRoutes.js';
 
 export function registerRoutes(app: FastifyInstance, shutdownHandler: () => Promise<void>) {
   app.get('/api/health', async () => {
@@ -526,7 +527,10 @@ export function registerRoutes(app: FastifyInstance, shutdownHandler: () => Prom
     const db = getDb();
     const rows = db.prepare('SELECT key, value FROM app_settings').all() as Array<{ key: string; value: string }>;
     const settings: Record<string, string> = {};
-    for (const r of rows) settings[r.key] = r.value;
+    for (const r of rows) {
+      // 严禁在接口中回显任何明文 API Key
+      settings[r.key] = r.key === 'ai_api_key' && r.value ? '********' : r.value;
+    }
     return {
       settings,
       paths: PATHS,
@@ -542,6 +546,7 @@ export function registerRoutes(app: FastifyInstance, shutdownHandler: () => Prom
       ON CONFLICT(key) DO UPDATE SET value = excluded.value, updated_at = excluded.updated_at
     `);
     for (const [k, v] of Object.entries(req.body || {})) {
+      if (k === 'ai_api_key' && String(v) === '********') continue;
       upsert.run(k, String(v), now);
     }
     return { ok: true };
@@ -688,4 +693,7 @@ export function registerRoutes(app: FastifyInstance, shutdownHandler: () => Prom
       await proxySauMultipartUpload(req, reply);
     });
   });
+
+  // 注册「选题监控中心」全部业务接口（驾驶舱、博主分析、热榜、话题雷达、情报库、选题库、AI/MediaCrawler/听悟）
+  registerRadarRoutes(app);
 }

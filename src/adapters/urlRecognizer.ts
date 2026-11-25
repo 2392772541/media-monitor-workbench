@@ -24,6 +24,9 @@ export function recognizeSourceUrl(rawUrl: string): RecognizedSource {
   if (host.includes('douyin.com')) {
     return { platform: 'douyin', sourceType: 'creator', normalizedUrl: u.toString() };
   }
+  if (host.includes('bilibili.com') || host === 'b23.tv') {
+    return { platform: 'bilibili', sourceType: 'creator', normalizedUrl: u.toString() };
+  }
   if (host.includes('kuaishou.com')) {
     return { platform: 'kuaishou', sourceType: 'creator', normalizedUrl: u.toString() };
   }

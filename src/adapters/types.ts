@@ -8,7 +8,7 @@ export type CapabilityStatus =
   | '暂不支持'
   | '采集异常';
 
-export type PlatformKey = 'website' | 'rss' | 'douyin' | 'kuaishou' | 'wechat-channels' | 'x' | 'youtube';
+export type PlatformKey = 'website' | 'rss' | 'douyin' | 'bilibili' | 'kuaishou' | 'wechat-channels' | 'x' | 'youtube';
 
 export interface SourceRecord {
   id: number;
@@ -32,6 +32,7 @@ export interface ExtractedContentItem {
   tags?: string[];
   publishedAt?: string | null;
   pageUpdatedAt?: string | null;
+  contentType?: 'video' | 'article' | 'short_post' | 'hot_topic';
   rawMeta?: Record<string, unknown>;
   metrics?: {
     views?: number | null;
@@ -40,6 +41,13 @@ export interface ExtractedContentItem {
     shares?: number | null;
     favorites?: number | null;
   };
+}
+
+export interface AuthorProfileSnapshot {
+  name?: string;
+  followerCount?: number | null;
+  avatarUrl?: string;
+  bio?: string;
 }
 
 export interface LoginCheckResult {
@@ -63,6 +71,7 @@ export interface FetchResult {
   capabilityStatus: CapabilityStatus;
   authRequired?: boolean;
   items: ExtractedContentItem[];
+  authorProfile?: AuthorProfileSnapshot;
   logs: string[];
   errorMessage?: string;
 }

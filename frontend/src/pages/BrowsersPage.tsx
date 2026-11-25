@@ -1,7 +1,7 @@
 import { useEffect, useState } from 'react';
-import { ExternalLink, RefreshCw, XCircle, ShieldCheck, Copy, Send } from 'lucide-react';
+import { ExternalLink, RefreshCw, XCircle, ShieldCheck, Copy, Send, Mic, MessageSquareText } from 'lucide-react';
 import { apiRequest, fmtTime } from '../api';
-import type { BrowserProfile } from '../types';
+import type { BrowserProfile, IntegrationsStatus } from '../types';
 
 function loginStatusLabel(s: string) {
   const map: Record<string, { text: string; cls: string }> = {
@@ -23,10 +23,16 @@ export function BrowsersPage({
   onNavigate?: (tab: string) => void;
 }) {
   const [profiles, setProfiles] = useState<BrowserProfile[]>([]);
+  const [integrations, setIntegrations] = useState<IntegrationsStatus | null>(null);
   const [busyPlatform, setBusyPlatform] = useState<string | null>(null);
 
   const load = async () => {
-    setProfiles(await apiRequest<BrowserProfile[]>('/api/browsers'));
+    const [p, integ] = await Promise.all([
+      apiRequest<BrowserProfile[]>('/api/browsers'),
+      apiRequest<IntegrationsStatus>('/api/radar/integrations').catch(() => null),
+    ]);
+    setProfiles(p);
+    if (integ) setIntegrations(integ);
   };
 
   useEffect(() => {
@@ -101,6 +107,69 @@ export function BrowsersPage({
           </div>
         </div>
       </div>
+
+      {/* 通义听悟与最新版 MediaCrawler 单端口融合状态卡片 */}
+      {integrations && (
+        <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 14, marginBottom: 16 }}>
+          <div className="panel-card" style={{ marginBottom: 0 }}>
+            <div className="panel-head">
+              <div className="panel-title">
+                <Mic size={16} color="#4f46e5" />
+                <span>通义听悟网页转写集成（免 API 费）</span>
+              </div>
+              <span className="metric-chip" style={{ color: integrations.tingwu.profileExists ? '#16a34a' : '#d97706' }}>
+                {integrations.tingwu.profileExists ? '已保存登录态' : '待首次登录'}
+              </span>
+            </div>
+            <div style={{ fontSize: 12.5, color: 'var(--text-muted)', marginBottom: 10 }}>
+              复用本机 <code>tingwu-web-batch</code> 与 <code>yt-dlp + ffmpeg</code>（
+              {integrations.tingwu.ytDlpAvailable && integrations.tingwu.ffmpegAvailable ? '音视频抽离就绪' : '缺少 yt-dlp/ffmpeg'}），自动消耗你的听悟网页时长。
+              {integrations.tingwu.running && <strong style={{ color: '#4f46e5' }}> 当前任务：{integrations.tingwu.currentJob}</strong>}
+            </div>
+            <div style={{ display: 'flex', gap: 8, flexWrap: 'wrap' }}>
+              <button
+                className="btn btn-primary btn-sm"
+                onClick={async () => {
+                  const r = await apiRequest<{ message: string }>('/api/radar/tingwu/login', { method: 'POST' });
+                  onToast(r.message);
+                }}
+              >
+                打开通义听悟登录窗口
+              </button>
+              <button
+                className="btn btn-secondary btn-sm"
+                onClick={async () => {
+                  const r = await apiRequest<{ message: string }>('/api/radar/tingwu/sync', { method: 'POST' });
+                  onToast(r.message);
+                }}
+              >
+                同步已完成转写文本
+              </button>
+            </div>
+          </div>
+
+          <div className="panel-card" style={{ marginBottom: 0 }}>
+            <div className="panel-head">
+              <div className="panel-title">
+                <MessageSquareText size={16} color="#ea580c" />
+                <span>MediaCrawler 评论深采（单端口直连）</span>
+              </div>
+              <span className="metric-chip" style={{ color: integrations.mediaCrawler.installed ? '#16a34a' : '#dc2626' }}>
+                {integrations.mediaCrawler.installed ? `最新 ${integrations.mediaCrawler.gitCommit}` : '未检测到目录'}
+              </span>
+            </div>
+            <div style={{ fontSize: 12.5, color: 'var(--text-muted)' }}>
+              已合并进 18910 单端口内部调用，<strong>不再额外占用 8089 端口</strong>。在「内容情报库」点选抖音/B站作品即可按需抓真实高赞评论。
+              {integrations.mediaCrawler.running && (
+                <div style={{ color: '#ea580c', marginTop: 4 }}>运行中：{integrations.mediaCrawler.currentTask}</div>
+              )}
+              {integrations.mediaCrawler.lastError && (
+                <div style={{ color: '#dc2626', marginTop: 4 }}>最近异常：{integrations.mediaCrawler.lastError}</div>
+              )}
+            </div>
+          </div>
+        </div>
+      )}
 
       <div className="card table-wrap">
         <table>

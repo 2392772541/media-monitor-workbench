@@ -2,7 +2,7 @@ import fs from 'node:fs';
 import path from 'node:path';
 
 export const PROJECT_ROOT = path.resolve(import.meta.dirname, '..');
-export const HOST = '127.0.0.1';
+export const HOST = '0.0.0.0';
 export const PORT = Number(process.env.MMW_PORT || 18910);
 
 export const PATHS = {
@@ -11,14 +11,20 @@ export const PATHS = {
   profilesRoot: path.join(PROJECT_ROOT, 'browser-profiles'),
   logsDir: path.join(PROJECT_ROOT, 'logs'),
   backupsDir: path.join(PROJECT_ROOT, 'backups'),
+  audioDir: path.join(PROJECT_ROOT, 'data', 'audio'),
+  transcriptsDir: path.join(PROJECT_ROOT, 'data', 'transcripts'),
   frontendDist: path.join(PROJECT_ROOT, 'frontend', 'dist'),
+  // 本机已有的外部工具路径（通过子进程无端口直接集成）
+  defaultMediaCrawlerDir: process.env.MMW_MEDIACRAWLER_DIR || 'E:\\app\\评论爬取',
+  defaultTingwuDir: process.env.MMW_TINGWU_DIR || 'E:\\工程项目\\codex项目合集\\个人用\\tingwu-web-batch',
+  defaultCliProxyConfig: 'C:\\Users\\win10\\Desktop\\CLIProxyAPI_7.0.2_windows_amd64\\config.yaml',
 };
 
-export const PLATFORM_PROFILES = ['douyin', 'kuaishou', 'wechat-channels', 'x', 'youtube', 'other'] as const;
+export const PLATFORM_PROFILES = ['douyin', 'bilibili', 'kuaishou', 'wechat-channels', 'x', 'youtube', 'other'] as const;
 export type ProfilePlatform = (typeof PLATFORM_PROFILES)[number];
 
 export function ensureProjectDirs(): void {
-  for (const dir of [PATHS.dataDir, PATHS.profilesRoot, PATHS.logsDir, PATHS.backupsDir]) {
+  for (const dir of [PATHS.dataDir, PATHS.profilesRoot, PATHS.logsDir, PATHS.backupsDir, PATHS.audioDir, PATHS.transcriptsDir]) {
     fs.mkdirSync(dir, { recursive: true });
   }
   for (const p of PLATFORM_PROFILES) {
