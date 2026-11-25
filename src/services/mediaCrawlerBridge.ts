@@ -31,7 +31,11 @@ function pushLog(msg: string) {
 export function getConfiguredMediaCrawlerDir(): string {
   const db = getDb();
   const row = db.prepare("SELECT value FROM app_settings WHERE key = 'media_crawler_dir'").get() as { value: string } | undefined;
-  return (row?.value || PATHS.defaultMediaCrawlerDir).trim();
+  const configured = (row?.value || '').trim();
+  if (configured && fs.existsSync(path.join(configured, 'main.py'))) {
+    return configured;
+  }
+  return PATHS.defaultMediaCrawlerDir;
 }
 
 export function getMediaCrawlerStatus(): MediaCrawlerStatus {

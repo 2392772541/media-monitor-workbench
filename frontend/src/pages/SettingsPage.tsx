@@ -110,18 +110,20 @@ export function SettingsPage({ onToast }: { onToast: (msg: string) => void }) {
             />
           </div>
           <div className="form-row">
-            <label className="form-label">MediaCrawler 评论采集中心目录（无端口直连）</label>
+            <label className="form-label">MediaCrawler 评论采集目录（留空自动探测 ./tools/MediaCrawler）</label>
             <input
               className="input"
-              value={form.media_crawler_dir || 'E:\\app\\评论爬取'}
+              placeholder="留空自动探测内置或本机目录"
+              value={form.media_crawler_dir || ''}
               onChange={(e) => setForm({ ...form, media_crawler_dir: e.target.value })}
             />
           </div>
           <div className="form-row" style={{ gridColumn: 'span 2' }}>
-            <label className="form-label">通义听悟批量转写目录（自动消耗网页时长）</label>
+            <label className="form-label">通义听悟转写目录（留空默认使用仓库内置脚本）</label>
             <input
               className="input"
-              value={form.tingwu_dir || 'E:\\工程项目\\codex项目合集\\个人用\\tingwu-web-batch'}
+              placeholder="留空自动使用内置 ./tools/tingwu-web-batch"
+              value={form.tingwu_dir || ''}
               onChange={(e) => setForm({ ...form, tingwu_dir: e.target.value })}
             />
           </div>

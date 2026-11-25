@@ -1,9 +1,71 @@
 import fs from 'node:fs';
+import os from 'node:os';
 import path from 'node:path';
 
 export const PROJECT_ROOT = path.resolve(import.meta.dirname, '..');
-export const HOST = '0.0.0.0';
+
+// 轻量零依赖加载同目录 .env（不覆盖已显式设置的系统环境变量）
+function loadDotEnvIfPresent(): void {
+  const envFile = path.join(PROJECT_ROOT, '.env');
+  if (!fs.existsSync(envFile)) return;
+  try {
+    const lines = fs.readFileSync(envFile, 'utf8').split(/\r?\n/);
+    for (const raw of lines) {
+      const line = raw.trim();
+      if (!line || line.startsWith('#')) continue;
+      const eq = line.indexOf('=');
+      if (eq <= 0) continue;
+      const key = line.slice(0, eq).trim();
+      let val = line.slice(eq + 1).trim();
+      if ((val.startsWith('"') && val.endsWith('"')) || (val.startsWith("'") && val.endsWith("'"))) {
+        val = val.slice(1, -1);
+      }
+      if (key && process.env[key] === undefined) {
+        process.env[key] = val;
+      }
+    }
+  } catch {
+    // ignore malformed .env
+  }
+}
+loadDotEnvIfPresent();
+
+export const HOST = process.env.MMW_HOST || '0.0.0.0';
 export const PORT = Number(process.env.MMW_PORT || 18910);
+
+// 跨电脑自动探测 MediaCrawler（优先环境变量 -> 仓库内 ./tools/MediaCrawler -> 常见本机目录）
+function resolveDefaultMediaCrawlerDir(): string {
+  if (process.env.MMW_MEDIACRAWLER_DIR) return process.env.MMW_MEDIACRAWLER_DIR;
+  const bundled = path.join(PROJECT_ROOT, 'tools', 'MediaCrawler');
+  if (fs.existsSync(path.join(bundled, 'main.py'))) return bundled;
+  const legacyLocal = 'E:\\app\\评论爬取';
+  if (fs.existsSync(path.join(legacyLocal, 'main.py'))) return legacyLocal;
+  return bundled;
+}
+
+// 跨电脑自动探测通义听悟脚本（优先环境变量 -> 仓库内置 ./tools/tingwu-web-batch）
+function resolveDefaultTingwuDir(): string {
+  if (process.env.MMW_TINGWU_DIR) return process.env.MMW_TINGWU_DIR;
+  return path.join(PROJECT_ROOT, 'tools', 'tingwu-web-batch');
+}
+
+// 仅当本机存在本地中转配置时可选探测，换新电脑不存在时绝不报错
+function resolveOptionalLocalProxyConfig(): string {
+  if (process.env.MMW_CLIPROXY_CONFIG) return process.env.MMW_CLIPROXY_CONFIG;
+  const desktop = path.join(os.homedir(), 'Desktop');
+  if (fs.existsSync(desktop)) {
+    try {
+      const dir = fs.readdirSync(desktop).find((name) => /^CLIProxyAPI/i.test(name));
+      if (dir) {
+        const cfg = path.join(desktop, dir, 'config.yaml');
+        if (fs.existsSync(cfg)) return cfg;
+      }
+    } catch {
+      // ignore
+    }
+  }
+  return '';
+}
 
 export const PATHS = {
   dataDir: path.join(PROJECT_ROOT, 'data'),
@@ -14,10 +76,9 @@ export const PATHS = {
   audioDir: path.join(PROJECT_ROOT, 'data', 'audio'),
   transcriptsDir: path.join(PROJECT_ROOT, 'data', 'transcripts'),
   frontendDist: path.join(PROJECT_ROOT, 'frontend', 'dist'),
-  // 本机已有的外部工具路径（通过子进程无端口直接集成）
-  defaultMediaCrawlerDir: process.env.MMW_MEDIACRAWLER_DIR || 'E:\\app\\评论爬取',
-  defaultTingwuDir: process.env.MMW_TINGWU_DIR || 'E:\\工程项目\\codex项目合集\\个人用\\tingwu-web-batch',
-  defaultCliProxyConfig: 'C:\\Users\\win10\\Desktop\\CLIProxyAPI_7.0.2_windows_amd64\\config.yaml',
+  defaultMediaCrawlerDir: resolveDefaultMediaCrawlerDir(),
+  defaultTingwuDir: resolveDefaultTingwuDir(),
+  defaultCliProxyConfig: resolveOptionalLocalProxyConfig(),
 };
 
 export const PLATFORM_PROFILES = ['douyin', 'bilibili', 'kuaishou', 'wechat-channels', 'x', 'youtube', 'other'] as const;
@@ -67,6 +128,18 @@ export function resolveChromiumExecutable(): string | undefined {
 
   for (const d of dirs) {
     const exe = path.join(msPlaywright, d.name, 'chrome-win64', 'chrome.exe');
+    if (fs.existsSync(exe)) return exe;
+  }
+
+  // 新电脑若尚未下载 Playwright Chromium 缓存，自动回退复用本机已安装的 Chrome/Edge 程序本体
+  // （仍严格运行在独立 browser-profiles/ 配置目录中，绝不触碰日常浏览器数据）
+  const systemBrowsers = [
+    'C:\\Program Files\\Google\\Chrome\\Application\\chrome.exe',
+    'C:\\Program Files (x86)\\Google\\Chrome\\Application\\chrome.exe',
+    'C:\\Program Files (x86)\\Microsoft\\Edge\\Application\\msedge.exe',
+    'C:\\Program Files\\Microsoft\\Edge\\Application\\msedge.exe',
+  ];
+  for (const exe of systemBrowsers) {
     if (fs.existsSync(exe)) return exe;
   }
   return undefined;

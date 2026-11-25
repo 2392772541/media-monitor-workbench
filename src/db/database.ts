@@ -112,12 +112,12 @@ function seedDefaults(db: DatabaseSync): void {
     browser_mode: 'headless',
     scheduler_enabled: 'true',
     auto_backup_enabled: 'true',
-    ai_base_url: 'http://127.0.0.1:8317/v1',
-    ai_model: 'grok-4.20-0309-non-reasoning',
+    ai_base_url: process.env.AI_BASE_URL || 'http://127.0.0.1:8317/v1',
+    ai_model: process.env.AI_MODEL || 'grok-4.20-0309-non-reasoning',
     ai_api_key: '',
     ai_auto_analyze: 'true',
-    media_crawler_dir: PATHS.defaultMediaCrawlerDir,
-    tingwu_dir: PATHS.defaultTingwuDir,
+    media_crawler_dir: '',
+    tingwu_dir: '',
   };
   const insertSet = db.prepare('INSERT OR IGNORE INTO app_settings (key, value, updated_at) VALUES (?, ?, ?)');
   for (const [k, v] of Object.entries(defaults)) {

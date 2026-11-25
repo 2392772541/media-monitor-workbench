@@ -32,7 +32,11 @@ function addLog(msg: string) {
 export function getConfiguredTingwuDir(): string {
   const db = getDb();
   const row = db.prepare("SELECT value FROM app_settings WHERE key = 'tingwu_dir'").get() as { value: string } | undefined;
-  return (row?.value || PATHS.defaultTingwuDir).trim();
+  const configured = (row?.value || '').trim();
+  if (configured && fs.existsSync(path.join(configured, 'src', 'tingwu.mjs'))) {
+    return configured;
+  }
+  return PATHS.defaultTingwuDir;
 }
 
 function hasExecutable(name: string): boolean {

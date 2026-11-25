@@ -28,13 +28,13 @@ interface AiRuntimeConfig {
   baseUrl: string;
   model: string;
   apiKey: string;
-  keySource: 'settings' | 'local-8317' | 'missing';
+  keySource: 'settings' | 'env' | 'local-8317' | 'missing';
 }
 
-// 从本机 8317 代理配置文件安全读取密钥（仅在后端内存使用，绝不打印或返回给前端）
+// 从本机可选中转配置安全读取密钥（仅在后端内存使用，绝不打印或返回给前端）
 function readLocal8317Key(): string {
   try {
-    if (!fs.existsSync(PATHS.defaultCliProxyConfig)) return '';
+    if (!PATHS.defaultCliProxyConfig || !fs.existsSync(PATHS.defaultCliProxyConfig)) return '';
     const text = fs.readFileSync(PATHS.defaultCliProxyConfig, 'utf8');
     let inKeys = false;
     for (const rawLine of text.split(/\r?\n/)) {
@@ -66,11 +66,18 @@ export function getAiRuntimeConfig(): AiRuntimeConfig {
   const map: Record<string, string> = {};
   for (const r of rows) map[r.key] = r.value;
 
-  const baseUrl = (map.ai_base_url || 'http://127.0.0.1:8317/v1').trim().replace(/\/+$/, '');
-  const model = (map.ai_model || 'grok-4.20-0309-non-reasoning').trim();
+  const envUrl = (process.env.AI_BASE_URL || '').trim();
+  const envModel = (process.env.AI_MODEL || '').trim();
+  const envKey = (process.env.AI_API_KEY || '').trim();
+
+  const baseUrl = (map.ai_base_url || envUrl || 'http://127.0.0.1:8317/v1').trim().replace(/\/+$/, '');
+  const model = (map.ai_model || envModel || 'grok-4.20-0309-non-reasoning').trim();
   const customKey = (map.ai_api_key || '').trim();
   if (customKey) {
     return { baseUrl, model, apiKey: customKey, keySource: 'settings' };
+  }
+  if (envKey) {
+    return { baseUrl, model, apiKey: envKey, keySource: 'env' };
   }
   const localKey = readLocal8317Key();
   if (localKey) {
