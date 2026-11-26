@@ -196,17 +196,39 @@ async def _wait_for_douyin_login(
     max_checks: int = 90,
 ) -> dict:
     qrcode_path = Path(qrcode_info["image_path"]) if qrcode_info.get("image_path") else None
+    last_logged_url = ""
+    last_status_hint = ""
     for _ in range(max_checks):
         if page.is_closed():
             return _build_login_result(False, "closed", "登录浏览器窗口已关闭，请重新扫码", account_file, qrcode_info, "")
 
+        cur_url = page.url or ""
+        if cur_url != last_logged_url:
+            douyin_logger.info(_msg("🌐", f"当前抖音登录页地址: {cur_url}"))
+            last_logged_url = cur_url
+
         if await _is_douyin_login_completed(page):
-            douyin_logger.info(_msg("🥳", f"扫码成功，已经跳转到登录后页面: {page.url}"))
+            douyin_logger.info(_msg("🥳", f"扫码成功，已经跳转到登录后页面: {cur_url}"))
             await asyncio.sleep(2)
             await context.storage_state(path=account_file)
             if await cookie_auth(account_file):
-                return _build_login_result(True, "success", "抖音扫码登录成功", account_file, qrcode_info, page.url)
+                return _build_login_result(True, "success", "抖音扫码登录成功", account_file, qrcode_info, cur_url)
             douyin_logger.warning(_msg("⏳", "检测到页面跳转但登录态尚未就绪，继续等待验证完成"))
+
+        # 检测是否出现已扫码待确认或二次验证弹窗，及时同步给前端提示
+        try:
+            body_preview = await page.evaluate("() => (document.body && document.body.innerText ? document.body.innerText.slice(0, 600) : '')")
+            hint = ""
+            if any(k in body_preview for k in ("安全验证", "短信验证", "获取验证码", "身份验证", "滑块", "拖动下方滑块", "验证手机号")):
+                hint = "检测到抖音弹出安全验证/短信验证，请在弹出的浏览器窗口内完成验证"
+            elif any(k in body_preview for k in ("扫描成功", "扫码成功", "已扫码", "请在手机上确认", "确认登录")):
+                hint = "手机已扫码，请在抖音 App 上点击“确认登录”"
+            if hint and hint != last_status_hint:
+                last_status_hint = hint
+                douyin_logger.info(_msg("📢", hint))
+                await _emit_qrcode_callback(qrcode_callback, {"status_message": hint})
+        except Exception:
+            pass
 
         for expired_text in ("二维码失效", "二维码已过期", "已失效"):
             try:
@@ -217,6 +239,7 @@ async def _wait_for_douyin_login(
                     await asyncio.sleep(1)
                     qrcode_info = await _save_douyin_qrcode(page, account_file, qrcode_path, qrcode_callback=qrcode_callback)
                     qrcode_path = Path(qrcode_info["image_path"])
+                    last_status_hint = ""
                     break
             except Exception:
                 continue
