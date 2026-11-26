@@ -7,6 +7,7 @@ import asyncio
 
 from conf import LOCAL_CHROME_PATH, LOCAL_CHROME_HEADLESS
 from utils.base_social_media import set_init_script
+from utils.browser_hook import resolve_chromium_launch_kwargs
 from utils.files_times import get_absolute_path
 from utils.log import tencent_logger
 
@@ -32,21 +33,61 @@ def format_str_for_short_title(origin_title: str) -> str:
 
 
 async def cookie_auth(account_file):
+    if not account_file or not os.path.exists(account_file):
+        return False
+    browser = context = None
     async with async_playwright() as playwright:
-        browser = await playwright.chromium.launch(headless=LOCAL_CHROME_HEADLESS)
-        context = await browser.new_context(storage_state=account_file)
-        context = await set_init_script(context)
-        # 创建一个新的页面
-        page = await context.new_page()
-        # 访问指定的 URL
-        await page.goto("https://channels.weixin.qq.com/platform/post/create")
         try:
-            await page.wait_for_selector('div.title-name:has-text("微信小店")', timeout=5000)  # 等待5秒
-            tencent_logger.error("[+] 等待5秒 cookie 失效")
-            return False
-        except:
+            options = resolve_chromium_launch_kwargs(
+                playwright,
+                headless=True,
+                args=["--no-proxy-server", "--lang=zh-CN"],
+            )
+            browser = await playwright.chromium.launch(**options)
+            context = await browser.new_context(storage_state=account_file)
+            context = await set_init_script(context)
+            page = await context.new_page()
+            await page.goto("https://channels.weixin.qq.com/platform/post/create", wait_until="domcontentloaded", timeout=20000)
+            await page.wait_for_timeout(3000)
+
+            url = page.url or ""
+            if "/login" in url.lower() or not url.startswith("https://channels.weixin.qq.com/platform"):
+                tencent_logger.error(f"[+] 视频号跳转回登录页({url})，cookie 失效")
+                return False
+
+            try:
+                shop_el = page.locator('div.title-name:has-text("微信小店")').first
+                if await shop_el.count() and await shop_el.is_visible():
+                    tencent_logger.error("[+] 检测到未登录提示，cookie 失效")
+                    return False
+            except Exception:
+                pass
+
+            try:
+                if await page.locator("iframe").count():
+                    frame_src = (await page.locator("iframe").first.get_attribute("src")) or ""
+                    if "login" in frame_src.lower() or "qrconnect" in frame_src.lower():
+                        tencent_logger.error("[+] 检测到登录二维码框，cookie 失效")
+                        return False
+            except Exception:
+                pass
+
             tencent_logger.success("[+] cookie 有效")
             return True
+        except Exception as exc:
+            tencent_logger.warning(f"[+] 视频号 cookie 校验异常，按失效处理: {exc}")
+            return False
+        finally:
+            if context is not None:
+                try:
+                    await context.close()
+                except Exception:
+                    pass
+            if browser is not None:
+                try:
+                    await browser.close()
+                except Exception:
+                    pass
 
 
 async def get_tencent_cookie(account_file):
@@ -136,8 +177,13 @@ class TencentVideo(object):
         await file_input.set_input_files(self.file_path)
 
     async def upload(self, playwright: Playwright) -> None:
-        # 使用 Chromium (这里使用系统内浏览器，用chromium 会造成h264错误
-        browser = await playwright.chromium.launch(headless=self.headless, executable_path=self.local_executable_path or None)
+        # 使用系统 Chrome 避免捆绑 Chromium 缺少 H.264 编解码器
+        launch_options = resolve_chromium_launch_kwargs(
+            playwright,
+            headless=self.headless,
+            args=["--no-proxy-server", "--lang=zh-CN"],
+        )
+        browser = await playwright.chromium.launch(**launch_options)
         # 创建一个浏览器上下文，使用指定的 cookie 文件
         context = await browser.new_context(storage_state=f"{self.account_file}")
         context = await set_init_script(context)

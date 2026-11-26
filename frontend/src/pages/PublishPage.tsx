@@ -444,11 +444,20 @@ export function PublishPage({
       clearSse();
       setSseState('error');
       setSseMsg('扫码登录超时，请重试');
-    }, 240000);
+    }, 305000);
 
     es.onmessage = (evt) => {
       const raw = (evt.data || '').trim();
       if (!raw) return;
+      if (raw.startsWith('STATUS:')) {
+        if (qrTimerRef.current) {
+          window.clearTimeout(qrTimerRef.current);
+          qrTimerRef.current = null;
+        }
+        setSseState('qr');
+        setSseMsg(raw.slice(7) || '已弹出登录窗口，请直接在窗口内完成扫码或验证');
+        return;
+      }
       if (raw.startsWith('ERROR:')) {
         clearSse();
         setSseState('error');
@@ -484,7 +493,7 @@ export function PublishPage({
             : `data:image/png;base64,${raw}`
         );
         setSseState('qr');
-        setSseMsg('请使用对应平台 App 扫描二维码');
+        setSseMsg('请用对应平台 App 扫码；已同步弹出浏览器窗口，若弹出滑块或短信验证请直接在窗口内完成');
       }
     };
 

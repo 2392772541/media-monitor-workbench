@@ -1013,8 +1013,8 @@ def run_async_function(type,id,status_queue):
     finally:
         loop.close()
 
-# SSE 流生成器函数
-def sse_stream(status_queue, queue_key=None, timeout_seconds=240):
+# SSE 流生成器函数（超时设为 300 秒，略高于后台 270 秒轮询，确保后端能返回明确结果）
+def sse_stream(status_queue, queue_key=None, timeout_seconds=300):
     deadline = time.monotonic() + timeout_seconds
     last_keepalive = time.monotonic()
     try:

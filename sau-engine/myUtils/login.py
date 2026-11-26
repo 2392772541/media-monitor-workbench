@@ -1,5 +1,6 @@
 import asyncio
 import base64
+import os
 import sqlite3
 import uuid
 from pathlib import Path
@@ -13,16 +14,22 @@ from uploader.xiaohongshu_uploader.main import xiaohongshu_cookie_gen as uploade
 from utils.base_social_media import set_init_script
 from utils.browser_hook import resolve_chromium_launch_kwargs
 
-# 统一获取浏览器启动配置（防风控+引入本地浏览器）
-def get_browser_options(playwright=None):
+# 交互式扫码登录默认弹出可见窗口，方便人工过滑块与短信验证；如需无头可设 SAU_LOGIN_HEADLESS=1
+LOGIN_BROWSER_HEADLESS = os.environ.get("SAU_LOGIN_HEADLESS", "0").strip().lower() in {"1", "true", "yes"}
+
+
+# 统一获取浏览器启动配置（防风控+直连+引入本地浏览器）
+def get_browser_options(playwright=None, headless: bool | None = None):
     return resolve_chromium_launch_kwargs(
         playwright,
-        headless=LOCAL_CHROME_HEADLESS,
+        headless=LOGIN_BROWSER_HEADLESS if headless is None else headless,
         args=[
+            '--no-proxy-server',
             '--disable-blink-features=AutomationControlled',  # 核心防爬屏蔽：去掉 window.navigator.webdriver 标签
             '--lang=zh-CN',
             '--disable-infobars',
-            '--start-maximized'
+            '--no-first-run',
+            '--no-default-browser-check',
         ],
     )
 
@@ -54,6 +61,10 @@ def _record_account(platform_type: int, cookie_filename: str, account_id: str):
 
 def _make_qr_callback(status_queue):
     async def _on_qr(payload: dict):
+        status_message = (payload or {}).get("status_message") or ""
+        if status_message:
+            _emit_status(status_queue, f"STATUS:{status_message}")
+            return
         data_url = (payload or {}).get("image_data_url") or ""
         image_path = (payload or {}).get("image_path") or ""
         if data_url.startswith(("data:image", "http://", "https://")):
@@ -74,10 +85,14 @@ async def _complete_login(platform_type, account_id, context, status_queue):
     cookies_dir = Path(BASE_DIR / "cookiesFile")
     cookies_dir.mkdir(parents=True, exist_ok=True)
     cookie_filename = f"{uuid_v1}.json"
-    await context.storage_state(path=cookies_dir / cookie_filename)
+    cookie_file = cookies_dir / cookie_filename
+    await context.storage_state(path=cookie_file)
     result = await check_cookie(platform_type, cookie_filename)
     if not result:
-        _emit_status(status_queue, "500")
+        try:
+            cookie_file.unlink(missing_ok=True)
+        except OSError:
+            pass
         return False
     _record_account(platform_type, cookie_filename, account_id)
     _emit_status(status_queue, "200")
@@ -94,7 +109,7 @@ async def _run_uploader_login(platform_type: int, account_id: str, status_queue,
         result = await login_fn(
             str(cookie_path),
             qrcode_callback=_make_qr_callback(status_queue),
-            headless=LOCAL_CHROME_HEADLESS,
+            headless=LOGIN_BROWSER_HEADLESS,
         )
         if isinstance(result, dict) and result.get("success") and cookie_path.is_file():
             _record_account(platform_type, cookie_filename, account_id)
@@ -117,38 +132,79 @@ async def douyin_cookie_gen(id, status_queue):
     return await _run_uploader_login(3, id, status_queue, uploader_douyin_cookie_gen)
 
 
+async def _capture_tencent_qr(page) -> str:
+    iframe_locator = page.frame_locator("iframe").first
+    img_locator = iframe_locator.get_by_role("img").first
+    await img_locator.wait_for(state="visible", timeout=20000)
+    # 等待二维码图片真正解码完成再截图，避免截到空白图
+    for _ in range(20):
+        try:
+            ready = await img_locator.evaluate("el => Boolean(el.complete && el.naturalWidth > 0)")
+            if ready:
+                break
+        except Exception:
+            pass
+        await asyncio.sleep(0.25)
+    src = await img_locator.get_attribute("src")
+    if src and src.startswith("data:image"):
+        return src
+    png_bytes = await img_locator.screenshot()
+    return f"data:image/png;base64,{base64.b64encode(png_bytes).decode('ascii')}"
+
+
 # 视频号登录
 async def get_tencent_cookie(id, status_queue):
-    url_changed_event = asyncio.Event()
     browser = context = page = None
     async with async_playwright() as playwright:
         try:
-            options = get_browser_options(playwright)
+            options = get_browser_options(playwright, headless=LOGIN_BROWSER_HEADLESS)
             browser = await playwright.chromium.launch(**options)
             context = await browser.new_context()
             context = await set_init_script(context)
             page = await context.new_page()
-            await page.goto("https://channels.weixin.qq.com", timeout=30000)
-            original_url = page.url
-            page.on(
-                'framenavigated',
-                lambda frame: url_changed_event.set() if frame == page.main_frame and page.url != original_url else None
-            )
-            iframe_locator = page.frame_locator("iframe").first
-            img_locator = iframe_locator.get_by_role("img").first
-            await img_locator.wait_for(state="visible", timeout=20000)
-            src = await img_locator.get_attribute("src")
-            if src and src.startswith("data:image"):
-                qr_payload = src
-            else:
-                png_bytes = await img_locator.screenshot()
-                qr_payload = f"data:image/png;base64,{base64.b64encode(png_bytes).decode('ascii')}"
-            print("✅ 获取视频号二维码成功")
-            _emit_status(status_queue, qr_payload)
-            await asyncio.wait_for(url_changed_event.wait(), timeout=200)
-            print("监听页面跳转成功")
-            await _complete_login(2, id, context, status_queue)
-        except asyncio.TimeoutError:
+            await page.goto("https://channels.weixin.qq.com/login.html", wait_until="domcontentloaded", timeout=30000)
+
+            try:
+                qr_payload = await _capture_tencent_qr(page)
+                print("✅ 获取视频号二维码成功")
+                _emit_status(status_queue, qr_payload)
+            except Exception as qr_exc:
+                if LOGIN_BROWSER_HEADLESS:
+                    raise
+                print(f"⚠️ 未能自动截取视频号二维码，请直接在弹出窗口扫码: {qr_exc}")
+                _emit_status(status_queue, "STATUS:已弹出微信视频号登录窗口，请直接在窗口内用微信扫码登录")
+
+            # 轮询最多 270 秒，仅当真实进入 /platform 且离开登录页后校验并保存
+            for _ in range(135):
+                if page.is_closed():
+                    _emit_status(status_queue, "ERROR:登录浏览器窗口已关闭，请重新扫码")
+                    _emit_status(status_queue, "500")
+                    return None
+
+                url = page.url or ""
+                if url.startswith("https://channels.weixin.qq.com/platform") and "/login" not in url.lower():
+                    await asyncio.sleep(2)
+                    if await _complete_login(2, id, context, status_queue):
+                        print("监听视频号登录成功")
+                        return True
+                    print("⏳ 视频号已跳转但登录态校验暂未通过，继续等待...")
+
+                # 若二维码过期则尝试自动刷新并重新推送
+                try:
+                    iframe_locator = page.frame_locator("iframe").first
+                    for expired_text in ("二维码已失效", "重新获取", "刷新"):
+                        btn = iframe_locator.get_by_text(expired_text).first
+                        if await btn.count() and await btn.is_visible():
+                            await btn.click()
+                            await asyncio.sleep(1.5)
+                            qr_payload = await _capture_tencent_qr(page)
+                            _emit_status(status_queue, qr_payload)
+                            break
+                except Exception:
+                    pass
+
+                await asyncio.sleep(2)
+
             _emit_status(status_queue, "ERROR:视频号扫码等待超时，请重试")
             _emit_status(status_queue, "500")
             print("监听页面跳转超时")

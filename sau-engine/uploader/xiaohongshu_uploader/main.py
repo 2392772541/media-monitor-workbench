@@ -134,9 +134,36 @@ async def _save_xhs_qrcode(
     return qrcode_info
 
 
+def _xhs_launch_kwargs(headless: bool) -> dict:
+    # 小红书创作者平台直连绕过系统代理，避免 300012 网络风控
+    kwargs: dict = {
+        "headless": headless,
+        "args": [
+            "--no-proxy-server",
+            "--lang=zh-CN",
+            "--no-first-run",
+            "--no-default-browser-check",
+        ],
+    }
+    if LOCAL_CHROME_PATH and os.path.exists(LOCAL_CHROME_PATH):
+        kwargs["executable_path"] = LOCAL_CHROME_PATH
+    else:
+        kwargs["channel"] = "chrome"
+    return kwargs
+
+
 async def _is_xhs_login_completed(page: Page) -> bool:
-    if page.url.startswith(XHS_LOGIN_URL):
+    url = page.url or ""
+    if not url.startswith("https://creator.xiaohongshu.com/"):
         return False
+    if url.startswith(XHS_LOGIN_URL) or "/login" in url.lower():
+        return False
+
+    try:
+        if await page.get_by_text("当前网络存在风险").count() or await page.get_by_text("安全限制").count():
+            return False
+    except Exception:
+        pass
 
     login_box = page.locator(XHS_LOGIN_BOX_SELECTOR).first
     if not await login_box.count():
@@ -149,23 +176,25 @@ async def _is_xhs_login_completed(page: Page) -> bool:
 
 
 async def cookie_auth(account_file):
-    if not os.path.exists(account_file):
+    if not account_file or not os.path.exists(account_file):
         return False
 
     async with async_playwright() as playwright:
-        if LOCAL_CHROME_PATH:
-            browser = await playwright.chromium.launch(headless=True, executable_path=LOCAL_CHROME_PATH)
-        else:
-            browser = await playwright.chromium.launch(headless=True, channel="chrome")
+        browser = await playwright.chromium.launch(**_xhs_launch_kwargs(headless=True))
         try:
             context = await browser.new_context(storage_state=account_file)
             context = await set_init_script(context)
             page = await context.new_page()
-            await page.goto(XHS_PUBLISH_VIDEO_URL)
+            await page.goto(XHS_PUBLISH_VIDEO_URL, wait_until="domcontentloaded", timeout=20000)
             await page.wait_for_timeout(3000)
 
-            if page.url.startswith(XHS_LOGIN_URL):
+            url = page.url or ""
+            if url.startswith(XHS_LOGIN_URL) or "/login" in url.lower():
                 xiaohongshu_logger.info(_msg("🥹", "cookie 已失效，得重新登录一下"))
+                return False
+
+            if await page.get_by_text("当前网络存在风险").count() or await page.get_by_text("安全限制").count():
+                xiaohongshu_logger.warning(_msg("😵", "小红书触发网络风控(300012)，按失效处理"))
                 return False
 
             login_box = page.locator(XHS_LOGIN_BOX_SELECTOR).first
@@ -213,7 +242,7 @@ async def xiaohongshu_cookie_gen(
     account_file,
     qrcode_callback=None,
     poll_interval: int = 3,
-    max_checks: int = 100,
+    max_checks: int = 90,
     headless: bool = LOCAL_CHROME_HEADLESS,
 ):
     if headless:
@@ -223,7 +252,7 @@ async def xiaohongshu_cookie_gen(
     account_path.parent.mkdir(parents=True, exist_ok=True)
 
     async with async_playwright() as playwright:
-        browser = await playwright.chromium.launch(headless=headless, channel="chrome")
+        browser = await playwright.chromium.launch(**_xhs_launch_kwargs(headless=headless))
         context = await browser.new_context()
         context = await set_init_script(context)
         qrcode_path = None
@@ -231,28 +260,51 @@ async def xiaohongshu_cookie_gen(
         result = _build_login_result(False, "failed", "小红书登录失败", account_file)
         try:
             page = await context.new_page()
-            await page.goto(XHS_LOGIN_URL)
-            qrcode_info = await _save_xhs_qrcode(page, account_file, qrcode_callback=qrcode_callback)
-            qrcode_path = Path(qrcode_info["image_path"])
+            await page.goto(XHS_LOGIN_URL, wait_until="domcontentloaded", timeout=30000)
+            try:
+                qrcode_info = await _save_xhs_qrcode(page, account_file, qrcode_callback=qrcode_callback)
+                qrcode_path = Path(qrcode_info["image_path"])
+            except Exception as qr_exc:
+                if headless:
+                    raise
+                xiaohongshu_logger.warning(_msg("⚠️", f"未能自动抓取小红书二维码，请直接在弹出窗口登录: {qr_exc}"))
+                await _emit_qrcode_callback(
+                    qrcode_callback,
+                    {"status_message": "已弹出小红书登录窗口，请直接在窗口内扫码或手机验证码登录"},
+                )
             xiaohongshu_logger.info(_msg("🧍", "请扫码，小人正在耐心等待登录完成"))
 
             for _ in range(max_checks):
+                if page.is_closed():
+                    result = _build_login_result(False, "closed", "登录浏览器窗口已关闭，请重新扫码", account_file, qrcode_info, "")
+                    return result
+
                 if await _is_xhs_login_completed(page):
                     await asyncio.sleep(2)
                     await context.storage_state(path=account_file)
                     if await cookie_auth(account_file):
                         xiaohongshu_logger.success(_msg("🥳", "小红书扫码登录成功，小人开心收工"))
                         result = _build_login_result(True, "success", "小红书扫码登录成功", account_file, qrcode_info, page.url)
-                    else:
-                        result = _build_login_result(
-                            False,
-                            "cookie_invalid",
-                            "小红书扫码流程结束，但 cookie 校验失败",
-                            account_file,
-                            qrcode_info,
-                            page.url,
-                        )
-                    return result
+                        return result
+                    xiaohongshu_logger.warning(_msg("⏳", "检测到页面跳转但登录态尚未就绪，继续等待"))
+
+                for expired_text in ("二维码已过期", "二维码失效", "点击刷新"):
+                    try:
+                        expired_btn = page.get_by_text(expired_text).first
+                        if await expired_btn.count() and await expired_btn.is_visible():
+                            xiaohongshu_logger.warning(_msg("😵", "小红书二维码失效了，小人马上去刷新"))
+                            await expired_btn.click()
+                            await asyncio.sleep(1.5)
+                            qrcode_info = await _save_xhs_qrcode(
+                                page,
+                                account_file,
+                                qrcode_path,
+                                qrcode_callback=qrcode_callback,
+                            )
+                            qrcode_path = Path(qrcode_info["image_path"])
+                            break
+                    except Exception:
+                        continue
 
                 await asyncio.sleep(poll_interval)
 
@@ -262,14 +314,22 @@ async def xiaohongshu_cookie_gen(
                 "等待小红书扫码登录超时",
                 account_file,
                 qrcode_info,
-                page.url,
+                "" if page.is_closed() else page.url,
             )
         except Exception as exc:
-            result = _build_login_result(False, "failed", str(exc), account_file, current_url=page.url if "page" in locals() else "")
+            current_url = ""
+            if "page" in locals() and not page.is_closed():
+                current_url = page.url
+            result = _build_login_result(False, "failed", str(exc), account_file, current_url=current_url)
         finally:
             if remove_qrcode_file(qrcode_path):
                 xiaohongshu_logger.info(_msg("🧹", f"临时二维码文件已清理: {qrcode_path}"))
             if not result["success"]:
+                if os.path.exists(account_file):
+                    try:
+                        os.remove(account_file)
+                    except OSError:
+                        pass
                 xiaohongshu_logger.error(_msg("😢", f"登录失败: {result['message']}"))
             await context.close()
             await browser.close()
