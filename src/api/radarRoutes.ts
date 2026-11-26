@@ -418,7 +418,8 @@ export function registerRadarRoutes(app: FastifyInstance): void {
                (SELECT comments FROM content_metrics m WHERE m.content_id = c.id ORDER BY captured_at DESC LIMIT 1) AS latest_comments,
                (SELECT favorites FROM content_metrics m WHERE m.content_id = c.id ORDER BY captured_at DESC LIMIT 1) AS latest_favorites,
                (SELECT shares FROM content_metrics m WHERE m.content_id = c.id ORDER BY captured_at DESC LIMIT 1) AS latest_shares,
-               (SELECT COUNT(*) FROM content_comments cm WHERE cm.content_id = c.id) AS comment_rows
+               (SELECT COUNT(*) FROM content_comments cm WHERE cm.content_id = c.id) AS comment_rows,
+               (SELECT id FROM topic_board tb WHERE tb.source_content_id = c.id LIMIT 1) AS saved_board_id
         FROM contents c
         LEFT JOIN content_analyses a ON a.content_id = c.id
         WHERE c.source_id = ?
@@ -702,7 +703,7 @@ export function registerRadarRoutes(app: FastifyInstance): void {
   }>('/api/radar/intel', async (req) => {
     const db = getDb();
     const account = getActiveAccount(req.query.accountId ? Number(req.query.accountId) : undefined);
-    const where: string[] = ["s.source_type != 'hot_board'"];
+    const where: string[] = [];
     const params: (string | number)[] = [];
 
     if (req.query.platform) { where.push('c.platform = ?'); params.push(req.query.platform); }

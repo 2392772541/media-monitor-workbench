@@ -229,9 +229,13 @@ export interface CockpitData {
     todayNew: number;
     breakoutCount: number;
     boardActiveCount: number;
+    savedCount?: number;
     hotBoardCount: number;
   };
   trend7d: Array<{ day: string; total: number; breakouts: number }>;
+  trend14d?: Array<{ day: string; total: number; breakouts: number }>;
+  platformDistribution?: Array<{ platform: string; count: number }>;
+  hotTop?: HotBoardItem[];
   recommendations: TopicRecommendation[];
   breakouts: Array<{
     id: number;
@@ -245,6 +249,10 @@ export interface CockpitData {
     breakout_ratio: number | null;
     growth_rate_per_hour: number | null;
     breakout_reason: string;
+    brief?: string;
+    transcript_status?: string;
+    comment_rows?: number;
+    saved_board_id?: number | null;
     latest_views: number | null;
     latest_likes: number | null;
     latest_comments: number | null;
@@ -316,6 +324,8 @@ export interface HotBoardItem {
   account_relevance_score: number | null;
   account_relevance_reason: string;
   content_id: number | null;
+  ai_summary?: string | null;
+  saved_board_id?: number | null;
   captured_at: string;
 }
 
@@ -400,6 +410,13 @@ export interface TopicBoardItem {
   review_favorites: number | null;
   review_comments: number | null;
   review_notes: string;
+  content_platform?: string | null;
+  content_author?: string | null;
+  breakout_ratio?: number | null;
+  transcript_status?: string | null;
+  ai_summary?: string | null;
+  comment_rows?: number;
+  source_origin?: 'hotboard' | 'creator' | 'manual';
   created_at: string;
   updated_at: string;
 }

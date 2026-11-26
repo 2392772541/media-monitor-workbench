@@ -1,66 +1,61 @@
 import { useEffect, useState } from 'react';
 import {
-  LayoutDashboard,
+  Zap,
   Users,
   Flame,
-  Radar,
-  Database,
-  KanbanSquare,
+  Star,
   Send,
   Monitor,
   ListChecks,
   Settings,
-  Sparkles,
-  Sliders,
 } from 'lucide-react';
 import { apiRequest } from './api';
-import { AccountModal } from './components/AccountModal';
+import { ContentDrawer, type DrawerTab, type DrawerTarget } from './components/ContentDrawer';
 import { CockpitPage } from './pages/CockpitPage';
 import { CreatorsPage } from './pages/CreatorsPage';
 import { HotBoardPage } from './pages/HotBoardPage';
-import { TopicRadarPage } from './pages/TopicRadarPage';
-import { IntelLibraryPage } from './pages/IntelLibraryPage';
 import { TopicBoardPage } from './pages/TopicBoardPage';
 import { PublishPage } from './pages/PublishPage';
 import { BrowsersPage } from './pages/BrowsersPage';
 import { TasksPage } from './pages/TasksPage';
 import { SettingsPage } from './pages/SettingsPage';
-import type { CreatorAccount, PublishInspirationDraft } from './types';
+import type { HotBoardItem, PublishInspirationDraft } from './types';
 
-// 核心六大选题监控页面
-const RADAR_NAV_ITEMS = [
-  { id: 'cockpit', label: '选题驾驶舱', icon: LayoutDashboard },
-  { id: 'creators', label: '博主监控', icon: Users },
-  { id: 'hotboard', label: '行业热榜', icon: Flame },
-  { id: 'radar', label: '话题雷达', icon: Radar },
-  { id: 'intel', label: '内容情报库', icon: Database },
-  { id: 'board', label: '个人选题库', icon: KanbanSquare },
+// 核心精简 4 页：彻底去掉复杂打分、话题雷达、情报库、多阶段看板
+const CORE_NAV_ITEMS = [
+  { id: 'overview', label: '今日速览', sub: '一眼看清对标爆款与平台热榜', icon: Zap },
+  { id: 'creators', label: '对标博主', sub: '贴主页链接盯盘，走势图红柱直标爆款', icon: Users },
+  { id: 'hotboard', label: '平台热榜', sub: '分平台分类目看热榜，点开直出看点与口播', icon: Flame },
+  { id: 'saved', label: '简易收藏本', sub: '随手标星存着拍，随时翻口播稿和热评', icon: Star },
 ] as const;
 
-// 原有创作分发与底层运维入口（完整保留不破坏）
+// 原有实用工具入口保留在底部，不打扰核心看榜流程
 const OPS_NAV_ITEMS = [
-  { id: 'publish', label: '视频发布', icon: Send },
-  { id: 'browsers', label: '浏览器与登录', icon: Monitor },
-  { id: 'tasks', label: '任务中心', icon: ListChecks },
-  { id: 'settings', label: '系统设置', icon: Settings },
+  { id: 'publish', label: '视频发布', sub: '多平台一键分发', icon: Send },
+  { id: 'browsers', label: '浏览器与登录', sub: '维护抖音 / B站 / 通义听悟登录态', icon: Monitor },
+  { id: 'tasks', label: '任务中心', sub: '查看自动抓取任务与日志', icon: ListChecks },
+  { id: 'settings', label: '系统设置', sub: '本机大模型与抓取基础配置', icon: Settings },
 ] as const;
 
-const ALL_NAV_ITEMS = [...RADAR_NAV_ITEMS, ...OPS_NAV_ITEMS];
+const ALL_NAV_ITEMS = [...CORE_NAV_ITEMS, ...OPS_NAV_ITEMS];
 
 type PublishSubTab = 'publish' | 'titles' | 'accounts' | 'materials' | 'history';
 
-// 兼容旧 Hash 路由并映射到新六大工作台页面
+// 兼容旧 Hash 路由并平滑映射到精简 4 页
 function parseHashRoute(hash: string): { tab: string; publishSubTab?: PublishSubTab } {
   const cleaned = hash.replace(/^#\/?/, '').trim();
-  if (!cleaned) return { tab: 'cockpit' };
+  if (!cleaned) return { tab: 'overview' };
   const [rawTab, rawSub] = cleaned.split(':');
   const aliasMap: Record<string, string> = {
-    overview: 'cockpit',
+    cockpit: 'overview',
     sources: 'creators',
-    contents: 'intel',
+    board: 'saved',
+    radar: 'overview',
+    intel: 'overview',
+    contents: 'overview',
   };
   const mapped = aliasMap[rawTab] || rawTab;
-  const validTab = ALL_NAV_ITEMS.some((n) => n.id === mapped) ? mapped : 'cockpit';
+  const validTab = ALL_NAV_ITEMS.some((n) => n.id === mapped) ? mapped : 'overview';
   const validSubs: PublishSubTab[] = ['publish', 'titles', 'accounts', 'materials', 'history'];
   const publishSubTab = validSubs.includes(rawSub as PublishSubTab) ? (rawSub as PublishSubTab) : undefined;
   return { tab: validTab, publishSubTab };
@@ -71,45 +66,27 @@ export function App() {
   const [activeTab, setActiveTab] = useState<string>(initialRoute.tab);
   const [publishSubTab, setPublishSubTab] = useState<PublishSubTab>(initialRoute.publishSubTab || 'publish');
   const [publishDraft, setPublishDraft] = useState<PublishInspirationDraft | null>(null);
-  const [pendingIntelId, setPendingIntelId] = useState<number | null>(null);
   const [toast, setToast] = useState<string | null>(null);
   const [healthOk, setHealthOk] = useState<boolean>(true);
+  const [savedCount, setSavedCount] = useState<number>(0);
 
-  // 多自媒体账号定位全局状态
-  const [accounts, setAccounts] = useState<CreatorAccount[]>([]);
-  const [activeAccountId, setActiveAccountId] = useState<number>(0);
-  const [showAccountModal, setShowAccountModal] = useState<boolean>(false);
+  // 全站共用右侧深读抽屉（看点 / 口播稿 / 真实热评）
+  const [drawerTarget, setDrawerTarget] = useState<DrawerTarget | null>(null);
+  const [refreshTick, setRefreshTick] = useState<number>(0);
 
   const showToast = (msg: string) => {
     setToast(msg);
     setTimeout(() => {
       setToast((prev) => (prev === msg ? null : prev));
-    }, 3800);
+    }, 3600);
   };
 
-  const loadAccounts = async (preferId?: number) => {
+  const refreshSavedBadge = async () => {
     try {
-      const list = await apiRequest<CreatorAccount[]>('/api/radar/accounts');
-      setAccounts(list);
-      const picked =
-        (preferId && list.find((a) => a.id === preferId)) ||
-        list.find((a) => a.is_active === 1) ||
-        list[0];
-      if (picked) setActiveAccountId(picked.id);
+      const res = await apiRequest<{ items: unknown[] }>('/api/radar/board');
+      setSavedCount(res.items.length);
     } catch {
       // ignore
-    }
-  };
-
-  const handleSwitchAccount = async (nextId: number) => {
-    setActiveAccountId(nextId);
-    try {
-      await apiRequest(`/api/radar/accounts/${nextId}/activate`, { method: 'POST' });
-      const acc = accounts.find((a) => a.id === nextId);
-      if (acc) showToast(`已切换当前账号视角：${acc.name}`);
-      await loadAccounts(nextId);
-    } catch (err) {
-      showToast((err as Error).message);
     }
   };
 
@@ -143,12 +120,32 @@ export function App() {
   const handleSendToPublish = (draft: PublishInspirationDraft) => {
     setPublishDraft(draft);
     handleNavigate('publish', true);
-    showToast('已将选题标题与话题带入「视频发布」');
+    showToast('已将标题与来源带入「视频发布」');
   };
 
-  const handleOpenIntelDetail = (contentId: number) => {
-    setPendingIntelId(contentId);
-    handleNavigate('intel', true);
+  // 打开博主作品或已入库条目的右侧抽屉
+  const handleOpenContent = (contentId: number, initialTab: DrawerTab = 'point', savedBoardId?: number | null) => {
+    setDrawerTarget({ contentId, initialTab, savedBoardId });
+  };
+
+  // 打开热榜条目的右侧抽屉（未入库时静默入库，无感知秒开）
+  const handleOpenHotItem = async (item: HotBoardItem, initialTab: DrawerTab = 'point') => {
+    try {
+      let cid = item.content_id;
+      if (!cid) {
+        const res = await apiRequest<{ contentId: number }>(`/api/radar/hot-board/${item.id}/import`, { method: 'POST' });
+        cid = res.contentId;
+        setRefreshTick((t) => t + 1);
+      }
+      setDrawerTarget({ contentId: cid, initialTab, savedBoardId: item.saved_board_id });
+    } catch (err) {
+      showToast((err as Error).message);
+    }
+  };
+
+  const handleGlobalChanged = () => {
+    setRefreshTick((t) => t + 1);
+    void refreshSavedBadge();
   };
 
   useEffect(() => {
@@ -165,27 +162,27 @@ export function App() {
     fetch('/api/health')
       .then((r) => setHealthOk(r.ok))
       .catch(() => setHealthOk(false));
-    void loadAccounts();
+    void refreshSavedBadge();
   }, []);
 
-  const activeLabel = ALL_NAV_ITEMS.find((n) => n.id === activeTab)?.label || '选题驾驶舱';
+  const currentNav = ALL_NAV_ITEMS.find((n) => n.id === activeTab) || CORE_NAV_ITEMS[0];
 
   return (
     <div className="app-shell">
       <aside className="sidebar">
         <div className="brand">
           <div className="brand-logo">
-            <Sparkles size={19} />
+            <Flame size={19} />
           </div>
           <div>
-            <div className="brand-title">自媒体选题编辑部</div>
-            <div className="brand-sub">监控雷达 · AI推题 · 批量发布</div>
+            <div className="brand-title">爆款与热榜监控台</div>
+            <div className="brand-sub">盯博主 · 看热榜 · 一键扒稿</div>
           </div>
         </div>
 
         <nav className="nav-list">
-          <div className="nav-section-label">选题监控中心</div>
-          {RADAR_NAV_ITEMS.map((item) => {
+          <div className="nav-section-label">核心监控</div>
+          {CORE_NAV_ITEMS.map((item) => {
             const Icon = item.icon;
             return (
               <button
@@ -196,11 +193,12 @@ export function App() {
               >
                 <Icon size={17} />
                 <span>{item.label}</span>
+                {item.id === 'saved' && savedCount > 0 && <span className="nav-count">{savedCount}</span>}
               </button>
             );
           })}
 
-          <div className="nav-section-label">创作与运维</div>
+          <div className="nav-section-label">创作与工具</div>
           {OPS_NAV_ITEMS.map((item) => {
             const Icon = item.icon;
             return (
@@ -218,11 +216,11 @@ export function App() {
         </nav>
 
         <div className="sidebar-footer">
-          <div>唯一单端口：127.0.0.1:18910</div>
+          <div>单端口运行：127.0.0.1:18910</div>
           <div style={{ marginTop: 5 }}>
             状态：
             {healthOk ? (
-              <span style={{ color: '#4ade80', fontWeight: 600 }}>● 一体化运行中</span>
+              <span style={{ color: '#4ade80', fontWeight: 600 }}>● 在线运行中</span>
             ) : (
               <span style={{ color: '#f87171', fontWeight: 600 }}>● 未连接</span>
             )}
@@ -233,79 +231,59 @@ export function App() {
       <div className="main-area">
         <header className="topbar">
           <div className="topbar-inner">
-            <div className="topbar-title">{activeLabel}</div>
-            <div className="topbar-controls">
-              {accounts.length > 0 && (
-                <div className="account-switcher">
-                  <span style={{ color: 'var(--text-muted)', fontSize: 12 }}>当前账号：</span>
-                  <select
-                    value={activeAccountId}
-                    onChange={(e) => void handleSwitchAccount(Number(e.target.value))}
-                  >
-                    {accounts.map((acc) => (
-                      <option key={acc.id} value={acc.id}>
-                        {acc.name}
-                      </option>
-                    ))}
-                  </select>
-                </div>
-              )}
-              <button
-                className="btn btn-secondary btn-sm"
-                onClick={() => setShowAccountModal(true)}
-                data-testid="open-account-modal"
-              >
-                <Sliders size={13} /> 账号定位与权重
-              </button>
+            <div style={{ display: 'flex', alignItems: 'baseline', flexWrap: 'wrap', gap: 4 }}>
+              <div className="topbar-title">{currentNav.label}</div>
+              <span className="topbar-sub">{currentNav.sub}</span>
+            </div>
+            <div className="topbar-pill">
+              <span
+                style={{
+                  width: 7,
+                  height: 7,
+                  borderRadius: 999,
+                  background: healthOk ? '#16a34a' : '#dc2626',
+                  display: 'inline-block',
+                }}
+              />
+              <span>单端口 18910</span>
             </div>
           </div>
         </header>
 
         <main className="page-body">
-          {activeTab === 'cockpit' && (
+          {activeTab === 'overview' && (
             <CockpitPage
-              activeAccountId={activeAccountId}
+              refreshTick={refreshTick}
               onNavigate={handleNavigate}
-              onOpenAccountModal={() => setShowAccountModal(true)}
-              onSendToPublish={handleSendToPublish}
-              onOpenIntelDetail={handleOpenIntelDetail}
+              onOpenContent={handleOpenContent}
+              onOpenHotItem={handleOpenHotItem}
+              onRefreshBadge={handleGlobalChanged}
               onToast={showToast}
             />
           )}
           {activeTab === 'creators' && (
             <CreatorsPage
-              onToast={showToast}
+              refreshTick={refreshTick}
               onNavigate={handleNavigate}
-              onOpenIntelDetail={handleOpenIntelDetail}
+              onOpenContent={handleOpenContent}
+              onRefreshBadge={handleGlobalChanged}
+              onToast={showToast}
             />
           )}
           {activeTab === 'hotboard' && (
             <HotBoardPage
-              activeAccountId={activeAccountId}
-              onToast={showToast}
-              onOpenIntelDetail={handleOpenIntelDetail}
-            />
-          )}
-          {activeTab === 'radar' && (
-            <TopicRadarPage
-              activeAccountId={activeAccountId}
-              onToast={showToast}
-              onOpenIntelDetail={handleOpenIntelDetail}
-            />
-          )}
-          {activeTab === 'intel' && (
-            <IntelLibraryPage
-              activeAccountId={activeAccountId}
-              initialContentId={pendingIntelId}
-              onClearInitialContent={() => setPendingIntelId(null)}
-              onSendToPublish={handleSendToPublish}
+              refreshTick={refreshTick}
+              onOpenHotItem={handleOpenHotItem}
+              onRefreshBadge={handleGlobalChanged}
               onToast={showToast}
             />
           )}
-          {activeTab === 'board' && (
+          {activeTab === 'saved' && (
             <TopicBoardPage
-              activeAccountId={activeAccountId}
+              refreshTick={refreshTick}
+              onOpenContent={handleOpenContent}
               onSendToPublish={handleSendToPublish}
+              onRefreshBadge={handleGlobalChanged}
               onToast={showToast}
             />
           )}
@@ -324,12 +302,11 @@ export function App() {
         </main>
       </div>
 
-      <AccountModal
-        open={showAccountModal}
-        accounts={accounts}
-        activeAccountId={activeAccountId}
-        onClose={() => setShowAccountModal(false)}
-        onChanged={(newId) => void loadAccounts(newId)}
+      <ContentDrawer
+        target={drawerTarget}
+        onClose={() => setDrawerTarget(null)}
+        onChanged={handleGlobalChanged}
+        onSendToPublish={handleSendToPublish}
         onToast={showToast}
       />
 

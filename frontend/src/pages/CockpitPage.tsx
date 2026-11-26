@@ -1,56 +1,66 @@
 import { useEffect, useState } from 'react';
 import {
-  Sparkles,
   Flame,
-  TrendingUp,
-  BookmarkPlus,
-  Send,
   RefreshCw,
-  ExternalLink,
-  Layers,
-  BellRing,
-  Sliders,
-  Compass,
+  ArrowRight,
+  Star,
+  Mic,
+  MessageSquareText,
+  TrendingUp,
+  PieChart as PieIcon,
 } from 'lucide-react';
 import {
   ResponsiveContainer,
-  AreaChart,
-  Area,
+  ComposedChart,
+  Bar,
+  Line,
   XAxis,
   YAxis,
   Tooltip,
   CartesianGrid,
+  PieChart,
+  Pie,
+  Cell,
 } from 'recharts';
-import { apiRequest, FEEDBACK_LABELS, fmtNum, fmtTime, PLATFORM_LABELS, safeJsonArray } from '../api';
-import type { CockpitData, PublishInspirationDraft, TopicRecommendation } from '../types';
+import { apiRequest, fmtNum, PLATFORM_LABELS } from '../api';
+import type { DrawerTab } from '../components/ContentDrawer';
+import type { CockpitData, HotBoardItem } from '../types';
 
 interface CockpitPageProps {
-  activeAccountId: number;
+  refreshTick: number;
   onNavigate: (tab: string) => void;
-  onOpenAccountModal: () => void;
-  onSendToPublish: (draft: PublishInspirationDraft) => void;
-  onOpenIntelDetail: (contentId: number) => void;
+  onOpenContent: (contentId: number, tab?: DrawerTab, savedBoardId?: number | null) => void;
+  onOpenHotItem: (item: HotBoardItem, tab?: DrawerTab) => void;
+  onRefreshBadge: () => void;
   onToast: (msg: string) => void;
 }
 
+const PLATFORM_COLORS: Record<string, string> = {
+  bilibili: '#4f46e5',
+  douyin: '#e11d48',
+  youtube: '#dc2626',
+  rss: '#0284c7',
+  website: '#0d9488',
+  x: '#0f172a',
+};
+
 export function CockpitPage({
-  activeAccountId,
+  refreshTick,
   onNavigate,
-  onOpenAccountModal,
-  onSendToPublish,
-  onOpenIntelDetail,
+  onOpenContent,
+  onOpenHotItem,
+  onRefreshBadge,
   onToast,
 }: CockpitPageProps) {
   const [data, setData] = useState<CockpitData | null>(null);
   const [loading, setLoading] = useState(true);
-  const [runningAi, setRunningAi] = useState(false);
-  const [refreshingHot, setRefreshingHot] = useState(false);
+  const [refreshing, setRefreshing] = useState(false);
+  const [hotTab, setHotTab] = useState<'all' | 'douyin' | 'bilibili'>('all');
+  const [trendRange, setTrendRange] = useState<'7d' | '14d'>('7d');
 
   const load = async () => {
-    setLoading(true);
     try {
-      const qs = activeAccountId ? `?accountId=${activeAccountId}` : '';
-      const res = await apiRequest<CockpitData>(`/api/radar/cockpit${qs}`);
+      const res = await apiRequest<CockpitData>('/api/radar/cockpit');
       setData(res);
     } catch (err) {
       onToast((err as Error).message);
@@ -61,489 +71,424 @@ export function CockpitPage({
 
   useEffect(() => {
     void load();
-  }, [activeAccountId]);
+  }, [refreshTick]);
 
-  const handleBatchRecommend = async () => {
-    setRunningAi(true);
+  // 一键刷新抖音 + B站真实热榜并重算博主爆款基线
+  const handleRefreshAll = async () => {
+    setRefreshing(true);
     try {
-      const res = await apiRequest<{ processed: number; cachedHits: number; errors: string[] }>(
-        '/api/radar/recommendations/batch',
-        {
-          method: 'POST',
-          body: JSON.stringify({ accountId: activeAccountId, limit: 8 }),
-        }
-      );
-      onToast(
-        `AI 选题推荐完成：评估 ${res.processed} 条（缓存命中 ${res.cachedHits} 条）${res.errors.length ? `，失败 ${res.errors.length} 条` : ''}`
-      );
+      const [hotRes] = await Promise.all([
+        apiRequest<{ totalSaved: number; results: Array<{ board: string; count: number; error?: string }> }>(
+          '/api/radar/hot-board/refresh',
+          {
+            method: 'POST',
+            body: JSON.stringify({ platforms: ['bilibili', 'douyin'], scoreWithAi: false }),
+          }
+        ),
+        apiRequest('/api/radar/creators/recompute-breakout', { method: 'POST' }).catch(() => null),
+      ]);
+      const summary = hotRes.results.map((r) => `${r.board} ${r.count}条`).join(' · ');
+      onToast(`刷新完成：${summary}`);
       await load();
+      onRefreshBadge();
     } catch (err) {
       onToast((err as Error).message);
     } finally {
-      setRunningAi(false);
+      setRefreshing(false);
     }
   };
 
-  const handleRefreshHot = async () => {
-    setRefreshingHot(true);
+  // 快捷星标收藏 / 取消收藏（博主作品）
+  const handleToggleBreakoutStar = async (
+    item: CockpitData['breakouts'][number],
+    ev: React.MouseEvent
+  ) => {
+    ev.stopPropagation();
     try {
-      const res = await apiRequest<{ totalSaved: number; aiScored: number }>('/api/radar/hot-board/refresh', {
-        method: 'POST',
-        body: JSON.stringify({ scoreWithAi: true, accountId: activeAccountId }),
-      });
-      onToast(`热榜已刷新：拉取 ${res.totalSaved} 条真实热榜，AI 相关性筛分 ${res.aiScored} 条`);
-      await load();
-    } catch (err) {
-      onToast((err as Error).message);
-    } finally {
-      setRefreshingHot(false);
-    }
-  };
-
-  const handleAddToBoard = async (rec: TopicRecommendation) => {
-    try {
-      const res = await apiRequest<{ duplicates: Array<{ title: string; similarity: number }> }>('/api/radar/board', {
-        method: 'POST',
-        body: JSON.stringify({
-          title: rec.recommended_title,
-          account_id: rec.account_id,
-          source_content_id: rec.content_id,
-          recommendation_id: rec.id,
-          cluster_id: rec.cluster_id,
-          core_angle: `${rec.core_viewpoint}\n切入角度：${rec.diff_angle}\n创作建议：${rec.creation_advice}`,
-          tags: [rec.suitable_format, PLATFORM_LABELS[rec.platform || ''] || rec.platform || ''].filter(Boolean),
-          priority: rec.score_total >= 78 ? 'high' : 'medium',
-          source_url: rec.canonical_url || '',
-          references: safeJsonArray(rec.reference_sources_json),
-        }),
-      });
-      if (res.duplicates.length > 0) {
-        onToast(`已加入选题库！提示：与历史选题「${res.duplicates[0].title}」相似度 ${res.duplicates[0].similarity}%`);
+      if (item.saved_board_id) {
+        await apiRequest(`/api/radar/board/${item.saved_board_id}`, { method: 'DELETE' });
+        onToast('已取消收藏');
       } else {
-        onToast('已一键加入「个人选题库」（状态：待研究）');
+        await apiRequest('/api/radar/board', {
+          method: 'POST',
+          body: JSON.stringify({
+            title: item.title,
+            source_content_id: item.id,
+            core_angle: item.brief || item.breakout_reason || '',
+            tags: [PLATFORM_LABELS[item.platform] || item.platform, item.source_name].filter(Boolean),
+            source_url: item.canonical_url,
+          }),
+        });
+        onToast('已收藏到「简易收藏本」');
       }
       await load();
+      onRefreshBadge();
     } catch (err) {
       onToast((err as Error).message);
     }
   };
 
-  const handleFeedback = async (recId: number, status: string) => {
+  // 快捷星标收藏 / 取消收藏（热榜条目）
+  const handleToggleHotStar = async (item: HotBoardItem, ev: React.MouseEvent) => {
+    ev.stopPropagation();
     try {
-      await apiRequest(`/api/radar/recommendations/${recId}/feedback`, {
-        method: 'POST',
-        body: JSON.stringify({ status }),
-      });
-      onToast(`已标记「${FEEDBACK_LABELS[status] || status}」，后续推荐会自动参考此偏好`);
+      if (item.saved_board_id) {
+        await apiRequest(`/api/radar/board/${item.saved_board_id}`, { method: 'DELETE' });
+        onToast('已取消收藏');
+      } else {
+        let cid = item.content_id;
+        if (!cid) {
+          const imp = await apiRequest<{ contentId: number }>(`/api/radar/hot-board/${item.id}/import`, { method: 'POST' });
+          cid = imp.contentId;
+        }
+        await apiRequest('/api/radar/board', {
+          method: 'POST',
+          body: JSON.stringify({
+            title: item.title,
+            source_content_id: cid,
+            core_angle: item.ai_summary || item.summary || `${item.board_name} · ${item.hot_label}`,
+            tags: [PLATFORM_LABELS[item.platform] || item.platform, item.category].filter(Boolean),
+            source_url: item.url,
+          }),
+        });
+        onToast('已收藏到「简易收藏本」');
+      }
       await load();
+      onRefreshBadge();
     } catch (err) {
       onToast((err as Error).message);
     }
   };
 
   if (loading && !data) {
-    return <div className="panel-card">正在加载选题驾驶舱...</div>;
+    return <div className="panel-card" style={{ padding: 40, textAlign: 'center', color: 'var(--text-muted)' }}>加载今日速览中...</div>;
   }
-  if (!data) {
-    return <div className="panel-card">加载驾驶舱失败，请刷新重试。</div>;
-  }
+  if (!data) return null;
 
-  const acc = data.activeAccount;
-  const triggeredAlerts = data.topicAlerts.filter((t) => t.recent_hits >= t.alert_threshold);
+  const breakouts = data.breakouts || [];
+  const maxRatio = Math.max(...breakouts.map((b) => b.breakout_ratio || 0), 1);
+
+  const allHots = data.hotTop || [];
+  const douyinCount = allHots.filter((h) => h.platform === 'douyin').length;
+  const bilibiliCount = allHots.filter((h) => h.platform === 'bilibili').length;
+  const visibleHots = (hotTab === 'all' ? allHots : allHots.filter((h) => h.platform === hotTab)).slice(0, 8);
+
+  const trendSeries = trendRange === '14d' && data.trend14d?.length ? data.trend14d : data.trend7d || [];
+  const platDist = (data.platformDistribution || []).filter((p) => p.count > 0);
+  const platTotal = platDist.reduce((acc, p) => acc + p.count, 0) || 1;
 
   return (
     <div>
-      {/* 顶部账号定位摘要与快捷动作栏 */}
-      <div
-        className="panel-card"
-        style={{
-          display: 'flex',
-          justifyContent: 'space-between',
-          alignItems: 'center',
-          gap: 14,
-          flexWrap: 'wrap',
-          background: 'linear-gradient(135deg, #ffffff 0%, #f5f7ff 100%)',
-        }}
-      >
-        <div style={{ minWidth: 260, flex: 1 }}>
-          <div style={{ display: 'flex', alignItems: 'center', gap: 8, flexWrap: 'wrap' }}>
-            <span className="score-pill score-mid">当前视角</span>
-            <strong style={{ fontSize: 16 }}>{acc.name}</strong>
-            <span style={{ fontSize: 12, color: 'var(--text-muted)' }}>({acc.platform_focus})</span>
-          </div>
-          <div style={{ fontSize: 12.5, color: 'var(--text-muted)', marginTop: 5 }}>
-            赛道：{acc.niche || '未填写'} · 受众：{acc.target_audience || '未填写'}
-          </div>
-          <div style={{ fontSize: 11.5, color: 'var(--text-muted)', marginTop: 4 }}>
-            权重：定位 {acc.weight_match} / 热度 {acc.weight_heat} / 差异化 {acc.weight_diff} / 经验 {acc.weight_experience} / 时效{' '}
-            {acc.weight_timeliness} / 可行性 {acc.weight_feasibility} · AI 引擎：
-            <strong style={{ color: data.aiHealth.configured ? 'var(--success)' : 'var(--danger)' }}>
-              {data.aiHealth.configured ? `${data.aiHealth.model}（缓存 ${data.aiHealth.okReceipts} 次）` : '未配置 Key'}
-            </strong>
-          </div>
+      {/* 顶部 4 枚极简数字卡片 + 刷新操作 */}
+      <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: 14, flexWrap: 'wrap', gap: 10 }}>
+        <div style={{ fontSize: 13, color: 'var(--text-muted)' }}>
+          左看对标博主刚爆的作品，右看平台今天热榜，点任意一条即可滑出「看点 / 口播稿 / 热评」
         </div>
-        <div style={{ display: 'flex', gap: 8, flexWrap: 'wrap' }}>
-          <button className="btn btn-secondary" onClick={onOpenAccountModal}>
-            <Sliders size={14} /> 账号定位与权重
+        <div style={{ display: 'flex', gap: 8 }}>
+          <button className="btn btn-secondary btn-sm" onClick={() => onNavigate('creators')}>
+            去加对标博主
           </button>
-          <button className="btn btn-secondary" disabled={refreshingHot} onClick={handleRefreshHot}>
-            <Flame size={14} /> {refreshingHot ? '抓热榜中...' : '刷新全平台热榜'}
-          </button>
-          <button className="btn btn-primary" disabled={runningAi} onClick={handleBatchRecommend}>
-            <Sparkles size={14} /> {runningAi ? 'AI 分析推题中...' : '生成今日推荐选题'}
+          <button className="btn btn-primary btn-sm" disabled={refreshing} onClick={handleRefreshAll}>
+            <RefreshCw size={13} /> {refreshing ? '刷新中...' : '刷新热榜与爆款'}
           </button>
         </div>
       </div>
 
-      {/* KPI 概况条 */}
-      <div className="kpi-strip">
-        <div className="kpi-tile" style={{ cursor: 'pointer' }} onClick={() => onNavigate('intel')}>
-          <div className="kpi-tile-label">
-            <span>今日新入库情报</span>
-            <TrendingUp size={15} color="#4f46e5" />
+      <section className="grid-4">
+        <div className="stat-card" style={{ cursor: 'pointer' }} onClick={() => onNavigate('creators')}>
+          <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
+            <span className="stat-label">对标博主正在爆</span>
+            {breakouts[0]?.breakout_ratio ? (
+              <span className="badge badge-amber">最高 {breakouts[0].breakout_ratio}x</span>
+            ) : null}
           </div>
-          <div className="kpi-tile-val">{data.stats.todayNew}</div>
-          <div className="kpi-tile-sub">情报库累计 {data.stats.totalContents} 条</div>
-        </div>
-        <div className="kpi-tile" style={{ cursor: 'pointer' }} onClick={() => onNavigate('intel')}>
-          <div className="kpi-tile-label">
-            <span>识别潜力爆款</span>
-            <Flame size={15} color="#ea580c" />
-          </div>
-          <div className="kpi-tile-val" style={{ color: '#ea580c' }}>
+          <div className="stat-value" style={{ color: '#ea580c' }}>
             {data.stats.breakoutCount}
           </div>
-          <div className="kpi-tile-sub">相对博主常态倍数 ≥ 1.6x</div>
+          <div style={{ fontSize: 11.5, color: 'var(--text-muted)', marginTop: 4 }}>超出博主平时中位数 ≥ 1.6x</div>
         </div>
-        <div className="kpi-tile" style={{ cursor: 'pointer' }} onClick={() => onNavigate('creators')}>
-          <div className="kpi-tile-label">
-            <span>监控博主与源</span>
-            <Compass size={15} color="#0284c7" />
-          </div>
-          <div className="kpi-tile-val">{data.stats.totalSources}</div>
-          <div className="kpi-tile-sub">行业热榜已收 {data.stats.hotBoardCount} 条</div>
-        </div>
-        <div className="kpi-tile" style={{ cursor: 'pointer' }} onClick={() => onNavigate('radar')}>
-          <div className="kpi-tile-label">
-            <span>话题雷达预警</span>
-            <BellRing size={15} color="#d97706" />
-          </div>
-          <div className="kpi-tile-val" style={{ color: triggeredAlerts.length ? '#d97706' : 'var(--text)' }}>
-            {triggeredAlerts.length}
-          </div>
-          <div className="kpi-tile-sub">活跃追踪话题 {data.topicAlerts.length} 个</div>
-        </div>
-        <div className="kpi-tile" style={{ cursor: 'pointer' }} onClick={() => onNavigate('board')}>
-          <div className="kpi-tile-label">
-            <span>选题库推进中</span>
-            <BookmarkPlus size={15} color="#16a34a" />
-          </div>
-          <div className="kpi-tile-val" style={{ color: '#16a34a' }}>
-            {data.stats.boardActiveCount}
-          </div>
-          <div className="kpi-tile-sub">待研究 / 创作 / 待发布</div>
-        </div>
-      </div>
 
-      <div className="cockpit-grid">
-        {/* 左主栏：今日推荐选题 + 7日趋势曲线 */}
-        <div>
-          <div className="panel-card">
-            <div className="panel-head">
-              <div className="panel-title">
-                <Sparkles size={17} color="#4f46e5" />
-                <span>今日智能推荐选题（6 维加权排序）</span>
-              </div>
-              <span style={{ fontSize: 12, color: 'var(--text-muted)' }}>
-                所有评分均基于真实指标与素材，绝不编造播放/趋势
-              </span>
+        <div className="stat-card" style={{ cursor: 'pointer' }} onClick={() => onNavigate('hotboard')}>
+          <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
+            <span className="stat-label">平台实时热榜</span>
+            <span className="badge badge-green">实时</span>
+          </div>
+          <div className="stat-value">{data.stats.hotBoardCount}</div>
+          <div style={{ fontSize: 11.5, color: 'var(--text-muted)', marginTop: 4 }}>
+            抖音前排 {douyinCount} · B站热门 {bilibiliCount}
+          </div>
+        </div>
+
+        <div className="stat-card" style={{ cursor: 'pointer' }} onClick={() => onNavigate('creators')}>
+          <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
+            <span className="stat-label">盯盘对标博主</span>
+            <span className="badge badge-blue">自动追踪</span>
+          </div>
+          <div className="stat-value">{data.stats.totalSources}</div>
+          <div style={{ fontSize: 11.5, color: 'var(--text-muted)', marginTop: 4 }}>今日新入库 {data.stats.todayNew} 条作品</div>
+        </div>
+
+        <div className="stat-card" style={{ cursor: 'pointer' }} onClick={() => onNavigate('saved')}>
+          <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
+            <span className="stat-label">我的收藏本</span>
+            <span style={{ fontSize: 11.5, color: 'var(--primary)', fontWeight: 600 }}>去查看 →</span>
+          </div>
+          <div className="stat-value">{data.stats.savedCount ?? data.stats.boardActiveCount}</div>
+          <div style={{ fontSize: 11.5, color: 'var(--text-muted)', marginTop: 4 }}>随手点星标存下来拍</div>
+        </div>
+      </section>
+
+      {/* 中区左右严格分栏：左 = 博主爆款 | 右 = 平台热榜 */}
+      <section className="overview-split">
+        {/* 左栏：对标博主刚爆的作品 */}
+        <div className="panel-card" style={{ marginBottom: 0 }}>
+          <div className="panel-head">
+            <div className="panel-title">
+              <Flame size={17} color="#ea580c" />
+              <span>对标博主 · 刚爆了这些</span>
             </div>
+            <button className="btn btn-secondary btn-sm" onClick={() => onNavigate('creators')}>
+              看博主走势 <ArrowRight size={13} />
+            </button>
+          </div>
 
-            {data.recommendations.length === 0 ? (
-              <div style={{ padding: '26px 12px', textAlign: 'center', color: 'var(--text-muted)' }}>
-                <div style={{ marginBottom: 10 }}>
-                  还没有生成当前账号的推荐选题。先在「博主监控」或「行业热榜」抓回真实内容，再点击右上角「生成今日推荐选题」。
-                </div>
-                <div style={{ display: 'flex', justifyContent: 'center', gap: 10 }}>
-                  <button className="btn btn-secondary" onClick={() => onNavigate('creators')}>
-                    去添加监控博主
-                  </button>
-                  <button className="btn btn-secondary" onClick={() => onNavigate('hotboard')}>
-                    去抓行业热榜
-                  </button>
-                </div>
-              </div>
-            ) : (
-              data.recommendations.map((rec) => {
-                const scoreCls = rec.score_total >= 78 ? 'score-high' : rec.score_total >= 60 ? 'score-mid' : 'score-low';
-                const refs = safeJsonArray<{ title: string; url: string; source: string }>(rec.reference_sources_json);
-                const dims = [
-                  { k: '定位匹配', v: rec.score_match },
-                  { k: '热度增长', v: rec.score_heat },
-                  { k: '差异空间', v: rec.score_diff },
-                  { k: '个人经验', v: rec.score_experience },
-                  { k: '时效性', v: rec.score_timeliness },
-                  { k: '可行性', v: rec.score_feasibility },
-                ];
-
+          {breakouts.length === 0 ? (
+            <div style={{ padding: '28px 12px', textAlign: 'center', color: 'var(--text-muted)', fontSize: 13 }}>
+              还没有检测到异常爆款。去「对标博主」添加博主并抓满 3 条作品后会自动标红。
+            </div>
+          ) : (
+            <div className="feed-list">
+              {breakouts.slice(0, 7).map((b) => {
+                const ratio = b.breakout_ratio || 0;
+                const pct = ratio > 0 ? Math.min(100, Math.max(12, Math.round((ratio / maxRatio) * 100))) : 20;
+                const pColor = PLATFORM_COLORS[b.platform] || '#4f46e5';
                 return (
-                  <div key={rec.id} className="rec-card">
-                    <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'flex-start', gap: 10 }}>
-                      <div style={{ flex: 1 }}>
-                        <div style={{ display: 'flex', alignItems: 'center', gap: 8, flexWrap: 'wrap', marginBottom: 5 }}>
-                          <span className={`score-pill ${scoreCls}`}>{rec.score_total} 分</span>
-                          <span className="metric-chip">{PLATFORM_LABELS[rec.platform || ''] || rec.platform}</span>
-                          {rec.suitable_format && <span className="metric-chip">{rec.suitable_format}</span>}
-                          {rec.breakout_ratio != null && rec.breakout_ratio >= 1.6 && (
-                            <span className="breakout-badge">🔥 异常 {rec.breakout_ratio}x</span>
-                          )}
-                          <span style={{ fontSize: 12, color: 'var(--text-muted)' }}>
-                            来源：{rec.source_name} · {fmtTime(rec.published_at || rec.discovered_at)}
-                          </span>
-                        </div>
-                        <div
-                          style={{ fontSize: 15.5, fontWeight: 700, color: 'var(--text)', cursor: 'pointer' }}
-                          onClick={() => onOpenIntelDetail(rec.content_id)}
-                        >
-                          {rec.recommended_title}
-                        </div>
+                  <div
+                    key={b.id}
+                    className="feed-row"
+                    onClick={() => onOpenContent(b.id, 'point', b.saved_board_id)}
+                  >
+                    <div className="feed-row-head">
+                      <div style={{ display: 'flex', alignItems: 'center', gap: 7, minWidth: 0, flex: 1 }}>
+                        <span className="plat-dot" style={{ background: pColor }} />
+                        <span className="feed-row-title">{b.title}</span>
                       </div>
-                      <div style={{ display: 'flex', gap: 6, flexShrink: 0 }}>
-                        <button
-                          className="btn btn-primary"
-                          style={{ padding: '5px 10px', fontSize: 12 }}
-                          onClick={() => handleAddToBoard(rec)}
-                        >
-                          <BookmarkPlus size={13} /> {(rec.in_board_count || 0) > 0 ? '已在选题库' : '入选题库'}
-                        </button>
-                        <button
-                          className="btn btn-secondary"
-                          style={{ padding: '5px 9px', fontSize: 12 }}
-                          onClick={() =>
-                            onSendToPublish({
-                              title: rec.recommended_title,
-                              tags: [rec.suitable_format || '爆款选题'],
-                              sourceName: rec.source_name,
-                              sourceUrl: rec.canonical_url,
-                            })
-                          }
-                        >
-                          <Send size={13} /> 发布
-                        </button>
-                      </div>
+                      {b.breakout_ratio != null ? (
+                        <span className="breakout-badge">{b.breakout_ratio}x 爆</span>
+                      ) : (
+                        <span className="badge badge-gray">热门</span>
+                      )}
                     </div>
 
-                    <div style={{ fontSize: 13, marginTop: 8, color: '#1e293b' }}>
-                      <strong>核心观点：</strong>
-                      {rec.core_viewpoint || rec.recommend_reason}
-                    </div>
-                    <div style={{ fontSize: 12.5, marginTop: 5, color: '#334155' }}>
-                      <strong>差异化切入：</strong>
-                      {rec.diff_angle || '—'}
-                    </div>
-                    <div style={{ fontSize: 12.5, marginTop: 4, color: '#475569' }}>
-                      <strong>创作建议：</strong>
-                      {rec.creation_advice || '—'}
-                    </div>
-                    <div style={{ fontSize: 12, marginTop: 5, color: 'var(--text-muted)' }}>
-                      <strong>热度依据：</strong>
-                      {rec.heat_evidence}（播放 {fmtNum(rec.latest_views)} · 赞 {fmtNum(rec.latest_likes)} · 评{' '}
-                      {fmtNum(rec.latest_comments)}）
+                    <div className="heat-track">
+                      <div className="heat-fill" style={{ width: `${pct}%`, background: '#ea580c' }} />
                     </div>
 
-                    <div className="dim-bars">
-                      {dims.map((d) => (
-                        <div key={d.k} className="dim-row">
-                          <div style={{ display: 'flex', justifyContent: 'space-between' }}>
-                            <span style={{ color: 'var(--text-muted)' }}>{d.k}</span>
-                            <strong>{d.v}</strong>
-                          </div>
-                          <div className="dim-bar-track">
-                            <div className="dim-bar-fill" style={{ width: `${Math.min(100, d.v)}%` }} />
-                          </div>
-                        </div>
-                      ))}
-                    </div>
+                    {b.brief && <div className="feed-row-brief">💡 {b.brief}</div>}
 
-                    <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', gap: 8, flexWrap: 'wrap' }}>
-                      <div className="feedback-strip">
-                        {Object.entries(FEEDBACK_LABELS).map(([key, label]) => (
-                          <button
-                            key={key}
-                            className={`fb-chip ${rec.feedback_status === key ? 'active' : ''}`}
-                            onClick={() => handleFeedback(rec.id, key)}
-                          >
-                            {label}
-                          </button>
-                        ))}
-                      </div>
-                      <div style={{ display: 'flex', gap: 10, alignItems: 'center', fontSize: 12 }}>
+                    <div className="feed-row-meta">
+                      <span>
+                        {PLATFORM_LABELS[b.platform] || b.platform} · {b.source_name} · 播 {fmtNum(b.latest_views)} · 赞 {fmtNum(b.latest_likes)}
+                      </span>
+                      <div style={{ display: 'flex', gap: 5 }} onClick={(e) => e.stopPropagation()}>
                         <button
-                          className="btn-link"
-                          style={{ background: 'none', border: 'none', color: 'var(--primary)', cursor: 'pointer', fontSize: 12 }}
-                          onClick={() => onOpenIntelDetail(rec.content_id)}
+                          className="mini-action"
+                          onClick={() => onOpenContent(b.id, 'transcript', b.saved_board_id)}
                         >
-                          查看情报详情 & 评论/听悟
+                          <Mic size={11} /> 口播稿
                         </button>
-                        {refs[0]?.url && (
-                          <a href={refs[0].url} target="_blank" rel="noreferrer" style={{ color: 'var(--text-muted)', display: 'inline-flex', alignItems: 'center', gap: 3 }}>
-                            原链接 <ExternalLink size={12} />
-                          </a>
-                        )}
+                        <button
+                          className="mini-action"
+                          onClick={() => onOpenContent(b.id, 'comments', b.saved_board_id)}
+                        >
+                          <MessageSquareText size={11} /> 热评{b.comment_rows ? `(${b.comment_rows})` : ''}
+                        </button>
+                        <button
+                          className={`mini-action ${b.saved_board_id ? 'starred' : ''}`}
+                          onClick={(e) => void handleToggleBreakoutStar(b, e)}
+                          title={b.saved_board_id ? '取消收藏' : '收藏'}
+                        >
+                          <Star size={11} fill={b.saved_board_id ? 'currentColor' : 'none'} />
+                        </button>
                       </div>
                     </div>
                   </div>
                 );
-              })
-            )}
+              })}
+            </div>
+          )}
+        </div>
+
+        {/* 右栏：平台热榜速递 */}
+        <div className="panel-card" style={{ marginBottom: 0 }}>
+          <div className="panel-head">
+            <div className="panel-title">
+              <TrendingUp size={17} color="#dc2626" />
+              <span>平台热榜 · 今日最火</span>
+            </div>
+            <div className="pill-group">
+              {[
+                { k: 'all' as const, l: '全部' },
+                { k: 'douyin' as const, l: '抖音' },
+                { k: 'bilibili' as const, l: 'B站' },
+              ].map((t) => (
+                <button
+                  key={t.k}
+                  className={`pill-btn ${hotTab === t.k ? 'active' : ''}`}
+                  onClick={() => setHotTab(t.k)}
+                >
+                  {t.l}
+                </button>
+              ))}
+            </div>
           </div>
 
-          {/* 7 日采集量与潜力爆款趋势图 */}
-          <div className="panel-card">
-            <div className="panel-head">
-              <div className="panel-title">
-                <TrendingUp size={17} color="#4f46e5" />
-                <span>近 7 日监控情报与潜力爆款趋势</span>
-              </div>
-              <button className="btn btn-secondary" style={{ fontSize: 12, padding: '4px 10px' }} onClick={() => void load()}>
-                <RefreshCw size={12} /> 刷新
+          {visibleHots.length === 0 ? (
+            <div style={{ padding: '28px 12px', textAlign: 'center', color: 'var(--text-muted)', fontSize: 13 }}>
+              暂无热榜，点击右上角「刷新热榜与爆款」拉取最新抖音与 B 站榜单。
+            </div>
+          ) : (
+            <div className="feed-list">
+              {visibleHots.map((h, idx) => {
+                const pColor = PLATFORM_COLORS[h.platform] || '#4f46e5';
+                return (
+                  <div key={h.id} className="feed-row" onClick={() => void onOpenHotItem(h, 'point')}>
+                    <div className="feed-row-head">
+                      <div style={{ display: 'flex', alignItems: 'center', gap: 8, minWidth: 0, flex: 1 }}>
+                        <span className={`rank-box ${idx < 3 ? 'top' : ''}`}>{h.rank_no || idx + 1}</span>
+                        <span className="feed-row-title">{h.title}</span>
+                      </div>
+                      <span style={{ fontSize: 12, fontWeight: 700, color: pColor, flexShrink: 0 }}>
+                        {h.hot_label || '热榜'}
+                      </span>
+                    </div>
+
+                    {(h.ai_summary || h.summary) && (
+                      <div className="feed-row-brief">💡 {h.ai_summary || h.summary}</div>
+                    )}
+
+                    <div className="feed-row-meta">
+                      <span>
+                        {PLATFORM_LABELS[h.platform] || h.platform} · {h.category || '综合'}
+                      </span>
+                      <div style={{ display: 'flex', gap: 5 }} onClick={(e) => e.stopPropagation()}>
+                        <button className="mini-action" onClick={() => void onOpenHotItem(h, 'transcript')}>
+                          <Mic size={11} /> 口播稿
+                        </button>
+                        <button className="mini-action" onClick={() => void onOpenHotItem(h, 'comments')}>
+                          <MessageSquareText size={11} /> 热评
+                        </button>
+                        <button
+                          className={`mini-action ${h.saved_board_id ? 'starred' : ''}`}
+                          onClick={(e) => void handleToggleHotStar(h, e)}
+                          title={h.saved_board_id ? '取消收藏' : '收藏'}
+                        >
+                          <Star size={11} fill={h.saved_board_id ? 'currentColor' : 'none'} />
+                        </button>
+                      </div>
+                    </div>
+                  </div>
+                );
+              })}
+            </div>
+          )}
+
+          <div style={{ marginTop: 10, textAlign: 'right' }}>
+            <button className="btn btn-secondary btn-sm" onClick={() => onNavigate('hotboard')}>
+              查看完整分类热榜 <ArrowRight size={13} />
+            </button>
+          </div>
+        </div>
+      </section>
+
+      {/* 底区：双可视化图表（抓取与爆款双轴走势 + 监控平台占比环图） */}
+      <section className="overview-bottom">
+        <div className="panel-card" style={{ marginBottom: 0 }}>
+          <div className="panel-head">
+            <div className="panel-title">
+              <TrendingUp size={16} color="#4f46e5" />
+              <span>新增内容与爆款走势</span>
+            </div>
+            <div className="pill-group">
+              <button
+                className={`pill-btn ${trendRange === '7d' ? 'active' : ''}`}
+                onClick={() => setTrendRange('7d')}
+              >
+                近 7 天
+              </button>
+              <button
+                className={`pill-btn ${trendRange === '14d' ? 'active' : ''}`}
+                onClick={() => setTrendRange('14d')}
+              >
+                近 14 天
               </button>
             </div>
-            <div style={{ width: '100%', height: 210 }}>
-              <ResponsiveContainer>
-                <AreaChart data={data.trend7d} margin={{ top: 8, right: 12, left: -18, bottom: 0 }}>
-                  <defs>
-                    <linearGradient id="gradTotal" x1="0" y1="0" x2="0" y2="1">
-                      <stop offset="5%" stopColor="#6366f1" stopOpacity={0.28} />
-                      <stop offset="95%" stopColor="#6366f1" stopOpacity={0} />
-                    </linearGradient>
-                    <linearGradient id="gradBreak" x1="0" y1="0" x2="0" y2="1">
-                      <stop offset="5%" stopColor="#ea580c" stopOpacity={0.32} />
-                      <stop offset="95%" stopColor="#ea580c" stopOpacity={0} />
-                    </linearGradient>
-                  </defs>
-                  <CartesianGrid strokeDasharray="3 3" stroke="#e2e8f0" />
-                  <XAxis dataKey="day" tick={{ fontSize: 12, fill: '#64748b' }} />
-                  <YAxis allowDecimals={false} tick={{ fontSize: 12, fill: '#64748b' }} />
-                  <Tooltip />
-                  <Area type="monotone" dataKey="total" name="新增情报" stroke="#4f46e5" fill="url(#gradTotal)" strokeWidth={2} />
-                  <Area type="monotone" dataKey="breakouts" name="潜力爆款" stroke="#ea580c" fill="url(#gradBreak)" strokeWidth={2} />
-                </AreaChart>
-              </ResponsiveContainer>
-            </div>
+          </div>
+          <div style={{ width: '100%', height: 210 }}>
+            <ResponsiveContainer>
+              <ComposedChart data={trendSeries} margin={{ top: 8, right: 12, left: -12, bottom: 0 }}>
+                <CartesianGrid strokeDasharray="3 3" stroke="#e2e8f0" />
+                <XAxis dataKey="day" tick={{ fontSize: 11, fill: '#64748b' }} />
+                <YAxis allowDecimals={false} tick={{ fontSize: 11, fill: '#64748b' }} />
+                <Tooltip />
+                <Bar dataKey="total" name="新抓取内容" fill="#818cf8" fillOpacity={0.5} radius={[4, 4, 0, 0]} maxBarSize={28} />
+                <Line type="monotone" dataKey="breakouts" name="触发爆款数" stroke="#ea580c" strokeWidth={2.5} dot={{ r: 3.5 }} />
+              </ComposedChart>
+            </ResponsiveContainer>
           </div>
         </div>
 
-        {/* 右副栏：潜力爆款雷达 + 话题聚簇 + 重要动态 */}
-        <div>
-          <div className="panel-card">
-            <div className="panel-head">
-              <div className="panel-title">
-                <Flame size={17} color="#ea580c" />
-                <span>潜力爆款雷达</span>
-              </div>
-              <button
-                className="btn btn-secondary"
-                style={{ fontSize: 12, padding: '4px 9px' }}
-                onClick={() => onNavigate('creators')}
-              >
-                博主基线
-              </button>
+        <div className="panel-card" style={{ marginBottom: 0, display: 'flex', flexDirection: 'column', justifyContent: 'space-between' }}>
+          <div className="panel-head" style={{ marginBottom: 6 }}>
+            <div className="panel-title">
+              <PieIcon size={16} color="#0284c7" />
+              <span>监控平台构成</span>
             </div>
-            {data.breakouts.length === 0 ? (
-              <div style={{ fontSize: 12.5, color: 'var(--text-muted)', padding: '8px 0' }}>
-                当某个博主积累满 3 条带互动数据的作品后，系统会自动识别相对常态异常增长的作品（不按纯绝对点赞拍脑袋）。
-              </div>
-            ) : (
-              data.breakouts.map((b) => (
-                <div
-                  key={b.id}
-                  className="selectable-row"
-                  onClick={() => onOpenIntelDetail(b.id)}
-                >
-                  <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', gap: 6, marginBottom: 4 }}>
-                    <span className="breakout-badge">
-                      {b.breakout_ratio != null ? `${b.breakout_ratio}x 常态` : `潜力 ${b.breakout_score}`}
-                    </span>
-                    <span style={{ fontSize: 11.5, color: 'var(--text-muted)' }}>
-                      {PLATFORM_LABELS[b.platform] || b.platform} · {b.source_name}
-                    </span>
-                  </div>
-                  <div style={{ fontWeight: 600, fontSize: 13.5, lineHeight: 1.4 }}>{b.title}</div>
-                  <div style={{ fontSize: 11.5, color: 'var(--text-muted)', marginTop: 4 }}>{b.breakout_reason}</div>
-                  <div style={{ display: 'flex', gap: 6, flexWrap: 'wrap', marginTop: 6 }}>
-                    <span className="metric-chip">播放 {fmtNum(b.latest_views)}</span>
-                    <span className="metric-chip">赞 {fmtNum(b.latest_likes)}</span>
-                    <span className="metric-chip">评 {fmtNum(b.latest_comments)}</span>
-                  </div>
-                </div>
-              ))
-            )}
           </div>
 
-          <div className="panel-card">
-            <div className="panel-head">
-              <div className="panel-title">
-                <Layers size={17} color="#7c3aed" />
-                <span>多源热点聚簇</span>
+          {platDist.length === 0 ? (
+            <div style={{ padding: 28, textAlign: 'center', color: 'var(--text-muted)', fontSize: 12.5 }}>暂无数据</div>
+          ) : (
+            <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-around', gap: 12, flex: 1 }}>
+              <div style={{ width: 145, height: 145 }}>
+                <ResponsiveContainer>
+                  <PieChart>
+                    <Pie
+                      data={platDist}
+                      dataKey="count"
+                      nameKey="platform"
+                      innerRadius={40}
+                      outerRadius={62}
+                      paddingAngle={2}
+                    >
+                      {platDist.map((entry) => (
+                        <Cell key={entry.platform} fill={PLATFORM_COLORS[entry.platform] || '#64748b'} />
+                      ))}
+                    </Pie>
+                    <Tooltip
+                      formatter={(val: unknown, name: unknown) => [
+                        `${Number(val)} 条`,
+                        PLATFORM_LABELS[String(name)] || String(name),
+                      ]}
+                    />
+                  </PieChart>
+                </ResponsiveContainer>
               </div>
-              <button
-                className="btn btn-secondary"
-                style={{ fontSize: 12, padding: '4px 9px' }}
-                onClick={() => onNavigate('intel')}
-              >
-                全部聚簇
-              </button>
-            </div>
-            {data.clusters.length === 0 ? (
-              <div style={{ fontSize: 12.5, color: 'var(--text-muted)' }}>
-                点击「生成今日推荐选题」后会自动把多博主讨论的同一事件合并成话题聚簇。
-              </div>
-            ) : (
-              data.clusters.map((cl) => (
-                <div
-                  key={cl.id}
-                  style={{ padding: '9px 0', borderBottom: '1px solid var(--border)' }}
-                >
-                  <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', gap: 6 }}>
-                    <strong style={{ fontSize: 13.5 }}>{cl.title}</strong>
-                    <span className="metric-chip">{cl.source_count} 个来源</span>
-                  </div>
-                  <div style={{ fontSize: 12, color: 'var(--text-muted)', marginTop: 3 }}>{cl.summary}</div>
-                </div>
-              ))
-            )}
-          </div>
-
-          <div className="panel-card">
-            <div className="panel-head">
-              <div className="panel-title">
-                <BellRing size={17} color="#d97706" />
-                <span>重要动态时间线</span>
-              </div>
-            </div>
-            {data.recentItems.length === 0 ? (
-              <div style={{ fontSize: 12.5, color: 'var(--text-muted)' }}>暂无监控动态。</div>
-            ) : (
-              data.recentItems.map((it) => (
-                <div
-                  key={it.id}
-                  style={{ padding: '8px 0', borderBottom: '1px solid var(--border)', cursor: 'pointer' }}
-                  onClick={() => onOpenIntelDetail(it.id)}
-                >
-                  <div style={{ display: 'flex', justifyContent: 'space-between', fontSize: 11.5, color: 'var(--text-muted)' }}>
-                    <span>
-                      {PLATFORM_LABELS[it.platform] || it.platform} · {it.source_name}
+              <div style={{ display: 'flex', flexDirection: 'column', gap: 8, fontSize: 12.5 }}>
+                {platDist.slice(0, 5).map((p) => (
+                  <div key={p.platform} style={{ display: 'flex', alignItems: 'center', gap: 7 }}>
+                    <span className="plat-dot" style={{ background: PLATFORM_COLORS[p.platform] || '#64748b' }} />
+                    <span style={{ color: 'var(--text)' }}>{PLATFORM_LABELS[p.platform] || p.platform}</span>
+                    <span style={{ color: 'var(--text-muted)', fontWeight: 600 }}>
+                      {Math.round((p.count / platTotal) * 100)}%
                     </span>
-                    <span>{fmtTime(it.published_at || it.discovered_at)}</span>
                   </div>
-                  <div style={{ fontSize: 13, fontWeight: 600, marginTop: 2 }}>{it.title}</div>
-                </div>
-              ))
-            )}
-          </div>
+                ))}
+              </div>
+            </div>
+          )}
         </div>
-      </div>
+      </section>
     </div>
   );
 }

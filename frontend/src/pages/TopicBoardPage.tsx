@@ -1,51 +1,58 @@
 import { useEffect, useState } from 'react';
-import { Plus, Trash2, Send, AlertTriangle, ExternalLink, CheckCircle2, LayoutGrid, List } from 'lucide-react';
-import { apiRequest, BOARD_STATUS_META, fmtNum, fmtTime, safeJsonArray } from '../api';
+import {
+  Plus,
+  Trash2,
+  Send,
+  ExternalLink,
+  Check,
+  Mic,
+  MessageSquareText,
+  Search,
+  Star,
+} from 'lucide-react';
+import { apiRequest, fmtTime, PLATFORM_LABELS, safeJsonArray } from '../api';
+import type { DrawerTab } from '../components/ContentDrawer';
 import type { PublishInspirationDraft, TopicBoardItem } from '../types';
 
 interface TopicBoardPageProps {
-  activeAccountId: number;
+  refreshTick: number;
+  onOpenContent: (contentId: number, tab?: DrawerTab, savedBoardId?: number | null) => void;
   onSendToPublish: (draft: PublishInspirationDraft) => void;
+  onRefreshBadge: () => void;
   onToast: (msg: string) => void;
 }
 
-const STATUS_ORDER: TopicBoardItem['status'][] = [
-  'to_research',
-  'to_create',
-  'creating',
-  'to_publish',
-  'published',
-  'reviewed',
-];
-
-const PRIORITY_META: Record<string, { label: string; color: string }> = {
-  high: { label: '高优', color: '#dc2626' },
-  medium: { label: '中优', color: '#d97706' },
-  low: { label: '备选', color: '#64748b' },
+const PLATFORM_COLORS: Record<string, string> = {
+  bilibili: '#4f46e5',
+  douyin: '#e11d48',
+  youtube: '#dc2626',
+  rss: '#0284c7',
+  website: '#0d9488',
 };
 
-export function TopicBoardPage({ activeAccountId, onSendToPublish, onToast }: TopicBoardPageProps) {
+export function TopicBoardPage({
+  refreshTick,
+  onOpenContent,
+  onSendToPublish,
+  onRefreshBadge,
+  onToast,
+}: TopicBoardPageProps) {
   const [items, setItems] = useState<TopicBoardItem[]>([]);
-  const [view, setView] = useState<'kanban' | 'table'>('kanban');
+  const [originFilter, setOriginFilter] = useState<'all' | 'creator' | 'hotboard' | 'manual'>('all');
+  const [doneFilter, setDoneFilter] = useState<'all' | 'todo' | 'done'>('all');
   const [q, setQ] = useState('');
-  const [priorityFilter, setPriorityFilter] = useState('');
-
-  const [showNew, setShowNew] = useState(false);
-  const [newTitle, setNewTitle] = useState('');
-  const [newAngle, setNewAngle] = useState('');
-  const [newTags, setNewTags] = useState('');
-  const [newPriority, setNewPriority] = useState<'high' | 'medium' | 'low'>('medium');
-  const [dupHits, setDupHits] = useState<Array<{ title: string; status: string; similarity: number }>>([]);
-
-  const [editing, setEditing] = useState<TopicBoardItem | null>(null);
+  const [quickTitle, setQuickTitle] = useState('');
+  const [noteDrafts, setNoteDrafts] = useState<Record<number, string>>({});
 
   const load = async () => {
     try {
       const qs = new URLSearchParams();
       if (q.trim()) qs.set('q', q.trim());
-      if (priorityFilter) qs.set('priority', priorityFilter);
       const res = await apiRequest<{ items: TopicBoardItem[] }>(`/api/radar/board?${qs.toString()}`);
       setItems(res.items);
+      const nextNotes: Record<number, string> = {};
+      for (const it of res.items) nextNotes[it.id] = it.notes || '';
+      setNoteDrafts(nextNotes);
     } catch (err) {
       onToast((err as Error).message);
     }
@@ -53,447 +60,281 @@ export function TopicBoardPage({ activeAccountId, onSendToPublish, onToast }: To
 
   useEffect(() => {
     void load();
-  }, [priorityFilter]);
+  }, [refreshTick]);
 
-  // 实时历史选题查重
-  useEffect(() => {
-    if (!showNew || newTitle.trim().length < 4) {
-      setDupHits([]);
-      return;
-    }
-    const timer = setTimeout(() => {
-      void apiRequest<{ matches: Array<{ title: string; status: string; similarity: number }> }>('/api/radar/board/check-duplicate', {
+  const handleQuickAdd = async () => {
+    if (!quickTitle.trim()) return;
+    try {
+      await apiRequest('/api/radar/board', {
         method: 'POST',
-        body: JSON.stringify({ title: newTitle.trim() }),
-      })
-        .then((r) => setDupHits(r.matches))
-        .catch(() => {});
-    }, 350);
-    return () => clearTimeout(timer);
-  }, [newTitle, showNew]);
-
-  const handleCreate = async () => {
-    if (!newTitle.trim()) return onToast('请输入选题标题');
-    await apiRequest('/api/radar/board', {
-      method: 'POST',
-      body: JSON.stringify({
-        title: newTitle.trim(),
-        account_id: activeAccountId,
-        core_angle: newAngle.trim(),
-        tags: newTags
-          .split(/[,，、]+/)
-          .map((s) => s.trim())
-          .filter(Boolean),
-        priority: newPriority,
-      }),
-    });
-    onToast('已新增选题到「待研究」');
-    setNewTitle('');
-    setNewAngle('');
-    setNewTags('');
-    setDupHits([]);
-    setShowNew(false);
-    void load();
+        body: JSON.stringify({ title: quickTitle.trim(), status: 'to_research' }),
+      });
+      setQuickTitle('');
+      onToast('已记入收藏本');
+      await load();
+      onRefreshBadge();
+    } catch (err) {
+      onToast((err as Error).message);
+    }
   };
 
-  const handleMoveStatus = async (item: TopicBoardItem, nextStatus: TopicBoardItem['status']) => {
-    await apiRequest(`/api/radar/board/${item.id}`, {
-      method: 'PATCH',
-      body: JSON.stringify({ status: nextStatus }),
-    });
-    onToast(`选题已流转至「${BOARD_STATUS_META[nextStatus].label}」`);
-    void load();
+  const handleToggleDone = async (item: TopicBoardItem) => {
+    const isDone = item.status === 'published' || item.status === 'reviewed';
+    const nextStatus = isDone ? 'to_research' : 'published';
+    try {
+      await apiRequest(`/api/radar/board/${item.id}`, {
+        method: 'PATCH',
+        body: JSON.stringify({ status: nextStatus }),
+      });
+      onToast(isDone ? '已标回「待参考」' : '已标记为「已用过」');
+      await load();
+    } catch (err) {
+      onToast((err as Error).message);
+    }
   };
 
-  const handleSaveEdit = async () => {
-    if (!editing) return;
-    await apiRequest(`/api/radar/board/${editing.id}`, {
-      method: 'PATCH',
-      body: JSON.stringify({
-        title: editing.title,
-        core_angle: editing.core_angle,
-        notes: editing.notes,
-        priority: editing.priority,
-        status: editing.status,
-        published_url: editing.published_url,
-        review_views: editing.review_views,
-        review_likes: editing.review_likes,
-        review_favorites: editing.review_favorites,
-        review_comments: editing.review_comments,
-        review_notes: editing.review_notes,
-      }),
-    });
-    onToast('选题与复盘信息已保存');
-    setEditing(null);
-    void load();
+  const handleSaveNote = async (item: TopicBoardItem) => {
+    const nextNote = (noteDrafts[item.id] ?? '').trim();
+    if (nextNote === (item.notes || '').trim()) return;
+    try {
+      await apiRequest(`/api/radar/board/${item.id}`, {
+        method: 'PATCH',
+        body: JSON.stringify({ notes: nextNote }),
+      });
+      onToast('备注已保存');
+      await load();
+    } catch (err) {
+      onToast((err as Error).message);
+    }
   };
 
   const handleDelete = async (id: number) => {
-    if (!window.confirm('确定删除这条选题吗？')) return;
-    await apiRequest(`/api/radar/board/${id}`, { method: 'DELETE' });
-    onToast('已删除选题');
-    if (editing?.id === id) setEditing(null);
-    void load();
+    try {
+      await apiRequest(`/api/radar/board/${id}`, { method: 'DELETE' });
+      onToast('已从收藏本移除');
+      await load();
+      onRefreshBadge();
+    } catch (err) {
+      onToast((err as Error).message);
+    }
   };
+
+  const filtered = items.filter((it) => {
+    const isDone = it.status === 'published' || it.status === 'reviewed';
+    if (doneFilter === 'todo' && isDone) return false;
+    if (doneFilter === 'done' && !isDone) return false;
+    const origin = it.source_origin || (it.source_content_id ? 'creator' : 'manual');
+    if (originFilter !== 'all' && origin !== originFilter) return false;
+    return true;
+  });
 
   return (
     <div>
-      <div className="panel-card" style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', gap: 10, flexWrap: 'wrap' }}>
-        <div style={{ display: 'flex', gap: 8, alignItems: 'center', flexWrap: 'wrap' }}>
-          <div className="sub-tabs">
-            <button className={`sub-tab-btn ${view === 'kanban' ? 'active' : ''}`} onClick={() => setView('kanban')}>
-              <LayoutGrid size={13} style={{ verticalAlign: 'middle', marginRight: 4 }} />6 态看板
-            </button>
-            <button className={`sub-tab-btn ${view === 'table' ? 'active' : ''}`} onClick={() => setView('table')}>
-              <List size={13} style={{ verticalAlign: 'middle', marginRight: 4 }} />列表管理
-            </button>
+      {/* 顶部清爽筛选 + 随手记一条 */}
+      <div className="panel-card" style={{ display: 'flex', flexDirection: 'column', gap: 10 }}>
+        <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', gap: 10, flexWrap: 'wrap' }}>
+          <div className="pill-group">
+            {[
+              { k: 'all' as const, l: `全部 (${items.length})` },
+              { k: 'creator' as const, l: '对标博主' },
+              { k: 'hotboard' as const, l: '平台热榜' },
+              { k: 'manual' as const, l: '手动记' },
+            ].map((f) => (
+              <button
+                key={f.k}
+                className={`pill-btn ${originFilter === f.k ? 'active' : ''}`}
+                onClick={() => setOriginFilter(f.k)}
+              >
+                {f.l}
+              </button>
+            ))}
           </div>
-          <select className="input" style={{ width: 115 }} value={priorityFilter} onChange={(e) => setPriorityFilter(e.target.value)}>
-            <option value="">全部优先级</option>
-            <option value="high">高优先级</option>
-            <option value="medium">中优先级</option>
-            <option value="low">备选</option>
-          </select>
+
+          <div style={{ display: 'flex', gap: 8, alignItems: 'center', flexWrap: 'wrap' }}>
+            <div className="pill-group">
+              {[
+                { k: 'all' as const, l: '全部状态' },
+                { k: 'todo' as const, l: '待参考' },
+                { k: 'done' as const, l: '已用过' },
+              ].map((s) => (
+                <button
+                  key={s.k}
+                  className={`pill-btn ${doneFilter === s.k ? 'active' : ''}`}
+                  onClick={() => setDoneFilter(s.k)}
+                >
+                  {s.l}
+                </button>
+              ))}
+            </div>
+            <div style={{ display: 'flex', gap: 5 }}>
+              <input
+                className="input"
+                style={{ width: 175 }}
+                placeholder="搜收藏的标题或备注..."
+                value={q}
+                onChange={(e) => setQ(e.target.value)}
+                onKeyDown={(e) => e.key === 'Enter' && void load()}
+              />
+              <button className="btn btn-secondary btn-sm" onClick={() => void load()}>
+                <Search size={13} />
+              </button>
+            </div>
+          </div>
+        </div>
+
+        {/* 极简随手记一条 */}
+        <div style={{ display: 'flex', gap: 8, paddingTop: 8, borderTop: '1px solid var(--border)' }}>
           <input
             className="input"
-            style={{ width: 190 }}
-            placeholder="搜索历史选题防撞车..."
-            value={q}
-            onChange={(e) => setQ(e.target.value)}
-            onKeyDown={(e) => e.key === 'Enter' && void load()}
+            placeholder="突然想到一个好点子？直接写一句回车存进收藏本..."
+            value={quickTitle}
+            onChange={(e) => setQuickTitle(e.target.value)}
+            onKeyDown={(e) => e.key === 'Enter' && void handleQuickAdd()}
           />
-          <button className="btn btn-secondary" onClick={() => void load()}>
-            搜索
+          <button className="btn btn-primary btn-sm" onClick={() => void handleQuickAdd()}>
+            <Plus size={14} /> 随手记一条
           </button>
         </div>
-        <button className="btn btn-primary" onClick={() => setShowNew((v) => !v)}>
-          <Plus size={14} /> 手动新建选题
-        </button>
       </div>
 
-      {showNew && (
-        <div className="panel-card" style={{ borderColor: '#c7d2fe', background: '#fafbff' }}>
-          <div className="panel-title" style={{ marginBottom: 10 }}>
-            新建个人选题（自动比对历史选题库防重复）
+      {/* 极简收藏清单（绝无复杂看板） */}
+      <div className="panel-card" style={{ marginBottom: 0 }}>
+        <div className="panel-head">
+          <div className="panel-title">
+            <Star size={16} color="#d97706" fill="#d97706" />
+            <span>我的收藏清单 ({filtered.length})</span>
           </div>
-          {dupHits.length > 0 && (
-            <div className="alert-banner-warn" style={{ display: 'flex', gap: 8, alignItems: 'center' }}>
-              <AlertTriangle size={15} />
-              <span>
-                历史选题查重警告：与「<strong>{dupHits[0].title}</strong>」相似度 <strong>{dupHits[0].similarity}%</strong>（状态：
-                {BOARD_STATUS_META[dupHits[0].status]?.label || dupHits[0].status}）
-              </span>
-            </div>
-          )}
-          <div style={{ display: 'grid', gridTemplateColumns: '2fr 1fr 1fr', gap: 10 }}>
-            <input className="input" placeholder="选题标题 *" value={newTitle} onChange={(e) => setNewTitle(e.target.value)} />
-            <input className="input" placeholder="标签（逗号分隔）" value={newTags} onChange={(e) => setNewTags(e.target.value)} />
-            <select className="input" value={newPriority} onChange={(e) => setNewPriority(e.target.value as 'high' | 'medium' | 'low')}>
-              <option value="high">高优先级</option>
-              <option value="medium">中优先级</option>
-              <option value="low">备选</option>
-            </select>
-            <textarea
-              className="input"
-              style={{ gridColumn: '1 / -1' }}
-              rows={2}
-              placeholder="核心切入角度与创作思路..."
-              value={newAngle}
-              onChange={(e) => setNewAngle(e.target.value)}
-            />
-          </div>
-          <div style={{ display: 'flex', gap: 8, marginTop: 10 }}>
-            <button className="btn btn-primary" onClick={handleCreate}>
-              加入选题库
-            </button>
-            <button className="btn btn-secondary" onClick={() => setShowNew(false)}>
-              取消
-            </button>
-          </div>
+          <span style={{ fontSize: 12, color: 'var(--text-muted)' }}>点标题或按钮直接看口播稿与热评，备注改完回车即存</span>
         </div>
-      )}
 
-      {view === 'kanban' ? (
-        <div className="kanban-grid">
-          {STATUS_ORDER.map((statusKey) => {
-            const meta = BOARD_STATUS_META[statusKey];
-            const colItems = items.filter((i) => i.status === statusKey);
-            const nextIdx = STATUS_ORDER.indexOf(statusKey) + 1;
-            const nextStatus = nextIdx < STATUS_ORDER.length ? STATUS_ORDER[nextIdx] : null;
-            return (
-              <div key={statusKey} className="kanban-col">
-                <div className="kanban-col-head">
-                  <span style={{ color: meta.color }}>{meta.label}</span>
-                  <span className="metric-chip">{colItems.length}</span>
-                </div>
-                {colItems.length === 0 ? (
-                  <div style={{ fontSize: 12, color: '#94a3b8', textAlign: 'center', padding: '18px 4px' }}>空</div>
-                ) : (
-                  colItems.map((it) => {
-                    const pMeta = PRIORITY_META[it.priority] || PRIORITY_META.medium;
-                    return (
-                      <div key={it.id} className="kanban-card">
-                        <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: 5 }}>
-                          <span style={{ fontSize: 11, fontWeight: 700, color: pMeta.color }}>● {pMeta.label}</span>
-                          <span style={{ fontSize: 11, color: 'var(--text-muted)' }}>{fmtTime(it.updated_at)}</span>
-                        </div>
-                        <div
-                          style={{ fontWeight: 700, fontSize: 13, lineHeight: 1.4, cursor: 'pointer' }}
-                          onClick={() => setEditing({ ...it })}
-                        >
-                          {it.title}
-                        </div>
-                        {it.core_angle && (
-                          <div style={{ fontSize: 11.5, color: 'var(--text-muted)', marginTop: 5 }}>{it.core_angle.slice(0, 68)}</div>
-                        )}
-                        {it.status === 'reviewed' && (
-                          <div style={{ fontSize: 11, color: '#7c3aed', marginTop: 5 }}>
-                            复盘：播 {fmtNum(it.review_views)} · 赞 {fmtNum(it.review_likes)}
-                          </div>
-                        )}
-                        <div style={{ display: 'flex', gap: 5, flexWrap: 'wrap', marginTop: 8 }}>
-                          <button
-                            className="btn btn-secondary"
-                            style={{ padding: '3px 7px', fontSize: 11 }}
-                            onClick={() => setEditing({ ...it })}
-                          >
-                            编辑/复盘
-                          </button>
-                          {nextStatus && (
-                            <button
-                              className="btn btn-primary"
-                              style={{ padding: '3px 7px', fontSize: 11 }}
-                              onClick={() => handleMoveStatus(it, nextStatus)}
-                            >
-                              → {BOARD_STATUS_META[nextStatus].label}
-                            </button>
-                          )}
-                          {it.status === 'to_publish' && (
-                            <button
-                              className="btn btn-secondary"
-                              style={{ padding: '3px 7px', fontSize: 11 }}
-                              onClick={() =>
-                                onSendToPublish({
-                                  title: it.title,
-                                  tags: safeJsonArray<string>(it.tags_json),
-                                  sourceUrl: it.source_url,
-                                })
-                              }
-                            >
-                              <Send size={11} /> 发视频
-                            </button>
-                          )}
-                        </div>
-                      </div>
-                    );
-                  })
-                )}
-              </div>
-            );
-          })}
-        </div>
-      ) : (
-        <div className="panel-card">
-          <table className="data-table">
-            <thead>
-              <tr>
-                <th>选题标题与切入角度</th>
-                <th style={{ width: 95 }}>优先级</th>
-                <th style={{ width: 120 }}>状态流转</th>
-                <th style={{ width: 160 }}>复盘表现</th>
-                <th style={{ width: 140 }}>操作</th>
-              </tr>
-            </thead>
-            <tbody>
-              {items.map((it) => (
-                <tr key={it.id}>
-                  <td>
-                    <div style={{ fontWeight: 700, cursor: 'pointer' }} onClick={() => setEditing({ ...it })}>
-                      {it.title}
-                    </div>
-                    <div style={{ fontSize: 12, color: 'var(--text-muted)', marginTop: 3 }}>{it.core_angle || '—'}</div>
-                  </td>
-                  <td>
-                    <span style={{ color: (PRIORITY_META[it.priority] || PRIORITY_META.medium).color, fontWeight: 700 }}>
-                      {(PRIORITY_META[it.priority] || PRIORITY_META.medium).label}
-                    </span>
-                  </td>
-                  <td>
-                    <select
-                      className="input"
-                      style={{ padding: '4px 6px', fontSize: 12 }}
-                      value={it.status}
-                      onChange={(e) => handleMoveStatus(it, e.target.value as TopicBoardItem['status'])}
+        {filtered.length === 0 ? (
+          <div style={{ padding: '36px 12px', textAlign: 'center', color: 'var(--text-muted)', fontSize: 13 }}>
+            收藏本还是空的。在「今日速览」「对标博主」或「平台热榜」里看到想拍的，点一下 ☆ 就能收进来。
+          </div>
+        ) : (
+          <div className="feed-list">
+            {filtered.map((it) => {
+              const isDone = it.status === 'published' || it.status === 'reviewed';
+              const plat = it.content_platform || '';
+              const pColor = PLATFORM_COLORS[plat] || '#64748b';
+              const highlight = it.ai_summary || it.core_angle;
+              return (
+                <div key={it.id} className="feed-row" style={{ cursor: 'default' }}>
+                  <div className="feed-row-head" style={{ gap: 10 }}>
+                    <div
+                      style={{
+                        display: 'flex',
+                        alignItems: 'center',
+                        gap: 8,
+                        minWidth: 0,
+                        flex: 1,
+                        cursor: it.source_content_id ? 'pointer' : 'default',
+                      }}
+                      onClick={() => {
+                        if (it.source_content_id) onOpenContent(it.source_content_id, 'point', it.id);
+                      }}
                     >
-                      {STATUS_ORDER.map((s) => (
-                        <option key={s} value={s}>
-                          {BOARD_STATUS_META[s].label}
-                        </option>
-                      ))}
-                    </select>
-                  </td>
-                  <td style={{ fontSize: 12 }}>
-                    播 {fmtNum(it.review_views)} · 赞 {fmtNum(it.review_likes)} · 藏 {fmtNum(it.review_favorites)}
-                  </td>
-                  <td>
-                    <div style={{ display: 'flex', gap: 5 }}>
-                      <button className="btn btn-secondary" style={{ padding: '4px 8px', fontSize: 11.5 }} onClick={() => setEditing({ ...it })}>
-                        编辑
+                      {plat && (
+                        <span className="plat-badge" style={{ background: pColor }}>
+                          {PLATFORM_LABELS[plat] || plat}
+                        </span>
+                      )}
+                      <span
+                        className="feed-row-title"
+                        style={{
+                          textDecoration: isDone ? 'line-through' : 'none',
+                          color: isDone ? 'var(--text-muted)' : 'var(--text)',
+                        }}
+                      >
+                        {it.title}
+                      </span>
+                      {it.breakout_ratio != null && it.breakout_ratio >= 1.6 && (
+                        <span className="breakout-badge">{it.breakout_ratio}x</span>
+                      )}
+                    </div>
+
+                    <div style={{ display: 'flex', gap: 5, flexWrap: 'wrap', flexShrink: 0 }}>
+                      <button
+                        className={`mini-action ${isDone ? 'done' : ''}`}
+                        onClick={() => void handleToggleDone(it)}
+                      >
+                        <Check size={11} /> {isDone ? '已用过' : '标记已用'}
+                      </button>
+                      {it.source_content_id && (
+                        <>
+                          <button
+                            className="mini-action"
+                            onClick={() => onOpenContent(it.source_content_id!, 'transcript', it.id)}
+                          >
+                            <Mic size={11} /> {it.transcript_status === 'done' ? '口播稿 ✓' : '口播稿'}
+                          </button>
+                          <button
+                            className="mini-action"
+                            onClick={() => onOpenContent(it.source_content_id!, 'comments', it.id)}
+                          >
+                            <MessageSquareText size={11} /> 热评{it.comment_rows ? `(${it.comment_rows})` : ''}
+                          </button>
+                        </>
+                      )}
+                      {it.source_url && (
+                        <a
+                          href={it.source_url}
+                          target="_blank"
+                          rel="noreferrer"
+                          className="mini-action"
+                          style={{ textDecoration: 'none' }}
+                        >
+                          <ExternalLink size={11} /> 原链
+                        </a>
+                      )}
+                      <button
+                        className="mini-action"
+                        onClick={() =>
+                          onSendToPublish({
+                            title: it.title,
+                            tags: safeJsonArray<string>(it.tags_json),
+                            sourceUrl: it.source_url,
+                          })
+                        }
+                      >
+                        <Send size={11} /> 去发布
                       </button>
                       <button
-                        className="btn btn-secondary"
-                        style={{ padding: '4px 7px', fontSize: 11.5, color: 'var(--danger)' }}
-                        onClick={() => handleDelete(it.id)}
+                        className="mini-action"
+                        style={{ color: 'var(--danger)' }}
+                        onClick={() => void handleDelete(it.id)}
+                        title="移除收藏"
                       >
-                        <Trash2 size={12} />
+                        <Trash2 size={11} />
                       </button>
                     </div>
-                  </td>
-                </tr>
-              ))}
-            </tbody>
-          </table>
-        </div>
-      )}
+                  </div>
 
-      {/* 选题详情 & 效果复盘弹窗 */}
-      {editing && (
-        <div className="modal-backdrop" onClick={() => setEditing(null)}>
-          <div className="modal-box" onClick={(e) => e.stopPropagation()}>
-            <div className="panel-head" style={{ borderBottom: '1px solid var(--border)', paddingBottom: 10 }}>
-              <div className="panel-title">编辑选题与发布效果复盘</div>
-              {editing.source_url && (
-                <a href={editing.source_url} target="_blank" rel="noreferrer" style={{ fontSize: 12.5, color: 'var(--primary)' }}>
-                  查看原始参考 <ExternalLink size={12} />
-                </a>
-              )}
-            </div>
-            <div style={{ display: 'grid', gridTemplateColumns: '2fr 1fr 1fr', gap: 10 }}>
-              <div>
-                <label className="field-label">选题标题</label>
-                <input className="input" value={editing.title} onChange={(e) => setEditing({ ...editing, title: e.target.value })} />
-              </div>
-              <div>
-                <label className="field-label">当前状态</label>
-                <select
-                  className="input"
-                  value={editing.status}
-                  onChange={(e) => setEditing({ ...editing, status: e.target.value as TopicBoardItem['status'] })}
-                >
-                  {STATUS_ORDER.map((s) => (
-                    <option key={s} value={s}>
-                      {BOARD_STATUS_META[s].label}
-                    </option>
-                  ))}
-                </select>
-              </div>
-              <div>
-                <label className="field-label">优先级</label>
-                <select
-                  className="input"
-                  value={editing.priority}
-                  onChange={(e) => setEditing({ ...editing, priority: e.target.value as 'high' | 'medium' | 'low' })}
-                >
-                  <option value="high">高优先级</option>
-                  <option value="medium">中优先级</option>
-                  <option value="low">备选</option>
-                </select>
-              </div>
-              <div style={{ gridColumn: '1 / -1' }}>
-                <label className="field-label">差异化切入角度与脚本要点</label>
-                <textarea
-                  className="input"
-                  rows={3}
-                  value={editing.core_angle}
-                  onChange={(e) => setEditing({ ...editing, core_angle: e.target.value })}
-                />
-              </div>
-              <div style={{ gridColumn: '1 / -1' }}>
-                <label className="field-label">创作备注</label>
-                <textarea
-                  className="input"
-                  rows={2}
-                  value={editing.notes}
-                  onChange={(e) => setEditing({ ...editing, notes: e.target.value })}
-                />
-              </div>
-            </div>
+                  {highlight && <div className="feed-row-brief">💡 {highlight}</div>}
 
-            <div style={{ marginTop: 14, padding: 12, background: 'var(--surface-muted)', borderRadius: 10, border: '1px solid var(--border)' }}>
-              <div style={{ fontWeight: 700, fontSize: 13, marginBottom: 8 }}>发布后真实表现复盘（用于沉淀爆款经验）</div>
-              <div style={{ display: 'grid', gridTemplateColumns: 'repeat(4, 1fr)', gap: 8 }}>
-                <input
-                  className="input"
-                  type="number"
-                  placeholder="真实播放量"
-                  value={editing.review_views ?? ''}
-                  onChange={(e) => setEditing({ ...editing, review_views: e.target.value === '' ? null : Number(e.target.value) })}
-                />
-                <input
-                  className="input"
-                  type="number"
-                  placeholder="真实点赞"
-                  value={editing.review_likes ?? ''}
-                  onChange={(e) => setEditing({ ...editing, review_likes: e.target.value === '' ? null : Number(e.target.value) })}
-                />
-                <input
-                  className="input"
-                  type="number"
-                  placeholder="真实收藏"
-                  value={editing.review_favorites ?? ''}
-                  onChange={(e) => setEditing({ ...editing, review_favorites: e.target.value === '' ? null : Number(e.target.value) })}
-                />
-                <input
-                  className="input"
-                  type="number"
-                  placeholder="真实评论"
-                  value={editing.review_comments ?? ''}
-                  onChange={(e) => setEditing({ ...editing, review_comments: e.target.value === '' ? null : Number(e.target.value) })}
-                />
-                <input
-                  className="input"
-                  style={{ gridColumn: '1 / -1' }}
-                  placeholder="本人作品发布链接（选填）"
-                  value={editing.published_url}
-                  onChange={(e) => setEditing({ ...editing, published_url: e.target.value })}
-                />
-                <textarea
-                  className="input"
-                  style={{ gridColumn: '1 / -1' }}
-                  rows={2}
-                  placeholder="复盘总结：为什么爆了/为什么没跑起来？下一次怎么改标题和开头？"
-                  value={editing.review_notes}
-                  onChange={(e) => setEditing({ ...editing, review_notes: e.target.value })}
-                />
-              </div>
-            </div>
-
-            <div style={{ display: 'flex', justifyContent: 'space-between', marginTop: 16 }}>
-              <button className="btn btn-danger" onClick={() => handleDelete(editing.id)}>
-                <Trash2 size={14} /> 删除选题
-              </button>
-              <div style={{ display: 'flex', gap: 8 }}>
-                <button
-                  className="btn btn-secondary"
-                  onClick={() => {
-                    onSendToPublish({
-                      title: editing.title,
-                      tags: safeJsonArray<string>(editing.tags_json),
-                      sourceUrl: editing.source_url,
-                    });
-                    setEditing(null);
-                  }}
-                >
-                  <Send size={14} /> 带入视频发布
-                </button>
-                <button className="btn btn-primary" onClick={handleSaveEdit}>
-                  <CheckCircle2 size={14} /> 保存修改
-                </button>
-              </div>
-            </div>
+                  <div style={{ display: 'flex', alignItems: 'center', gap: 8, marginTop: 8 }}>
+                    <span style={{ fontSize: 11.5, color: 'var(--text-muted)', flexShrink: 0 }}>
+                      备注（{fmtTime(it.updated_at)}）：
+                    </span>
+                    <input
+                      className="saved-note-input"
+                      placeholder="写一句打算怎么拍，失焦或回车自动保存..."
+                      value={noteDrafts[it.id] ?? ''}
+                      onChange={(e) => setNoteDrafts((prev) => ({ ...prev, [it.id]: e.target.value }))}
+                      onBlur={() => void handleSaveNote(it)}
+                      onKeyDown={(e) => {
+                        if (e.key === 'Enter') {
+                          (e.target as HTMLInputElement).blur();
+                        }
+                      }}
+                    />
+                  </div>
+                </div>
+              );
+            })}
           </div>
-        </div>
-      )}
+        )}
+      </div>
     </div>
   );
 }

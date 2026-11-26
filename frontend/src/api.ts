@@ -1,10 +1,11 @@
 export async function apiRequest<T>(url: string, init?: RequestInit): Promise<T> {
+  const headers: Record<string, string> = {
+    ...(init?.body !== undefined ? { 'Content-Type': 'application/json' } : {}),
+    ...((init?.headers as Record<string, string> | undefined) || {}),
+  };
   const res = await fetch(url, {
-    headers: {
-      'Content-Type': 'application/json',
-      ...(init?.headers || {}),
-    },
     ...init,
+    headers,
   });
   const data = await res.json().catch(() => ({}));
   if (!res.ok) {
