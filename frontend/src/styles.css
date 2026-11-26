@@ -2010,3 +2010,331 @@ th {
   border-radius: 10px;
   background: #ffffff;
 }
+
+/* ===== 核心监控 V3：国内外 AI 早报 · 爆款排行榜 · 二创工坊 · 专属降噪榜单 ===== */
+
+.kw-strip {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  flex-wrap: wrap;
+}
+
+.kw-chip {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  padding: 4px 10px;
+  border-radius: 999px;
+  background: #eef2ff;
+  color: #3730a3;
+  font-size: 12px;
+  font-weight: 600;
+}
+
+.kw-chip-block {
+  background: #fef2f2;
+  color: #b91c1c;
+}
+
+.kw-chip button {
+  border: none;
+  background: transparent;
+  color: inherit;
+  cursor: pointer;
+  padding: 0;
+  line-height: 1;
+  font-size: 13px;
+  opacity: 0.7;
+}
+
+.kw-chip button:hover {
+  opacity: 1;
+}
+
+.news-digest-hero {
+  background: linear-gradient(135deg, #eef2ff 0%, #ffffff 55%, #f0f9ff 100%);
+  border: 1px solid #c7d2fe;
+  border-radius: var(--radius);
+  padding: 18px 20px;
+  margin-bottom: 16px;
+  box-shadow: var(--shadow-card);
+}
+
+.news-story-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(260px, 1fr));
+  gap: 12px;
+  margin-top: 12px;
+}
+
+.news-story-card {
+  background: #ffffff;
+  border-radius: 11px;
+  padding: 13px 14px;
+  display: flex;
+  flex-direction: column;
+  gap: 7px;
+  box-shadow: 0 1px 4px rgba(15, 23, 42, 0.05);
+}
+
+.news-dual-grid {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 16px;
+  align-items: start;
+  margin-bottom: 16px;
+}
+
+@media (max-width: 1120px) {
+  .news-dual-grid {
+    grid-template-columns: 1fr;
+  }
+}
+
+.news-item-row {
+  padding: 11px 10px;
+  margin: 0 -10px;
+  border-bottom: 1px solid var(--border);
+  border-radius: 8px;
+  transition: background 0.14s ease;
+}
+
+.news-item-row:last-child {
+  border-bottom: none;
+}
+
+.news-item-row:hover {
+  background: var(--surface-muted);
+}
+
+.news-item-title {
+  font-size: 14px;
+  font-weight: 700;
+  color: var(--text);
+  line-height: 1.45;
+  text-decoration: none;
+}
+
+.news-item-title:hover {
+  color: var(--primary);
+}
+
+.rank-card-list {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+}
+
+.rank-card {
+  display: grid;
+  grid-template-columns: 42px 176px minmax(0, 1fr) auto;
+  gap: 14px;
+  align-items: center;
+  padding: 13px 15px;
+  border-radius: 13px;
+  background: #ffffff;
+  border: 1px solid var(--border);
+  box-shadow: var(--shadow-card);
+  transition: border-color 0.15s ease, transform 0.15s ease, box-shadow 0.15s ease;
+}
+
+.rank-card:hover {
+  border-color: #a5b4fc;
+  transform: translateY(-1px);
+  box-shadow: 0 8px 22px rgba(15, 23, 42, 0.07);
+}
+
+@media (max-width: 980px) {
+  .rank-card {
+    grid-template-columns: 36px 128px minmax(0, 1fr);
+  }
+}
+
+@media (max-width: 680px) {
+  .rank-card {
+    grid-template-columns: 1fr;
+  }
+}
+
+.rank-medal {
+  width: 34px;
+  height: 34px;
+  border-radius: 10px;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  font-weight: 800;
+  font-size: 14px;
+  background: #f1f5f9;
+  color: #475569;
+  font-variant-numeric: tabular-nums;
+}
+
+.rank-medal.top1 { background: linear-gradient(135deg, #f59e0b, #ea580c); color: #ffffff; }
+.rank-medal.top2 { background: linear-gradient(135deg, #64748b, #475569); color: #ffffff; }
+.rank-medal.top3 { background: linear-gradient(135deg, #d97706, #b45309); color: #ffffff; }
+
+.rank-thumb {
+  position: relative;
+  width: 100%;
+  aspect-ratio: 16 / 9;
+  border-radius: 9px;
+  overflow: hidden;
+  background: #1e293b;
+  cursor: pointer;
+}
+
+.rank-thumb img {
+  width: 100%;
+  height: 100%;
+  object-fit: cover;
+  display: block;
+}
+
+.ratio-bar-track {
+  height: 6px;
+  width: 120px;
+  background: #e2e8f0;
+  border-radius: 999px;
+  overflow: hidden;
+  display: inline-block;
+  vertical-align: middle;
+}
+
+.ratio-bar-fill {
+  height: 100%;
+  border-radius: 999px;
+  background: linear-gradient(90deg, #f97316, #dc2626);
+}
+
+.creator-grid-cards {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(290px, 1fr));
+  gap: 14px;
+  margin-bottom: 16px;
+}
+
+.creator-profile-card {
+  background: #ffffff;
+  border: 1px solid var(--border);
+  border-radius: 13px;
+  padding: 15px 16px;
+  cursor: pointer;
+  transition: all 0.15s ease;
+  box-shadow: var(--shadow-card);
+}
+
+.creator-profile-card:hover {
+  border-color: #a5b4fc;
+  transform: translateY(-1px);
+}
+
+.creator-profile-card.active {
+  border-color: var(--primary);
+  background: #fafbff;
+  box-shadow: 0 0 0 2px rgba(79, 70, 229, 0.14);
+}
+
+.remix-modal {
+  background: var(--surface);
+  border-radius: 16px;
+  width: 100%;
+  max-width: 1180px;
+  max-height: 90vh;
+  display: flex;
+  flex-direction: column;
+  overflow: hidden;
+  box-shadow: 0 24px 60px rgba(15, 23, 42, 0.28);
+}
+
+.remix-head {
+  padding: 16px 22px;
+  border-bottom: 1px solid var(--border);
+  display: flex;
+  justify-content: space-between;
+  align-items: flex-start;
+  gap: 14px;
+  background: #fafbff;
+}
+
+.remix-split {
+  display: grid;
+  grid-template-columns: minmax(0, 0.96fr) minmax(0, 1.04fr);
+  overflow-y: auto;
+  flex: 1;
+}
+
+@media (max-width: 960px) {
+  .remix-split {
+    grid-template-columns: 1fr;
+  }
+}
+
+.remix-col {
+  padding: 18px 20px;
+  display: flex;
+  flex-direction: column;
+  overflow-y: auto;
+}
+
+.remix-col:first-child {
+  border-right: 1px solid var(--border);
+  background: #fcfdff;
+}
+
+.remix-empty-card {
+  flex: 1;
+  min-height: 260px;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  text-align: center;
+  padding: 28px 18px;
+  border-radius: 12px;
+  background: var(--surface-muted);
+}
+
+.remix-angle-btn {
+  width: 100%;
+  text-align: left;
+  padding: 10px 12px;
+  border-radius: 10px;
+  border: 1px solid var(--border);
+  background: #ffffff;
+  cursor: pointer;
+  transition: all 0.14s ease;
+}
+
+.remix-angle-btn:hover {
+  border-color: #a5b4fc;
+  background: #f8fafc;
+}
+
+.remix-angle-btn.active {
+  border-color: var(--primary);
+  background: var(--primary-soft);
+}
+
+.board-grid-cards {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(310px, 1fr));
+  gap: 12px;
+}
+
+.board-text-card {
+  padding: 13px 14px;
+  border-radius: 11px;
+  background: var(--surface-muted);
+  display: flex;
+  flex-direction: column;
+  gap: 7px;
+  cursor: pointer;
+  transition: background 0.14s ease, transform 0.14s ease;
+}
+
+.board-text-card:hover {
+  background: #eef2ff;
+  transform: translateY(-1px);
+}

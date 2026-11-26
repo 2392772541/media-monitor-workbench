@@ -1,7 +1,31 @@
 import type { FastifyInstance } from 'fastify';
 import { getDb } from '../db/database.js';
 import { recomputeAllBreakouts, recomputeSourceBreakout } from '../services/breakoutService.js';
-import { importHotItemToIntel, refreshHotBoards } from '../services/hotBoardService.js';
+import {
+  addCustomHotBoard,
+  deleteCustomHotBoard,
+  getUserHotBoards,
+  importHotItemToIntel,
+  refreshHotBoards,
+  toggleUserHotBoard,
+} from '../services/hotBoardService.js';
+import {
+  deleteUserNewsSource,
+  generateDailyAiDigest,
+  getNewsBriefSnapshot,
+  getUserMonitorPrefs,
+  matchKeywordsInText,
+  refreshNewsBrief,
+  saveUserKeywords,
+  toggleUserNewsSource,
+  upsertUserNewsSource,
+} from '../services/newsBriefService.js';
+import {
+  generateRemixScript,
+  generateViralBreakdown,
+  getContentRemixRecord,
+  getCreatorLeaderboard,
+} from '../services/remixService.js';
 import {
   analyzeCommentCrawlJob,
   deleteCommentCrawlJob,
@@ -536,32 +560,31 @@ export function registerRadarRoutes(app: FastifyInstance): void {
     return { ok: true, ...recomputeAllBreakouts() };
   });
 
-  // ===== 4. 平台热榜（默认仅返回各榜单最新一期快照，绝不出现重复 #1） =====
-  app.get<{ Querystring: { platform?: string; category?: string; contentType?: string; minRelevance?: string; q?: string; includeLocal?: string } }>(
+  // ===== 4. 专属平台热榜（支持自定义关注词/屏蔽词降噪 + 自由增删精准榜单） =====
+  app.get<{ Querystring: { platform?: string; boardName?: string; category?: string; q?: string; focusOnly?: string } }>(
     '/api/radar/hot-board',
     async (req) => {
       const db = getDb();
+      const prefs = getUserMonitorPrefs();
+      const boards = getUserHotBoards();
+      const enabledBoardNames = new Set(boards.filter((b) => b.enabled).map((b) => b.name));
+      const verticalBoardNames = new Set(boards.filter((b) => b.isVertical).map((b) => b.name));
+
       const baseWhere: string[] = [
         `h.captured_at = (
           SELECT MAX(h2.captured_at) FROM hot_board_items h2
           WHERE h2.platform = h.platform AND h2.board_name = h.board_name
         )`,
+        "h.board_name != '站内监控高热'",
       ];
       const baseParams: (string | number)[] = [];
-      if (req.query.includeLocal !== 'true') {
-        baseWhere.push("h.board_name != '站内监控高热'");
-      }
       if (req.query.platform) {
         baseWhere.push('h.platform = ?');
         baseParams.push(req.query.platform);
       }
-      if (req.query.contentType) {
-        baseWhere.push('h.content_type = ?');
-        baseParams.push(req.query.contentType);
-      }
-      if (req.query.minRelevance) {
-        baseWhere.push('COALESCE(h.account_relevance_score, 0) >= ?');
-        baseParams.push(Number(req.query.minRelevance));
+      if (req.query.boardName) {
+        baseWhere.push('h.board_name = ?');
+        baseParams.push(req.query.boardName);
       }
       if (req.query.q) {
         baseWhere.push('(h.title LIKE ? OR h.summary LIKE ? OR h.category LIKE ? OR h.author LIKE ?)');
@@ -569,27 +592,7 @@ export function registerRadarRoutes(app: FastifyInstance): void {
         baseParams.push(like, like, like, like);
       }
 
-      // 先基于平台条件统计真实分类标签列表
-      const catWhereSql = baseWhere.length ? `WHERE ${baseWhere.join(' AND ')}` : '';
-      const categories = db
-        .prepare(`
-          SELECT COALESCE(NULLIF(TRIM(h.category), ''), '综合') AS name, COUNT(*) AS count
-          FROM hot_board_items h
-          ${catWhereSql}
-          GROUP BY name
-          ORDER BY count DESC
-          LIMIT 20
-        `)
-        .all(...baseParams) as Array<{ name: string; count: number }>;
-
-      const where = [...baseWhere];
-      const params = [...baseParams];
-      if (req.query.category) {
-        where.push("COALESCE(NULLIF(TRIM(h.category), ''), '综合') = ?");
-        params.push(req.query.category);
-      }
-      const whereSql = where.length ? `WHERE ${where.join(' AND ')}` : '';
-      const items = db
+      const rawRows = db
         .prepare(`
           SELECT h.*,
                  (SELECT a.summary_zh FROM content_analyses a WHERE a.content_id = h.content_id LIMIT 1) AS ai_summary,
@@ -598,14 +601,76 @@ export function registerRadarRoutes(app: FastifyInstance): void {
                      OR (h.url != '' AND tb.source_url = h.url)
                   LIMIT 1) AS saved_board_id
           FROM hot_board_items h
-          ${whereSql}
+          WHERE ${baseWhere.join(' AND ')}
           ORDER BY h.rank_no ASC, COALESCE(h.hot_value, 0) DESC, h.captured_at DESC
-          LIMIT 120
+          LIMIT 260
         `)
-        .all(...params);
-      return { items, categories };
+        .all(...baseParams) as Array<Record<string, unknown>>;
+
+      // 只展示当前已启用的榜单条目，并附加关注词/屏蔽词命中结果
+      const activeRows = rawRows
+        .filter((r) => enabledBoardNames.has(String(r.board_name || '')))
+        .map((r) => {
+          const hay = `${r.title || ''} ${r.summary || ''} ${r.category || ''} ${r.author || ''}`;
+          const matchedKeywords = matchKeywordsInText(hay, prefs.focusKeywords);
+          const blockedKeywords = matchKeywordsInText(hay, prefs.blockKeywords);
+          const isVerticalBoard = verticalBoardNames.has(String(r.board_name || ''));
+          return {
+            ...r,
+            board_name: String(r.board_name || ''),
+            matched_keywords: matchedKeywords,
+            is_blocked: blockedKeywords.length > 0,
+            is_vertical: isVerticalBoard,
+          };
+        });
+
+      const nonBlocked = activeRows.filter((r) => !r.is_blocked);
+      const focusOnly = req.query.focusOnly === 'true';
+      const items = focusOnly
+        ? nonBlocked.filter((r) => r.matched_keywords.length > 0 || (prefs.focusKeywords.length === 0 && r.is_vertical))
+        : nonBlocked;
+
+      const catMap = new Map<string, number>();
+      for (const it of items) {
+        const name = String(it.board_name || '综合');
+        catMap.set(name, (catMap.get(name) || 0) + 1);
+      }
+      const categories = Array.from(catMap.entries()).map(([name, count]) => ({ name, count }));
+
+      return {
+        items,
+        categories,
+        boards,
+        focusKeywords: prefs.focusKeywords,
+        blockKeywords: prefs.blockKeywords,
+        totalCount: nonBlocked.length,
+        matchedCount: nonBlocked.filter((r) => r.matched_keywords.length > 0).length,
+      };
     }
   );
+
+  app.post<{ Body: { id: string; enabled: boolean } }>('/api/radar/hot-board/boards/toggle', async (req) => {
+    const boards = toggleUserHotBoard(String(req.body?.id || ''), Boolean(req.body?.enabled));
+    return { ok: true, boards };
+  });
+
+  app.post<{ Body: { name: string; url: string; category?: string } }>('/api/radar/hot-board/boards', async (req, reply) => {
+    try {
+      const res = addCustomHotBoard({
+        name: String(req.body?.name || ''),
+        url: String(req.body?.url || ''),
+        category: req.body?.category ? String(req.body.category) : undefined,
+      });
+      await refreshHotBoards([res.board.id]).catch(() => {});
+      return { ok: true, ...res };
+    } catch (err) {
+      return reply.code(400).send({ error: (err as Error).message });
+    }
+  });
+
+  app.delete<{ Params: { id: string } }>('/api/radar/hot-board/boards/:id', async (req) => {
+    return { ok: true, boards: deleteCustomHotBoard(req.params.id) };
+  });
 
   app.post<{ Body: { platforms?: string[]; scoreWithAi?: boolean; accountId?: number } }>(
     '/api/radar/hot-board/refresh',
@@ -1282,5 +1347,116 @@ ${script.slice(0, 4500)}
 
   app.delete<{ Params: { id: string } }>('/api/comments/jobs/:id', async (req) => {
     return { ok: deleteCommentCrawlJob(req.params.id) };
+  });
+
+  // ===== 11. 国内外 AI 热点早报 + 用户自定义关注词与新闻源 =====
+  app.get('/api/radar/news-brief', async () => {
+    return getNewsBriefSnapshot();
+  });
+
+  app.post('/api/radar/news-brief/refresh', async () => {
+    const cache = await refreshNewsBrief();
+    return { ok: true, ...cache, ...getUserMonitorPrefs() };
+  });
+
+  app.post<{ Body: { forceRefresh?: boolean } }>('/api/radar/news-brief/digest', async (req, reply) => {
+    try {
+      const res = await generateDailyAiDigest(Boolean(req.body?.forceRefresh));
+      return { ok: true, ...res };
+    } catch (err) {
+      return reply.code(500).send({ error: (err as Error).message });
+    }
+  });
+
+  app.put<{ Body: { focusKeywords?: string[]; blockKeywords?: string[] } }>('/api/radar/preferences/keywords', async (req) => {
+    const saved = saveUserKeywords({
+      focusKeywords: Array.isArray(req.body?.focusKeywords) ? req.body.focusKeywords : undefined,
+      blockKeywords: Array.isArray(req.body?.blockKeywords) ? req.body.blockKeywords : undefined,
+    });
+    return { ok: true, ...saved };
+  });
+
+  app.post<{ Body: { name: string; url: string; region?: 'domestic' | 'global'; category?: string } }>(
+    '/api/radar/news-brief/sources',
+    async (req, reply) => {
+      try {
+        const newsSources = upsertUserNewsSource({
+          name: String(req.body?.name || ''),
+          url: String(req.body?.url || ''),
+          region: req.body?.region === 'global' ? 'global' : 'domestic',
+          category: req.body?.category ? String(req.body.category) : undefined,
+        });
+        return { ok: true, newsSources };
+      } catch (err) {
+        return reply.code(400).send({ error: (err as Error).message });
+      }
+    }
+  );
+
+  app.post<{ Body: { id: string; enabled: boolean } }>('/api/radar/news-brief/sources/toggle', async (req) => {
+    const newsSources = toggleUserNewsSource(String(req.body?.id || ''), Boolean(req.body?.enabled));
+    return { ok: true, newsSources };
+  });
+
+  app.delete<{ Params: { id: string } }>('/api/radar/news-brief/sources/:id', async (req) => {
+    return { ok: true, newsSources: deleteUserNewsSource(req.params.id) };
+  });
+
+  // ===== 12. 对标博主跨账号爆款排行榜 & 一站式爆款拆解二创工坊 =====
+  app.get<{
+    Querystring: {
+      platform?: string;
+      creatorId?: string;
+      sort?: 'ratio' | 'likes' | 'views' | 'recent';
+      days?: string;
+      onlyBreakout?: string;
+      limit?: string;
+    };
+  }>('/api/radar/creators/leaderboard', async (req) => {
+    const items = getCreatorLeaderboard({
+      platform: req.query.platform || undefined,
+      creatorId: req.query.creatorId ? Number(req.query.creatorId) : undefined,
+      sort: req.query.sort || 'ratio',
+      days: req.query.days ? Number(req.query.days) : undefined,
+      onlyBreakout: req.query.onlyBreakout === 'true',
+      limit: req.query.limit ? Number(req.query.limit) : 40,
+    });
+    return { items };
+  });
+
+  app.get<{ Params: { id: string } }>('/api/radar/intel/:id/remix', async (req) => {
+    return { record: getContentRemixRecord(Number(req.params.id)) };
+  });
+
+  app.post<{
+    Params: { id: string };
+    Body: {
+      mode: 'breakdown' | 'rewrite';
+      angle?: string;
+      tone?: string;
+      lengthLabel?: string;
+      extraInstruction?: string;
+      forceRefresh?: boolean;
+    };
+  }>('/api/radar/intel/:id/remix', async (req, reply) => {
+    const contentId = Number(req.params.id);
+    const mode = req.body?.mode || 'breakdown';
+    try {
+      if (mode === 'breakdown') {
+        const breakdown = await generateViralBreakdown(contentId, Boolean(req.body?.forceRefresh));
+        return { ok: true, breakdown, record: getContentRemixRecord(contentId) };
+      }
+      const draft = await generateRemixScript({
+        contentId,
+        angle: String(req.body?.angle || '').trim(),
+        tone: String(req.body?.tone || '接地气大白话').trim(),
+        lengthLabel: String(req.body?.lengthLabel || '2分钟干货').trim(),
+        extraInstruction: req.body?.extraInstruction ? String(req.body.extraInstruction).trim() : undefined,
+        forceRefresh: Boolean(req.body?.forceRefresh),
+      });
+      return { ok: true, draft, record: getContentRemixRecord(contentId) };
+    } catch (err) {
+      return reply.code(500).send({ error: (err as Error).message });
+    }
   });
 }

@@ -356,11 +356,16 @@ export function PublishPage({
     onToast(`已将「${getPlatformMeta(aiPreviewPlatform).label}」文案同步到下方视频列表`);
   };
 
-  // 接收来自「最新内容」监控流的爆款选题灵感，自动预填到统一标题与话题
+  // 接收来自「爆款二创工坊」或监控流的爆款口播稿与选题，自动预填到 AI 文案框与标题
   useEffect(() => {
     if (!inspirationDraft) return;
     const nextTitle = inspirationDraft.title.trim();
     const nextTags = (inspirationDraft.tags || []).join(', ');
+    if (inspirationDraft.script?.trim()) {
+      setAiScriptInput(inspirationDraft.script.trim());
+    } else if (nextTitle) {
+      setAiScriptInput(nextTitle);
+    }
     if (nextTitle) setGlobalTitle(nextTitle);
     if (nextTags) setGlobalTagsText(nextTags);
     setVideoDrafts((prev) =>
@@ -1395,7 +1400,7 @@ export function PublishPage({
                           </div>
                           <textarea
                             className="textarea"
-                            rows={2}
+                            rows={4}
                             value={cur.description}
                             onChange={(e) => updateAiPlatformField(aiPreviewPlatform, { description: e.target.value })}
                           />

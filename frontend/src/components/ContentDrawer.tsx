@@ -11,6 +11,7 @@ import {
   Copy,
   Check,
   Flame,
+  Wand2,
 } from 'lucide-react';
 import { apiRequest, fmtNum, fmtTime, PLATFORM_LABELS, safeJsonArray } from '../api';
 import type { MetricSnapshot, PublishInspirationDraft } from '../types';
@@ -28,6 +29,7 @@ interface ContentDrawerProps {
   onClose: () => void;
   onChanged: () => void;
   onSendToPublish: (draft: PublishInspirationDraft) => void;
+  onOpenRemix?: (contentId: number) => void;
   onToast: (msg: string) => void;
 }
 
@@ -89,6 +91,7 @@ export function ContentDrawer({
   onClose,
   onChanged,
   onSendToPublish,
+  onOpenRemix,
   onToast,
 }: ContentDrawerProps) {
   const [detail, setDetail] = useState<DetailResp | null>(null);
@@ -329,8 +332,16 @@ export function ContentDrawer({
               </div>
 
               <div style={{ display: 'flex', gap: 8, flexWrap: 'wrap', marginTop: 10 }}>
+                {onOpenRemix && (
+                  <button
+                    className="btn btn-primary btn-sm"
+                    onClick={() => onOpenRemix(content.id)}
+                  >
+                    <Wand2 size={13} /> 拆解与二创写稿
+                  </button>
+                )}
                 <button
-                  className={`btn btn-sm ${savedBoardId ? 'btn-star-active' : 'btn-primary'}`}
+                  className={`btn btn-sm ${savedBoardId ? 'btn-star-active' : 'btn-secondary'}`}
                   disabled={busy === 'save'}
                   onClick={handleToggleSave}
                 >

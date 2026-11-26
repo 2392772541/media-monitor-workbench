@@ -94,6 +94,7 @@ export interface CollectionTask {
 export interface PublishInspirationDraft {
   title: string;
   tags: string[];
+  script?: string;
   sourceName?: string;
   sourceUrl?: string;
 }
@@ -331,7 +332,133 @@ export interface HotBoardItem {
   content_id: number | null;
   ai_summary?: string | null;
   saved_board_id?: number | null;
+  matched_keywords?: string[];
+  is_vertical?: boolean;
   captured_at: string;
+}
+
+export interface BoardSourceConfig {
+  id: string;
+  name: string;
+  platform: string;
+  kind: 'bili_rank' | 'bili_popular' | 'douyin_hot' | 'github_trending' | 'rss';
+  url?: string;
+  rid?: number;
+  category: string;
+  isVertical: boolean;
+  enabled: boolean;
+  builtin?: boolean;
+}
+
+export interface NewsSourceConfig {
+  id: string;
+  name: string;
+  region: 'domestic' | 'global';
+  kind: 'rss' | 'hn_api' | 'github_trending';
+  url: string;
+  category: string;
+  enabled: boolean;
+  builtin?: boolean;
+}
+
+export interface NewsBriefItem {
+  id: string;
+  sourceId: string;
+  sourceName: string;
+  region: 'domestic' | 'global';
+  category: string;
+  title: string;
+  titleZh?: string;
+  summary: string;
+  summaryZh?: string;
+  url: string;
+  publishedAt: string | null;
+  heatLabel?: string;
+  matchedKeywords: string[];
+}
+
+export interface DailyAiDigest {
+  headline: string;
+  topStories: Array<{
+    titleZh: string;
+    region: 'domestic' | 'global';
+    sourceName: string;
+    whyItMatters: string;
+    videoAngle: string;
+    url: string;
+  }>;
+  generatedAt: string;
+}
+
+export interface NewsBriefSnapshot {
+  updatedAt: string | null;
+  items: NewsBriefItem[];
+  sourceStats: Array<{ id: string; name: string; region: 'domestic' | 'global'; count: number; error?: string }>;
+  digest: DailyAiDigest | null;
+  focusKeywords: string[];
+  blockKeywords: string[];
+  newsSources: NewsSourceConfig[];
+}
+
+export interface CreatorLeaderboardItem {
+  rank: number;
+  id: number;
+  source_id: number;
+  title: string;
+  platform: string;
+  author: string;
+  canonical_url: string;
+  cover_url?: string;
+  summary: string;
+  published_at: string | null;
+  discovered_at: string;
+  transcript_status: string;
+  transcript_chars: number;
+  breakout_score: number | null;
+  breakout_ratio: number | null;
+  breakout_reason: string;
+  source_name: string;
+  follower_count: number | null;
+  baseline_views: number | null;
+  baseline_likes: number | null;
+  brief: string;
+  latest_views: number | null;
+  latest_likes: number | null;
+  latest_comments: number | null;
+  latest_favorites: number | null;
+  comment_rows: number;
+  saved_board_id: number | null;
+  has_breakdown: boolean;
+  remix_draft_count: number;
+}
+
+export interface ViralBreakdown {
+  hookAnalysis: string;
+  structureSteps: Array<{ stage: string; summary: string; technique: string }>;
+  viralDrivers: string[];
+  remixAngles: Array<{ title: string; angle: string; targetAudience: string; whyBetter: string }>;
+  usedTranscript: boolean;
+  analyzedAt: string;
+}
+
+export interface RemixScriptDraft {
+  id: string;
+  angle: string;
+  tone: string;
+  lengthLabel: string;
+  newTitle: string;
+  hookLine: string;
+  scriptText: string;
+  shootingTips: string[];
+  tags: string[];
+  createdAt: string;
+}
+
+export interface ContentRemixRecord {
+  contentId: number;
+  breakdown: ViralBreakdown | null;
+  drafts: RemixScriptDraft[];
+  updatedAt: string;
 }
 
 export interface TrackedTopic {

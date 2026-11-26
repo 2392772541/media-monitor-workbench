@@ -1,4 +1,7 @@
+import crypto from 'node:crypto';
 import { getDb, upsertContentWithMetrics } from '../db/database.js';
+import { fetchText, parseFeedContent } from '../adapters/webUtils.js';
+import { fetchGitHubTrendingItems } from './newsBriefService.js';
 import { log } from '../utils/logger.js';
 
 export interface HotBoardItemRow {
@@ -22,6 +25,86 @@ export interface HotBoardItemRow {
   captured_at: string;
 }
 
+export interface BoardSourceConfig {
+  id: string;
+  name: string;
+  platform: string;
+  kind: 'bili_rank' | 'bili_popular' | 'douyin_hot' | 'github_trending' | 'rss';
+  url?: string;
+  rid?: number;
+  category: string;
+  isVertical: boolean; // 垂直高纯度榜（如科技/知识/开源/AI），默认开启
+  enabled: boolean;
+  builtin?: boolean;
+}
+
+export const DEFAULT_HOT_BOARDS: BoardSourceConfig[] = [
+  {
+    id: 'bili_tech',
+    name: 'B站科技数码榜',
+    platform: 'bilibili',
+    kind: 'bili_rank',
+    rid: 188,
+    category: '科技数码',
+    isVertical: true,
+    enabled: true,
+    builtin: true,
+  },
+  {
+    id: 'bili_knowledge',
+    name: 'B站知识区热榜',
+    platform: 'bilibili',
+    kind: 'bili_rank',
+    rid: 36,
+    category: '知识干货',
+    isVertical: true,
+    enabled: true,
+    builtin: true,
+  },
+  {
+    id: 'github_trending',
+    name: 'GitHub 开源热榜',
+    platform: 'github',
+    kind: 'github_trending',
+    url: 'https://github.com/trending?since=daily',
+    category: '开源工具',
+    isVertical: true,
+    enabled: true,
+    builtin: true,
+  },
+  {
+    id: 'producthunt',
+    name: 'Product Hunt 新工具',
+    platform: 'producthunt',
+    kind: 'rss',
+    url: 'https://www.producthunt.com/feed',
+    category: '新产品榜',
+    isVertical: true,
+    enabled: true,
+    builtin: true,
+  },
+  {
+    id: 'douyin',
+    name: '抖音实时热榜',
+    platform: 'douyin',
+    kind: 'douyin_hot',
+    category: '抖音热榜',
+    isVertical: false,
+    enabled: true,
+    builtin: true,
+  },
+  {
+    id: 'bilibili',
+    name: 'B站全站热门',
+    platform: 'bilibili',
+    kind: 'bili_popular',
+    category: '综合热门',
+    isVertical: false,
+    enabled: false,
+    builtin: true,
+  },
+];
+
 const DEFAULT_HEADERS = {
   'User-Agent':
     'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/134.0.0.0 Safari/537.36',
@@ -44,7 +127,133 @@ interface RawHotItem {
   contentType: string;
 }
 
-// 1. 拉取 B 站全站真实热门视频榜（免登录、字段完整）
+export function getUserHotBoards(): BoardSourceConfig[] {
+  const db = getDb();
+  const row = db.prepare("SELECT value FROM app_settings WHERE key = 'user_hot_boards'").get() as { value: string } | undefined;
+  if (!row?.value) return DEFAULT_HOT_BOARDS.map((b) => ({ ...b }));
+  try {
+    const parsed = JSON.parse(row.value) as BoardSourceConfig[];
+    if (!Array.isArray(parsed) || parsed.length === 0) return DEFAULT_HOT_BOARDS.map((b) => ({ ...b }));
+    const byId = new Map(parsed.map((x) => [x.id, x]));
+    for (const def of DEFAULT_HOT_BOARDS) {
+      if (!byId.has(def.id)) parsed.push({ ...def });
+    }
+    return parsed;
+  } catch {
+    return DEFAULT_HOT_BOARDS.map((b) => ({ ...b }));
+  }
+}
+
+function saveUserHotBoards(list: BoardSourceConfig[]): void {
+  const db = getDb();
+  db.prepare(`
+    INSERT INTO app_settings (key, value, updated_at)
+    VALUES ('user_hot_boards', ?, ?)
+    ON CONFLICT(key) DO UPDATE SET value = excluded.value, updated_at = excluded.updated_at
+  `).run(JSON.stringify(list), new Date().toISOString());
+}
+
+export function toggleUserHotBoard(id: string, enabled: boolean): BoardSourceConfig[] {
+  const list = getUserHotBoards().map((b) => (b.id === id ? { ...b, enabled } : b));
+  saveUserHotBoards(list);
+  return list;
+}
+
+export function addCustomHotBoard(input: { name: string; url: string; category?: string }): {
+  board: BoardSourceConfig;
+  boards: BoardSourceConfig[];
+} {
+  const cleanUrl = input.url.trim();
+  if (!/^https?:\/\//i.test(cleanUrl)) {
+    throw new Error('请填写以 http:// 或 https:// 开头的有效榜单 / RSS 网址');
+  }
+  const cleanName = input.name.trim() || new URL(cleanUrl).hostname;
+  const id = `board_${crypto.createHash('md5').update(cleanUrl).digest('hex').slice(0, 8)}`;
+  const board: BoardSourceConfig = {
+    id,
+    name: cleanName,
+    platform: 'custom',
+    kind: 'rss',
+    url: cleanUrl,
+    category: (input.category || '自定义榜单').trim(),
+    isVertical: true,
+    enabled: true,
+    builtin: false,
+  };
+  const list = getUserHotBoards();
+  const idx = list.findIndex((b) => b.id === id);
+  if (idx >= 0) list[idx] = board;
+  else list.unshift(board);
+  saveUserHotBoards(list);
+  return { board, boards: list };
+}
+
+export function deleteCustomHotBoard(id: string): BoardSourceConfig[] {
+  const list = getUserHotBoards();
+  const target = list.find((b) => b.id === id);
+  const next = list.filter((b) => b.id !== id || b.builtin);
+  saveUserHotBoards(next);
+  if (target && !target.builtin) {
+    getDb().prepare('DELETE FROM hot_board_items WHERE board_name = ?').run(target.name);
+  }
+  return next;
+}
+
+// B 站精准分区排行榜（科技数码 rid=188 / 知识区 rid=36，免登录 100ms 直出高清封面与播放量）
+async function fetchBilibiliRanking(rid: number, boardName: string): Promise<{ items: RawHotItem[]; error?: string }> {
+  try {
+    const res = await fetch(`https://api.bilibili.com/x/web-interface/ranking/v2?rid=${rid}&type=all`, {
+      headers: { ...DEFAULT_HEADERS, Referer: 'https://www.bilibili.com/' },
+      signal: AbortSignal.timeout(15000),
+    });
+    if (!res.ok) return { items: [], error: `${boardName} HTTP ${res.status}` };
+    const json = (await res.json()) as {
+      code?: number;
+      data?: {
+        list?: Array<{
+          bvid?: string;
+          title?: string;
+          desc?: string;
+          pic?: string;
+          tname?: string;
+          owner?: { name?: string };
+          stat?: { view?: number; like?: number; reply?: number };
+        }>;
+      };
+    };
+    const list = json.data?.list || [];
+    const items: RawHotItem[] = list
+      .filter((x) => x.bvid && x.title)
+      .slice(0, 24)
+      .map((x, idx) => {
+        const view = typeof x.stat?.view === 'number' ? x.stat.view : null;
+        const like = typeof x.stat?.like === 'number' ? x.stat.like : null;
+        return {
+          platform: 'bilibili',
+          boardName,
+          rankNo: idx + 1,
+          itemId: x.bvid!,
+          title: (x.title || '').trim(),
+          url: `https://www.bilibili.com/video/${x.bvid}`,
+          hotValue: view,
+          hotLabel:
+            view != null
+              ? `${(view / 10000).toFixed(1)}万播放${like != null ? ` · ${(like / 10000).toFixed(1)}万赞` : ''}`
+              : '分区热榜',
+          author: x.owner?.name || '',
+          coverUrl: x.pic ? (x.pic.startsWith('//') ? `https:${x.pic}` : x.pic) : '',
+          summary: (x.desc || '').trim().slice(0, 320),
+          category: x.tname || boardName,
+          contentType: 'video',
+        };
+      });
+    return { items };
+  } catch (err) {
+    return { items: [], error: `${boardName} 抓取失败: ${(err as Error).message}` };
+  }
+}
+
+// B 站全站热门视频榜
 async function fetchBilibiliPopular(): Promise<{ items: RawHotItem[]; error?: string }> {
   try {
     const res = await fetch('https://api.bilibili.com/x/web-interface/popular?ps=30&pn=1', {
@@ -82,7 +291,10 @@ async function fetchBilibiliPopular(): Promise<{ items: RawHotItem[]; error?: st
           title: (x.title || '').trim(),
           url: `https://www.bilibili.com/video/${x.bvid}`,
           hotValue: view,
-          hotLabel: view != null ? `${(view / 10000).toFixed(1)}万播放${like != null ? ` · ${(like / 10000).toFixed(1)}万赞` : ''}` : '热门视频',
+          hotLabel:
+            view != null
+              ? `${(view / 10000).toFixed(1)}万播放${like != null ? ` · ${(like / 10000).toFixed(1)}万赞` : ''}`
+              : '热门视频',
           author: x.owner?.name || '',
           coverUrl: x.pic ? (x.pic.startsWith('//') ? `https:${x.pic}` : x.pic) : '',
           summary: `${reasonTag}${(x.desc || '').trim()}`.slice(0, 320),
@@ -96,7 +308,7 @@ async function fetchBilibiliPopular(): Promise<{ items: RawHotItem[]; error?: st
   }
 }
 
-// 2. 拉取抖音实时热榜（免登录公开热词榜接口，严格使用真实接口数据）
+// 抖音实时热榜
 async function fetchDouyinHotBoard(): Promise<{ items: RawHotItem[]; error?: string }> {
   const endpoints = [
     'https://www.iesdouyin.com/web/api/v2/hotsearch/billboard/word/',
@@ -120,7 +332,6 @@ async function fetchDouyinHotBoard(): Promise<{ items: RawHotItem[]; error?: str
           position?: number;
           sentence_id?: string;
           word_cover?: { url_list?: string[] };
-          label?: number;
         }>;
         data?: {
           word_list?: Array<{
@@ -167,74 +378,99 @@ async function fetchDouyinHotBoard(): Promise<{ items: RawHotItem[]; error?: str
   return { items: [], error: `抖音热榜暂不可达 (${lastErr})` };
 }
 
-// 3. 汇总本工作台已采集的 YouTube / 行业网站高价值动态作为“垂直资讯热榜”
-function collectLocalIndustryHot(): RawHotItem[] {
-  const db = getDb();
-  const rows = db
-    .prepare(`
-      SELECT c.id, c.platform, c.title, c.canonical_url, c.author, c.cover_url, c.summary, c.content_type,
-             c.breakout_score, c.breakout_ratio,
-             s.name AS source_name,
-             (SELECT views FROM content_metrics m WHERE m.content_id = c.id ORDER BY captured_at DESC LIMIT 1) AS latest_views,
-             (SELECT likes FROM content_metrics m WHERE m.content_id = c.id ORDER BY captured_at DESC LIMIT 1) AS latest_likes
-      FROM contents c
-      JOIN sources s ON s.id = c.source_id
-      WHERE c.discovered_at >= datetime('now', '-7 days')
-      ORDER BY COALESCE(c.breakout_score, 0) DESC, COALESCE(latest_likes, 0) DESC, c.discovered_at DESC
-      LIMIT 25
-    `)
-    .all() as Array<Record<string, unknown>>;
-
-  return rows.map((r, idx) => {
-    const views = typeof r.latest_views === 'number' ? r.latest_views : null;
-    const likes = typeof r.latest_likes === 'number' ? r.latest_likes : null;
-    const ratio = typeof r.breakout_ratio === 'number' ? r.breakout_ratio : null;
-    const labelParts: string[] = [];
-    if (ratio !== null) labelParts.push(`异常 ${ratio}x`);
-    if (views !== null) labelParts.push(`${views >= 10000 ? (views / 10000).toFixed(1) + '万' : views}播放`);
-    if (likes !== null) labelParts.push(`${likes >= 10000 ? (likes / 10000).toFixed(1) + '万' : likes}赞`);
-    return {
-      platform: String(r.platform),
-      boardName: '站内监控高热',
+// 通用 RSS / 新产品榜 / 自定义榜单源抓取
+async function fetchRssBoard(board: BoardSourceConfig): Promise<{ items: RawHotItem[]; error?: string }> {
+  if (!board.url) return { items: [], error: '缺少榜单地址' };
+  try {
+    const res = await fetchText(board.url, 12000);
+    if (!res.ok) return { items: [], error: res.error || '无法连接' };
+    const parsed = parseFeedContent(res.text, res.finalUrl);
+    const items: RawHotItem[] = parsed.items.slice(0, 20).map((it, idx) => ({
+      platform: board.platform,
+      boardName: board.name,
       rankNo: idx + 1,
-      itemId: `local-${r.id}`,
-      title: String(r.title || ''),
-      url: String(r.canonical_url || ''),
-      hotValue: typeof r.breakout_score === 'number' ? r.breakout_score : likes ?? views ?? null,
-      hotLabel: labelParts.join(' · ') || '站内精选',
-      author: String(r.author || r.source_name || ''),
-      coverUrl: String(r.cover_url || ''),
-      summary: String(r.summary || '').slice(0, 260),
-      category: String(r.source_name || '行业动态'),
-      contentType: String(r.content_type || 'article'),
-    };
-  });
+      itemId: crypto.createHash('md5').update(it.url || it.title).digest('hex').slice(0, 12),
+      title: (it.title || '').trim(),
+      url: it.url,
+      hotValue: 100 - idx,
+      hotLabel: `#${idx + 1} · ${board.category}`,
+      author: it.author || board.name,
+      coverUrl: it.coverUrl || '',
+      summary: (it.summary || '').replace(/<[^>]+>/g, ' ').replace(/\s+/g, ' ').trim().slice(0, 260),
+      category: board.category,
+      contentType: 'article',
+    }));
+    return { items };
+  } catch (err) {
+    return { items: [], error: (err as Error).message };
+  }
 }
 
-export async function refreshHotBoards(platforms?: string[]): Promise<{
+async function fetchBoardByConfig(board: BoardSourceConfig): Promise<{ items: RawHotItem[]; error?: string }> {
+  if (board.kind === 'bili_rank' && board.rid) {
+    return fetchBilibiliRanking(board.rid, board.name);
+  }
+  if (board.kind === 'bili_popular') {
+    return fetchBilibiliPopular();
+  }
+  if (board.kind === 'douyin_hot') {
+    return fetchDouyinHotBoard();
+  }
+  if (board.kind === 'github_trending') {
+    try {
+      const repos = await fetchGitHubTrendingItems(18);
+      return {
+        items: repos.map((r, idx) => ({
+          platform: 'github',
+          boardName: board.name,
+          rankNo: idx + 1,
+          itemId: r.title,
+          title: r.title,
+          url: r.url,
+          hotValue: 100 - idx,
+          hotLabel: r.heatLabel,
+          author: r.language || 'GitHub',
+          coverUrl: '',
+          summary: r.summary,
+          category: r.language || '开源工具',
+          contentType: 'article',
+        })),
+      };
+    } catch (err) {
+      return { items: [], error: (err as Error).message };
+    }
+  }
+  return fetchRssBoard(board);
+}
+
+export async function refreshHotBoards(boardIdsOrPlatforms?: string[]): Promise<{
   ok: boolean;
   totalSaved: number;
   results: Array<{ board: string; count: number; error?: string }>;
 }> {
-  const targets = new Set(platforms && platforms.length > 0 ? platforms : ['bilibili', 'douyin', 'industry']);
+  const allBoards = getUserHotBoards();
+  let targets: BoardSourceConfig[];
+  if (boardIdsOrPlatforms && boardIdsOrPlatforms.length > 0) {
+    const wanted = new Set(boardIdsOrPlatforms);
+    targets = allBoards.filter((b) => wanted.has(b.id) || (b.enabled && wanted.has(b.platform)));
+    if (targets.length === 0) targets = allBoards.filter((b) => b.enabled);
+  } else {
+    targets = allBoards.filter((b) => b.enabled);
+  }
+
   const results: Array<{ board: string; count: number; error?: string }> = [];
   const collected: RawHotItem[] = [];
 
-  if (targets.has('bilibili')) {
-    const b = await fetchBilibiliPopular();
-    collected.push(...b.items);
-    results.push({ board: 'B站全站热门', count: b.items.length, error: b.error });
-  }
-  if (targets.has('douyin')) {
-    const d = await fetchDouyinHotBoard();
-    collected.push(...d.items);
-    results.push({ board: '抖音实时热榜', count: d.items.length, error: d.error });
-  }
-  if (targets.has('industry')) {
-    const ind = collectLocalIndustryHot();
-    collected.push(...ind);
-    results.push({ board: '站内监控高热', count: ind.length });
-  }
+  const settled = await Promise.allSettled(targets.map((b) => fetchBoardByConfig(b)));
+  settled.forEach((r, idx) => {
+    const b = targets[idx];
+    if (r.status === 'fulfilled') {
+      collected.push(...r.value.items);
+      results.push({ board: b.name, count: r.value.items.length, error: r.value.error });
+    } else {
+      results.push({ board: b.name, count: 0, error: String(r.reason) });
+    }
+  });
 
   const db = getDb();
   const now = new Date().toISOString();
@@ -276,18 +512,18 @@ export async function refreshHotBoards(platforms?: string[]): Promise<{
     );
   }
 
-  // 按本次成功拉取的榜单，清理掉旧快照中已落榜的条目，避免出现重复 #1 #2
+  // 按本次成功拉取的榜单清理旧快照中落榜条目，彻底避免重复排名
   const refreshedBoards = new Set(collected.map((it) => `${it.platform}:::${it.boardName}`));
   for (const key of refreshedBoards) {
     const [plat, board] = key.split(':::');
     db.prepare('DELETE FROM hot_board_items WHERE platform = ? AND board_name = ? AND captured_at < ?').run(plat, board, now);
   }
 
-  log('INFO', 'hot-board', `Refreshed hot boards: total=${collected.length}`);
+  log('INFO', 'hot-board', `Refreshed ${targets.length} hot boards: total=${collected.length}`);
   return { ok: collected.length > 0, totalSaved: collected.length, results };
 }
 
-// 将某条热榜一键导入「内容情报库」（便于后续 AI 分析、听悟转写或抓评论）
+// 将某条热榜一键导入内容库（便于后续 AI 拆解、显卡转写或抓评论）
 export function importHotItemToIntel(hotItemId: number): { contentId: number; isNew: boolean } {
   const db = getDb();
   const row = db.prepare('SELECT * FROM hot_board_items WHERE id = ?').get(hotItemId) as HotBoardItemRow | undefined;
@@ -297,7 +533,6 @@ export function importHotItemToIntel(hotItemId: number): { contentId: number; is
     return { contentId: row.content_id, isNew: false };
   }
 
-  // 确保存在对应的内置热榜虚拟来源
   const sourceName = `热榜导入 · ${row.board_name}`;
   let source = db.prepare('SELECT id FROM sources WHERE name = ? LIMIT 1').get(sourceName) as { id: number } | undefined;
   if (!source) {
@@ -305,7 +540,7 @@ export function importHotItemToIntel(hotItemId: number): { contentId: number; is
     const res = db
       .prepare(`
         INSERT INTO sources (name, platform, url, source_type, priority, interval_minutes, status, capability_status, notes, created_at, updated_at)
-        VALUES (?, ?, ?, 'hot_board', 2, 180, 'paused', '已接入并验证', '行业热榜一键导入来源', ?, ?)
+        VALUES (?, ?, ?, 'hot_board', 2, 180, 'paused', '已接入并验证', '专属热榜一键导入来源', ?, ?)
       `)
       .run(sourceName, row.platform, row.url, now, now);
     source = { id: Number(res.lastInsertRowid) };

@@ -12,6 +12,7 @@ import {
 } from 'lucide-react';
 import { apiRequest } from './api';
 import { ContentDrawer, type DrawerTab, type DrawerTarget } from './components/ContentDrawer';
+import { RemixStudioModal } from './components/RemixStudioModal';
 import { CockpitPage } from './pages/CockpitPage';
 import { CreatorsPage } from './pages/CreatorsPage';
 import { HotBoardPage } from './pages/HotBoardPage';
@@ -25,10 +26,10 @@ import type { HotBoardItem, PublishInspirationDraft } from './types';
 
 // 核心工作流导航：今日速览 / 对标博主 / 平台热榜 / 简易收藏本 / 评论采集
 const CORE_NAV_ITEMS = [
-  { id: 'overview', label: '今日速览', sub: '一眼看清对标爆款与平台热榜', icon: Zap },
-  { id: 'creators', label: '对标博主', sub: '贴主页链接盯盘，走势图红柱直标爆款', icon: Users },
-  { id: 'hotboard', label: '平台热榜', sub: '分平台分类目看热榜，点开直出看点与口播', icon: Flame },
-  { id: 'saved', label: '简易收藏本', sub: '随手标星存着拍，随时翻口播稿和热评', icon: Star },
+  { id: 'overview', label: '今日速览', sub: '国内外 AI 科技早报 + 每日值得拍的爆款速递', icon: Zap },
+  { id: 'creators', label: '对标博主', sub: '跨账号爆款总排行 + 扒口播 / 拆结构 / 一键二创写稿', icon: Users },
+  { id: 'hotboard', label: '平台热榜', sub: '按关注词降噪过滤，自由勾加想看的精准榜单', icon: Flame },
+  { id: 'saved', label: '简易收藏本', sub: '随手标星存着拍，随时翻口播稿、二创稿和热评', icon: Star },
   { id: 'comments', label: '评论采集', sub: '贴链接 / 搜关键词 / 抓博主热评，AI 一键提炼痛点', icon: MessageSquareText },
 ] as const;
 
@@ -73,8 +74,9 @@ export function App() {
   const [healthOk, setHealthOk] = useState<boolean>(true);
   const [savedCount, setSavedCount] = useState<number>(0);
 
-  // 全站共用右侧深读抽屉（看点 / 口播稿 / 真实热评）
+  // 全站共用右侧深读抽屉（看点 / 口播稿 / 真实热评）与爆款拆解二创工坊
   const [drawerTarget, setDrawerTarget] = useState<DrawerTarget | null>(null);
+  const [remixContentId, setRemixContentId] = useState<number | null>(null);
   const [refreshTick, setRefreshTick] = useState<number>(0);
 
   const showToast = (msg: string) => {
@@ -123,7 +125,7 @@ export function App() {
   const handleSendToPublish = (draft: PublishInspirationDraft) => {
     setPublishDraft(draft);
     handleNavigate('publish', true);
-    showToast('已将标题与来源带入「视频发布」');
+    showToast(draft.script ? '已把二创口播稿带入「视频发布」，点 AI 按钮即可配齐四平台标题标签' : '已将标题与来源带入「视频发布」');
   };
 
   // 打开博主作品或已入库条目的右侧抽屉
@@ -259,7 +261,8 @@ export function App() {
               refreshTick={refreshTick}
               onNavigate={handleNavigate}
               onOpenContent={handleOpenContent}
-              onOpenHotItem={handleOpenHotItem}
+              onOpenRemix={(cid) => setRemixContentId(cid)}
+              onSendToPublish={handleSendToPublish}
               onRefreshBadge={handleGlobalChanged}
               onToast={showToast}
             />
@@ -269,6 +272,7 @@ export function App() {
               refreshTick={refreshTick}
               onNavigate={handleNavigate}
               onOpenContent={handleOpenContent}
+              onOpenRemix={(cid) => setRemixContentId(cid)}
               onRefreshBadge={handleGlobalChanged}
               onToast={showToast}
             />
@@ -311,6 +315,18 @@ export function App() {
       <ContentDrawer
         target={drawerTarget}
         onClose={() => setDrawerTarget(null)}
+        onChanged={handleGlobalChanged}
+        onSendToPublish={handleSendToPublish}
+        onOpenRemix={(cid) => {
+          setDrawerTarget(null);
+          setRemixContentId(cid);
+        }}
+        onToast={showToast}
+      />
+
+      <RemixStudioModal
+        contentId={remixContentId}
+        onClose={() => setRemixContentId(null)}
         onChanged={handleGlobalChanged}
         onSendToPublish={handleSendToPublish}
         onToast={showToast}
