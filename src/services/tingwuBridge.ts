@@ -1,13 +1,16 @@
 import fs from 'node:fs';
-import os from 'node:os';
 import path from 'node:path';
 import { execFileSync, spawn } from 'node:child_process';
-import { PATHS } from '../config.js';
+import { PATHS, PROJECT_ROOT } from '../config.js';
 import { getDb } from '../db/database.js';
 import { log } from '../utils/logger.js';
 
 export interface TingwuStatus {
   installed: boolean;
+  engine: 'faster-whisper';
+  pythonExe: string;
+  model: string;
+  gpuReady: boolean;
   dir: string;
   scriptPath: string;
   profileExists: boolean;
@@ -21,30 +24,16 @@ export interface TingwuStatus {
 const MOBILE_IOS_UA =
   'Mozilla/5.0 (iPhone; CPU iPhone OS 17_5 like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/17.5 Mobile/15E148 Safari/604.1';
 
-let tingwuRunning = false;
+let asrRunning = false;
 let currentJobLabel: string | null = null;
-let tingwuLogs: string[] = [];
+let asrLogs: string[] = [];
+let cachedPythonProbe: { pythonExe: string; ready: boolean; gpuReady: boolean; checkedAt: number } | null = null;
 
 function addLog(msg: string) {
   const line = `[${new Date().toLocaleTimeString('zh-CN')}] ${msg}`;
-  tingwuLogs.push(line);
-  if (tingwuLogs.length > 60) tingwuLogs = tingwuLogs.slice(-60);
-  log('INFO', 'tingwu', msg);
-}
-
-// 优先使用工作台仓库内置的最新适配版 tingwu.mjs（确保新版通义听悟 .srt/原文提取始终生效）
-export function getConfiguredTingwuDir(): string {
-  const bundled = PATHS.defaultTingwuDir;
-  if (fs.existsSync(path.join(bundled, 'src', 'tingwu.mjs'))) {
-    return bundled;
-  }
-  const db = getDb();
-  const row = db.prepare("SELECT value FROM app_settings WHERE key = 'tingwu_dir'").get() as { value: string } | undefined;
-  const configured = (row?.value || '').trim();
-  if (configured && fs.existsSync(path.join(configured, 'src', 'tingwu.mjs'))) {
-    return configured;
-  }
-  return bundled;
+  asrLogs.push(line);
+  if (asrLogs.length > 60) asrLogs = asrLogs.slice(-60);
+  log('INFO', 'local-asr', msg);
 }
 
 function hasExecutable(name: string): boolean {
@@ -56,38 +45,72 @@ function hasExecutable(name: string): boolean {
   }
 }
 
+// 自动探测已安装 faster-whisper 的本机 Python 解释器（优先环境变量 -> Miniconda -> PATH）
+export function resolveAsrPython(): { pythonExe: string; ready: boolean; gpuReady: boolean } {
+  if (cachedPythonProbe && Date.now() - cachedPythonProbe.checkedAt < 60000) {
+    return cachedPythonProbe;
+  }
+  const candidates = [
+    process.env.MMW_PYTHON_PATH,
+    'E:\\app\\Miniconda\\python.exe',
+    'C:\\Users\\win10\\miniconda3\\python.exe',
+    'python',
+  ].filter(Boolean) as string[];
+
+  for (const exe of candidates) {
+    if (exe.includes('\\') && !fs.existsSync(exe)) continue;
+    try {
+      const out = execFileSync(
+        exe,
+        ['-c', 'import faster_whisper, ctranslate2; print("OK:" + str(ctranslate2.get_cuda_device_count()))'],
+        { encoding: 'utf8', timeout: 8000, stdio: ['ignore', 'pipe', 'ignore'] }
+      ).trim();
+      if (out.startsWith('OK:')) {
+        const gpuCount = Number(out.slice(3)) || 0;
+        cachedPythonProbe = { pythonExe: exe, ready: true, gpuReady: gpuCount > 0, checkedAt: Date.now() };
+        return cachedPythonProbe;
+      }
+    } catch {
+      // 尝试下一个 Python
+    }
+  }
+  cachedPythonProbe = { pythonExe: '', ready: false, gpuReady: false, checkedAt: Date.now() };
+  return cachedPythonProbe;
+}
+
+export function getAsrScriptPath(): string {
+  return path.join(PROJECT_ROOT, 'scripts', 'local_asr.py');
+}
+
 export function getTingwuStatus(): TingwuStatus {
-  const dir = getConfiguredTingwuDir();
-  const scriptPath = path.join(dir, 'src', 'tingwu.mjs');
-  const installed = fs.existsSync(scriptPath);
-  const profileDir = path.join(process.env.LOCALAPPDATA || os.homedir(), 'TingwuWebBatch', 'browser-profile');
+  const scriptPath = getAsrScriptPath();
+  const py = resolveAsrPython();
+  const model = process.env.MMW_WHISPER_MODEL || 'medium';
+  const installed = fs.existsSync(scriptPath) && py.ready;
   return {
     installed,
-    dir,
+    engine: 'faster-whisper',
+    pythonExe: py.pythonExe,
+    model,
+    gpuReady: py.gpuReady,
+    dir: path.dirname(scriptPath),
     scriptPath,
-    profileExists: fs.existsSync(profileDir),
+    // 免登录本地引擎，不再欺骗性依赖浏览器目录
+    profileExists: installed,
     ytDlpAvailable: hasExecutable('yt-dlp'),
     ffmpegAvailable: hasExecutable('ffmpeg'),
-    running: tingwuRunning,
+    running: asrRunning,
     currentJob: currentJobLabel,
-    lastLogs: tingwuLogs.slice(-20),
+    lastLogs: asrLogs.slice(-20),
   };
 }
 
-// 弹出通义听悟扫码登录窗口（只需登一次，登录态持久存在本机独立配置）
+// 兼容旧路由：已切换本机显卡免登录转写，无需扫码登录
 export function launchTingwuLogin(): { started: boolean; message: string } {
-  const st = getTingwuStatus();
-  if (!st.installed) {
-    return { started: false, message: `未找到通义听悟转写工具：${st.scriptPath}` };
-  }
-  const child = spawn(process.execPath, [st.scriptPath, 'login'], {
-    cwd: st.dir,
-    detached: true,
-    stdio: 'ignore',
-  });
-  child.unref();
-  addLog('已弹出通义听悟扫码登录窗口，扫码完成后窗口将自动关闭');
-  return { started: true, message: '已弹出通义听悟登录窗口，扫码登录后窗口会自动关闭，然后点「通义听悟转口播稿」即可' };
+  return {
+    started: true,
+    message: '已切换为本机 RTX 显卡开源语音转写（faster-whisper），完全免登录、永不掉线，直接点视频转写即可！',
+  };
 }
 
 function runCommandAsync(
@@ -96,40 +119,42 @@ function runCommandAsync(
   cwd: string,
   timeoutMs: number,
   onOutput?: (line: string) => void
-): Promise<{ code: number; output: string }> {
+): Promise<{ code: number; stdout: string; stderr: string }> {
   return new Promise((resolve, reject) => {
     const child = spawn(exe, args, {
       cwd,
-      env: { ...process.env, PYTHONIOENCODING: 'utf-8' },
+      env: { ...process.env, PYTHONIOENCODING: 'utf-8', PYTHONUTF8: '1' },
       windowsHide: true,
     });
-    let output = '';
+    let stdout = '';
+    let stderr = '';
     const timer = setTimeout(() => {
       child.kill();
       reject(new Error(`命令执行超时（${Math.round(timeoutMs / 1000)} 秒）`));
     }, timeoutMs);
 
-    const handle = (chunk: Buffer) => {
+    child.stdout.on('data', (chunk: Buffer) => {
       const s = chunk.toString('utf8');
-      output += s;
-      for (const l of s.split(/\r?\n/).filter(Boolean)) {
-        onOutput?.(l);
-      }
-    };
-    child.stdout.on('data', handle);
-    child.stderr.on('data', handle);
+      stdout += s;
+      for (const l of s.split(/\r?\n/).filter(Boolean)) onOutput?.(l);
+    });
+    child.stderr.on('data', (chunk: Buffer) => {
+      const s = chunk.toString('utf8');
+      stderr += s;
+      for (const l of s.split(/\r?\n/).filter(Boolean)) onOutput?.(l);
+    });
     child.on('error', (err) => {
       clearTimeout(timer);
       reject(err);
     });
     child.on('close', (code) => {
       clearTimeout(timer);
-      resolve({ code: code ?? 1, output });
+      resolve({ code: code ?? 1, stdout, stderr });
     });
   });
 }
 
-// 抖音免 Cookie 音频提取：走 iesdouyin 移动端分享页 _ROUTER_DATA 取无水印流并用 ffmpeg 压缩为 16kHz 单声道 MP3
+// 抖音免 Cookie 音频提取：走 iesdouyin 移动端分享页 _ROUTER_DATA 取直链并用 ffmpeg 压缩为 16kHz 单声道 MP3
 async function extractDouyinAudioToMp3(videoUrl: string, outMp3Path: string): Promise<boolean> {
   const idMatch = videoUrl.match(/(\d{15,22})/);
   if (!idMatch) return false;
@@ -183,17 +208,18 @@ async function extractDouyinAudioToMp3(videoUrl: string, outMp3Path: string): Pr
         break;
       }
     } catch {
-      // 继续下一跳预热
+      // 预热重试
     }
   }
 
   if (!item) return false;
 
   const rawUrls: string[] = [];
+  // 仅用于抽取纯音频，优先直接走原始高速 CDN 链接，避免替换 /play/ 导致个别节点卡死超时
   for (const u of item.video?.play_addr?.url_list || []) {
     if (!u) continue;
-    if (u.includes('/playwm/')) rawUrls.push(u.replace('/playwm/', '/play/'));
     rawUrls.push(u);
+    if (u.includes('/playwm/')) rawUrls.push(u.replace('/playwm/', '/play/'));
   }
   if (rawUrls.length === 0) {
     for (const u of item.music?.play_url?.url_list || []) {
@@ -204,20 +230,29 @@ async function extractDouyinAudioToMp3(videoUrl: string, outMp3Path: string): Pr
   const tmpRaw = `${outMp3Path}.raw.mp4`;
   let downloaded = false;
   for (const mediaUrl of rawUrls) {
+    const ac = new AbortController();
+    const connectTimer = setTimeout(() => ac.abort(), 15000);
+    let bodyTimer: ReturnType<typeof setTimeout> | null = null;
     try {
       const mr = await fetch(mediaUrl, {
         headers: { 'User-Agent': MOBILE_IOS_UA, Referer: 'https://www.iesdouyin.com/' },
         redirect: 'follow',
-        signal: AbortSignal.timeout(60000),
+        signal: ac.signal,
       });
+      clearTimeout(connectTimer);
       const ct = (mr.headers.get('content-type') || '').toLowerCase();
       if (!mr.ok || ct.includes('text/html')) continue;
+      // 响应头正常后放宽正文下载至 180 秒，确保 10~30 分钟长视频绝不被中途掐断
+      bodyTimer = setTimeout(() => ac.abort(), 180000);
       const buf = Buffer.from(await mr.arrayBuffer());
+      clearTimeout(bodyTimer);
       if (buf.length < 8192) continue;
       fs.writeFileSync(tmpRaw, buf);
       downloaded = true;
       break;
     } catch {
+      clearTimeout(connectTimer);
+      if (bodyTimer) clearTimeout(bodyTimer);
       continue;
     }
   }
@@ -238,7 +273,8 @@ async function extractDouyinAudioToMp3(videoUrl: string, outMp3Path: string): Pr
 }
 
 /**
- * 单端口一键「免 Cookie 抖音/全平台抽纯音频 → 通义听悟网页额度转写 → 去时间轴口播逐字稿自动回库」。
+ * 单端口一键「免 Cookie 抽纯音频 → 本机 RTX 4070 显卡 faster-whisper 转写 → 干净口播全文自动回库」。
+ * 彻底免登录、不掉线、不耗网页免费额度、通常 10～25 秒出稿。
  */
 export function startTingwuTranscription(contentId: number): {
   started: boolean;
@@ -246,9 +282,14 @@ export function startTingwuTranscription(contentId: number): {
   message: string;
 } {
   const st = getTingwuStatus();
-  if (!st.installed) return { started: false, message: `未找到通义听悟脚本：${st.scriptPath}` };
+  if (!st.installed) {
+    return {
+      started: false,
+      message: '未检测到本机 faster-whisper 环境（请确认已安装 faster-whisper 或配置 MMW_PYTHON_PATH）',
+    };
+  }
   if (!st.ffmpegAvailable) return { started: false, message: '本机未检测到 ffmpeg，无法抽取纯音频' };
-  if (tingwuRunning) return { started: false, message: `通义听悟正在处理其他任务：${currentJobLabel}` };
+  if (asrRunning) return { started: false, message: `本机显卡正在转写另一条视频：${currentJobLabel}` };
 
   const db = getDb();
   const content = db
@@ -258,7 +299,7 @@ export function startTingwuTranscription(contentId: number): {
   if (content.platform === 'douyin' && !/\/video\/\d+/.test(content.canonical_url)) {
     return {
       started: false,
-      message: '当前条目是抖音热搜词条（非单个视频链接），请打开具体抖音视频作品再转口播稿',
+      message: '当前条目是抖音热搜词条（非单个视频链接），请点开具体抖音视频作品再转口播稿',
     };
   }
 
@@ -277,10 +318,9 @@ export function startTingwuTranscription(contentId: number): {
 
   db.prepare("UPDATE contents SET transcript_status = 'transcribing' WHERE id = ?").run(contentId);
 
-  // 后台异步跑完整链路（抽轻量化 MP3 -> 通义听悟转写 -> 自动去水印回写 contents.transcript）
   void (async () => {
-    tingwuRunning = true;
-    currentJobLabel = `听悟转录：${content.title.slice(0, 24)}`;
+    asrRunning = true;
+    currentJobLabel = `本地显卡转写：${content.title.slice(0, 24)}`;
     try {
       const uniqueStem = `content-${contentId}_${Date.now().toString(36)}`;
       const audioBase = path.join(PATHS.audioDir, uniqueStem);
@@ -288,18 +328,16 @@ export function startTingwuTranscription(contentId: number): {
       let finalAudioPath = '';
 
       if (content.platform === 'douyin') {
-        addLog(`步骤 1/2：正在免 Cookie 提取抖音纯音频 -> ${path.basename(audioMp3)}`);
+        addLog(`步骤 1/2：免 Cookie 提取抖音纯音频 -> ${path.basename(audioMp3)}`);
         const ok = await extractDouyinAudioToMp3(content.canonical_url, audioMp3);
-        if (ok) {
-          finalAudioPath = audioMp3;
-        }
+        if (ok) finalAudioPath = audioMp3;
       }
 
       if (!finalAudioPath) {
         if (!st.ytDlpAvailable) {
-          throw new Error('抖音直链提取未命中且本机未安装 yt-dlp');
+          throw new Error('直链提取未命中且本机未安装 yt-dlp');
         }
-        addLog(`步骤 1/2：使用 yt-dlp 抽取纯音频 -> ${path.basename(audioMp3)}`);
+        addLog(`步骤 1/2：使用 yt-dlp 提取视频纯音频 -> ${path.basename(audioMp3)}`);
         const ytArgs = [
           '-x',
           '--audio-format',
@@ -330,53 +368,59 @@ export function startTingwuTranscription(contentId: number): {
         jobId
       );
 
-      addLog(`步骤 2/2：送入通义听悟网页额度自动转写（${path.basename(finalAudioPath)}）`);
-      const twRes = await runCommandAsync(
-        process.execPath,
-        [st.scriptPath, 'run', finalAudioPath, outDir],
-        st.dir,
-        15 * 60 * 1000,
-        (l) => addLog(l.slice(0, 160))
+      const outputTxt = path.join(outDir, `${uniqueStem}.txt`);
+      addLog(`步骤 2/2：本机 ${st.gpuReady ? 'RTX 显卡' : 'CPU'} faster-whisper (${st.model}) 开始离线转写...`);
+
+      const asrRes = await runCommandAsync(
+        st.pythonExe,
+        [st.scriptPath, finalAudioPath, outputTxt, '--model', st.model, '--lang', 'zh'],
+        PROJECT_ROOT,
+        10 * 60 * 1000,
+        (l) => {
+          if (l.startsWith('{') || l.includes('error')) addLog(l.slice(0, 160));
+        }
       );
 
-      if (twRes.code === 2 || twRes.output.includes('LOGIN_REQUIRED')) {
-        throw new Error('LOGIN_REQUIRED: 通义听悟尚未登录，请先点下方「扫码登录通义听悟」完成一次登录后再点转写');
+      if (asrRes.code !== 0 || !fs.existsSync(outputTxt)) {
+        const detail = (asrRes.stderr || asrRes.stdout || '').trim().slice(-240);
+        throw new Error(`本地显卡语音转写失败：${detail || `退出码 ${asrRes.code}`}`);
       }
 
-      // 优先读取对应本次唯一 stem 的纯文本文件，再回退目录最新 txt
-      const expectedTxt = `${uniqueStem}.txt`;
-      const txtFile =
-        (fs.existsSync(path.join(outDir, expectedTxt)) ? expectedTxt : null) ||
-        fs
-          .readdirSync(outDir)
-          .filter((f) => f.toLowerCase().endsWith('.txt'))
-          .sort((a, b) => fs.statSync(path.join(outDir, b)).mtimeMs - fs.statSync(path.join(outDir, a)).mtimeMs)[0];
-
-      if (!txtFile) {
-        throw new Error('通义听悟任务已提交但暂未取回文本，可稍候几秒点击「同步」拉回口播稿');
-      }
-
-      const transcriptPath = path.join(outDir, txtFile);
-      const transcriptText = fs.readFileSync(transcriptPath, 'utf8').trim();
+      const transcriptText = fs.readFileSync(outputTxt, 'utf8').trim();
       if (!transcriptText) {
-        throw new Error('听悟返回文本为空，请稍后重试');
+        throw new Error('视频中未识别到有效人声口播内容');
       }
-      const doneAt = new Date().toISOString();
 
+      let metaNote = '';
+      try {
+        const lastJson = asrRes.stdout
+          .trim()
+          .split(/\r?\n/)
+          .reverse()
+          .find((l) => l.trim().startsWith('{'));
+        if (lastJson) {
+          const parsed = JSON.parse(lastJson) as { elapsed_sec?: number; device?: string; model?: string };
+          metaNote = `（${parsed.device === 'cuda' ? 'RTX 显卡' : 'CPU'} ${parsed.model || st.model}，耗时 ${parsed.elapsed_sec ?? '?'}s）`;
+        }
+      } catch {
+        // ignore
+      }
+
+      const doneAt = new Date().toISOString();
       db.prepare(`
         UPDATE contents SET
           transcript = ?,
           transcript_status = 'done',
-          transcript_source = 'tingwu',
+          transcript_source = 'faster-whisper',
           body = CASE WHEN length(body) < 120 THEN ? ELSE body END
         WHERE id = ?
       `).run(transcriptText, transcriptText.slice(0, 12000), contentId);
 
       db.prepare(`
         UPDATE tingwu_jobs SET transcript_path = ?, status = 'done', error_message = NULL, updated_at = ? WHERE id = ?
-      `).run(transcriptPath, doneAt, jobId);
+      `).run(outputTxt, doneAt, jobId);
 
-      addLog(`通义听悟转写完成！共 ${transcriptText.length} 字，已自动回写口播全文`);
+      addLog(`本地转写完成！共 ${transcriptText.length} 字 ${metaNote}`);
     } catch (err) {
       const msg = (err as Error).message;
       addLog(`转写中断：${msg}`);
@@ -387,23 +431,20 @@ export function startTingwuTranscription(contentId: number): {
         jobId
       );
     } finally {
-      tingwuRunning = false;
+      asrRunning = false;
       currentJobLabel = null;
     }
   })();
 
-  return { started: true, jobId, message: '已开始抽取纯音频并提交至通义听悟，转完会自动把口播稿显示在这里' };
+  return {
+    started: true,
+    jobId,
+    message: `已启动本机${st.gpuReady ? ' RTX 显卡' : ''}免费离线转写，通常十几秒内自动出口播全文`,
+  };
 }
 
-// 补拉尚未同步回来的通义听悟结果
+// 补同步已落盘的本地转写文本
 export async function syncCompletedTingwuJobs(): Promise<{ synced: number; message: string }> {
-  const st = getTingwuStatus();
-  if (!st.installed) return { synced: 0, message: '未找到通义听悟工具' };
-  const res = await runCommandAsync(process.execPath, [st.scriptPath, 'collect'], st.dir, 120000, (l) => addLog(l));
-  if (res.code === 2 || res.output.includes('LOGIN_REQUIRED')) {
-    return { synced: 0, message: '通义听悟尚未登录，请先点「扫码登录通义听悟」' };
-  }
-
   const db = getDb();
   const pendingJobs = db
     .prepare("SELECT id, content_id, output_dir FROM tingwu_jobs WHERE status != 'done'")
@@ -421,7 +462,7 @@ export async function syncCompletedTingwuJobs(): Promise<{ synced: number; messa
     const text = fs.readFileSync(full, 'utf8').trim();
     if (!text) continue;
     db.prepare(`
-      UPDATE contents SET transcript = ?, transcript_status = 'done', transcript_source = 'tingwu',
+      UPDATE contents SET transcript = ?, transcript_status = 'done', transcript_source = 'faster-whisper',
         body = CASE WHEN length(body) < 120 THEN ? ELSE body END
       WHERE id = ?
     `).run(text, text.slice(0, 12000), job.content_id);
@@ -432,5 +473,5 @@ export async function syncCompletedTingwuJobs(): Promise<{ synced: number; messa
     );
     synced++;
   }
-  return { synced, message: synced > 0 ? `已同步回写 ${synced} 条口播逐字稿` : '暂无新完成的听悟转写结果' };
+  return { synced, message: synced > 0 ? `已同步回写 ${synced} 条本地转写全文` : '所有本地转写稿均已同步完毕' };
 }

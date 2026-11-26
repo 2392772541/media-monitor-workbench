@@ -55,11 +55,22 @@ function resolveOptionalLocalProxyConfig(): string {
   const desktop = path.join(os.homedir(), 'Desktop');
   if (fs.existsSync(desktop)) {
     try {
-      const dir = fs.readdirSync(desktop).find((name) => /^CLIProxyAPI/i.test(name));
-      if (dir) {
-        const cfg = path.join(desktop, dir, 'config.yaml');
-        if (fs.existsSync(cfg)) return cfg;
-      }
+      const candidates = fs
+        .readdirSync(desktop, { withFileTypes: true })
+        .filter((entry) => entry.isDirectory() && /^CLIProxyAPI/i.test(entry.name))
+        .map((entry) => ({
+          name: entry.name,
+          cfg: path.join(desktop, entry.name, 'config.yaml'),
+          isBackup: /backup|bak/i.test(entry.name),
+          isTest: /test/i.test(entry.name),
+        }))
+        .filter((item) => fs.existsSync(item.cfg))
+        .sort((a, b) => {
+          const score = (x: typeof a) => (x.isBackup ? 2 : x.isTest ? 1 : 0);
+          if (score(a) !== score(b)) return score(a) - score(b);
+          return b.name.localeCompare(a.name);
+        });
+      if (candidates.length > 0) return candidates[0].cfg;
     } catch {
       // ignore
     }

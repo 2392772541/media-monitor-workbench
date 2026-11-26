@@ -439,6 +439,10 @@ export interface IntegrationsStatus {
   };
   tingwu: {
     installed: boolean;
+    engine?: string;
+    pythonExe?: string;
+    model?: string;
+    gpuReady?: boolean;
     dir: string;
     profileExists: boolean;
     ytDlpAvailable: boolean;
@@ -447,4 +451,66 @@ export interface IntegrationsStatus {
     currentJob: string | null;
     lastLogs: string[];
   };
+}
+
+export interface PublishPlatformCopy {
+  title: string;
+  description: string;
+  tags: string[];
+  tip: string;
+}
+
+export interface PublishScriptSources {
+  transcripts: Array<{
+    id: number;
+    title: string;
+    platform: string;
+    author: string;
+    transcript: string;
+    discovered_at: string;
+  }>;
+  saved: Array<{
+    id: number;
+    title: string;
+    core_angle: string;
+    notes: string;
+    source_content_id: number | null;
+    updated_at: string;
+  }>;
+}
+
+export interface CrawledCommentRow {
+  id: string;
+  author: string;
+  text: string;
+  likes: number;
+  publishedAt: string | null;
+  postTitle?: string;
+  postUrl?: string;
+}
+
+export interface CommentCrawlAiSummary {
+  topQuestions: string[];
+  painPoints: string[];
+  topicAngles: string[];
+  oneLineTakeaway: string;
+  analyzedAt: string;
+}
+
+export interface CommentCrawlJobSummary {
+  id: string;
+  platform: string;
+  mode: 'detail' | 'search' | 'creator';
+  input: string;
+  status: 'running' | 'done' | 'failed';
+  message: string;
+  logs: string[];
+  aiSummary?: CommentCrawlAiSummary | null;
+  createdAt: string;
+  finishedAt?: string | null;
+  commentCount: number;
+}
+
+export interface CommentCrawlJob extends Omit<CommentCrawlJobSummary, 'commentCount'> {
+  comments: CrawledCommentRow[];
 }

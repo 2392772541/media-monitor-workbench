@@ -18,7 +18,7 @@ import {
   Layers,
 } from 'lucide-react';
 import { apiRequest } from '../api';
-import type { PublishInspirationDraft } from '../types';
+import type { PublishInspirationDraft, PublishPlatformCopy, PublishScriptSources } from '../types';
 
 interface SauStatus {
   installed: boolean;
@@ -155,6 +155,17 @@ export function PublishPage({
   const [batchResults, setBatchResults] = useState<BatchRunResult[]>([]);
   const [dragOver, setDragOver] = useState(false);
 
+  // AI 按平台自动生成标题、正文与标签
+  const [aiScriptInput, setAiScriptInput] = useState('');
+  const [aiStyleHint, setAiStyleHint] = useState('');
+  const [aiGenerating, setAiGenerating] = useState(false);
+  const [aiPlatformCopies, setAiPlatformCopies] = useState<Record<number, PublishPlatformCopy> | null>(null);
+  const [aiPreviewPlatform, setAiPreviewPlatform] = useState<number>(3);
+  const [usePlatformAiCopy, setUsePlatformAiCopy] = useState(true);
+  const [scriptSources, setScriptSources] = useState<PublishScriptSources | null>(null);
+  const [loadingSources, setLoadingSources] = useState(false);
+  const [selectedSourceKey, setSelectedSourceKey] = useState('');
+
   const [tplCategoryFilter, setTplCategoryFilter] = useState<string>('全部');
   const [tplSearch, setTplSearch] = useState('');
   const [showTplModal, setShowTplModal] = useState(false);
@@ -234,6 +245,7 @@ export function PublishPage({
 
   useEffect(() => {
     void loadAll();
+    void loadScriptSources();
     const retryTimer = window.setTimeout(() => {
       void loadAll(true);
     }, 2200);
@@ -242,6 +254,107 @@ export function PublishPage({
       clearSse();
     };
   }, []);
+
+  const loadScriptSources = async () => {
+    setLoadingSources(true);
+    try {
+      const res = await apiRequest<PublishScriptSources>('/api/publish/script-sources');
+      setScriptSources(res);
+    } catch {
+      // 忽略静默加载异常
+    } finally {
+      setLoadingSources(false);
+    }
+  };
+
+  const handleImportScriptSource = (val: string) => {
+    setSelectedSourceKey(val);
+    if (!val || !scriptSources) return;
+    if (val.startsWith('t:')) {
+      const id = Number(val.slice(2));
+      const hit = scriptSources.transcripts.find((x) => x.id === id);
+      if (hit) {
+        setAiScriptInput(`原视频标题：${hit.title}\n\n口播逐字稿：\n${hit.transcript}`);
+        onToast(`已导入口播稿：${hit.title.slice(0, 18)}`);
+      }
+    } else if (val.startsWith('s:')) {
+      const id = Number(val.slice(2));
+      const hit = scriptSources.saved.find((x) => x.id === id);
+      if (hit) {
+        const parts = [`选题标题：${hit.title}`, hit.core_angle ? `核心看点：${hit.core_angle}` : '', hit.notes ? `我的备注：${hit.notes}` : ''].filter(Boolean);
+        setAiScriptInput(parts.join('\n\n'));
+        onToast(`已导入收藏选题：${hit.title.slice(0, 18)}`);
+      }
+    }
+  };
+
+  const handleGenerateAiCopy = async (forceRefresh = false) => {
+    const text = aiScriptInput.trim();
+    if (text.length < 8) {
+      onToast('请先粘贴一段口播稿或文案要点（至少 8 个字），再点 AI 生成');
+      return;
+    }
+    setAiGenerating(true);
+    try {
+      const res = await apiRequest<{
+        ok: boolean;
+        cached?: boolean;
+        byPlatform: Record<number, PublishPlatformCopy>;
+      }>('/api/publish/ai-generate', {
+        method: 'POST',
+        body: JSON.stringify({
+          script: text,
+          styleHint: aiStyleHint.trim() || undefined,
+          forceRefresh,
+        }),
+      });
+      setAiPlatformCopies(res.byPlatform);
+      setUsePlatformAiCopy(true);
+      const firstSelectedPlat = groupedSelectedAccounts[0]?.[0] || 3;
+      setAiPreviewPlatform(firstSelectedPlat);
+      // 同步当前预览平台的标题与标签到统一输入框与已选视频
+      const primary = res.byPlatform[firstSelectedPlat] || res.byPlatform[3];
+      if (primary) {
+        if (primary.title) setGlobalTitle(primary.title);
+        if (primary.tags?.length) setGlobalTagsText(primary.tags.join(', '));
+        setVideoDrafts((prev) =>
+          prev.map((d) => ({
+            ...d,
+            title: primary.title || d.title,
+            tagsText: primary.tags?.length ? primary.tags.join(', ') : d.tagsText,
+          }))
+        );
+      }
+      onToast(res.cached ? '已载入四平台定制文案（可直接微调）' : 'AI 已为抖音 / 小红书 / 视频号 / 快手分别生成标题、正文与标签！');
+    } catch (err) {
+      onToast((err as Error).message);
+    } finally {
+      setAiGenerating(false);
+    }
+  };
+
+  const updateAiPlatformField = (pType: number, patch: Partial<PublishPlatformCopy>) => {
+    setAiPlatformCopies((prev) => {
+      if (!prev) return prev;
+      const cur = prev[pType] || { title: '', description: '', tags: [], tip: '' };
+      return { ...prev, [pType]: { ...cur, ...patch } };
+    });
+  };
+
+  const applyCurrentAiCopyToDrafts = () => {
+    const copy = aiPlatformCopies?.[aiPreviewPlatform];
+    if (!copy) return;
+    setGlobalTitle(copy.title);
+    setGlobalTagsText(copy.tags.join(', '));
+    setVideoDrafts((prev) =>
+      prev.map((d) => ({
+        ...d,
+        title: copy.title || d.title,
+        tagsText: copy.tags.join(', '),
+      }))
+    );
+    onToast(`已将「${getPlatformMeta(aiPreviewPlatform).label}」文案同步到下方视频列表`);
+  };
 
   // 接收来自「最新内容」监控流的爆款选题灵感，自动预填到统一标题与话题
   useEffect(() => {
@@ -652,7 +765,12 @@ export function PublishPage({
       onToast('请至少勾选一个要发布的视频');
       return;
     }
-    const emptyTitle = videoDrafts.find((d) => !d.title.trim());
+    const hasAiForAllPlatforms =
+      usePlatformAiCopy &&
+      aiPlatformCopies !== null &&
+      groupedSelectedAccounts.every(([pType]) => Boolean(aiPlatformCopies[pType]?.title?.trim()));
+
+    const emptyTitle = !hasAiForAllPlatforms ? videoDrafts.find((d) => !d.title.trim()) : undefined;
     if (emptyTitle) {
       onToast(`视频「${emptyTitle.filename}」还没有填写标题`);
       return;
@@ -685,18 +803,24 @@ export function PublishPage({
         prev.map((r, idx) => (idx === i ? { ...r, status: 'running', message: '正在提交...' } : r))
       );
 
-      const tags = t.video.tagsText
-        .split(/[,，\s#]+/)
-        .map((s) => s.trim())
-        .filter(Boolean);
+      const aiCopy = usePlatformAiCopy ? aiPlatformCopies?.[t.platformType] : undefined;
+      const finalTitle = (aiCopy?.title?.trim() || t.video.title.trim());
+      const finalDescription = aiCopy?.description?.trim() || '';
+      const rawTags = aiCopy?.tags && aiCopy.tags.length > 0
+        ? aiCopy.tags
+        : t.video.tagsText
+            .split(/[,，\s#]+/)
+            .map((s) => s.trim())
+            .filter(Boolean);
 
       try {
         await apiRequest<{ code: number; msg: string }>('/api/sau/post-video', {
           method: 'POST',
           body: JSON.stringify({
             type: t.platformType,
-            title: t.video.title.trim(),
-            tags,
+            title: finalTitle,
+            description: finalDescription,
+            tags: rawTags,
             fileList: [t.video.filePath],
             accountList: t.accountList,
             enableTimer: enableTimer ? 1 : 0,
@@ -1119,8 +1243,8 @@ export function PublishPage({
           <div className="card">
             <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: 12, flexWrap: 'wrap', gap: 8 }}>
               <div>
-                <div style={{ fontWeight: 700, fontSize: 15 }}>3. 批量配置标题与话题（支持统一套用 / 标题库自动分配 / 逐条微调）</div>
-                <div style={{ fontSize: 12, color: 'var(--text-muted)' }}>可先在「标题文案库」管理你的常用爆款标题，再点下方按钮一键批量填入</div>
+                <div style={{ fontWeight: 700, fontSize: 15 }}>3. AI 自动按平台写标题、正文与标签（也可手动微调）</div>
+                <div style={{ fontSize: 12, color: 'var(--text-muted)' }}>把视频口播稿或大纲丢进来，AI 自动按抖音 / 小红书 / 视频号 / 快手 4 个平台风格分别填好</div>
               </div>
               <div style={{ display: 'flex', gap: 6, flexWrap: 'wrap' }}>
                 <button className="btn btn-sm" onClick={() => setSubTab('titles')}>
@@ -1136,6 +1260,198 @@ export function PublishPage({
                   <Sparkles size={13} /> 标题库随机分配
                 </button>
               </div>
+            </div>
+
+            {/* AI 按平台自动生成标题、正文与标签工作区 */}
+            <div className="publish-ai-box">
+              <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', gap: 10, flexWrap: 'wrap', marginBottom: 10 }}>
+                <div style={{ display: 'flex', alignItems: 'center', gap: 6, fontWeight: 700, fontSize: 14, color: '#3730a3' }}>
+                  <Sparkles size={15} /> AI 丢文案自动写四平台标题 + 正文 + 标签
+                </div>
+                <div style={{ display: 'flex', alignItems: 'center', gap: 8, flexWrap: 'wrap' }}>
+                  <select
+                    className="select"
+                    style={{ width: 240, padding: '6px 10px', fontSize: 12 }}
+                    value={selectedSourceKey}
+                    disabled={loadingSources}
+                    onChange={(e) => handleImportScriptSource(e.target.value)}
+                  >
+                    <option value="">从已有口播稿 / 收藏本一键导入...</option>
+                    {scriptSources && scriptSources.transcripts.length > 0 && (
+                      <optgroup label="已转写的视频口播稿">
+                        {scriptSources.transcripts.map((t) => (
+                          <option key={`t:${t.id}`} value={`t:${t.id}`}>
+                            [口播] {t.title.slice(0, 26)}
+                          </option>
+                        ))}
+                      </optgroup>
+                    )}
+                    {scriptSources && scriptSources.saved.length > 0 && (
+                      <optgroup label="简易收藏本里的选题">
+                        {scriptSources.saved.map((s) => (
+                          <option key={`s:${s.id}`} value={`s:${s.id}`}>
+                            [收藏] {s.title.slice(0, 26)}
+                          </option>
+                        ))}
+                      </optgroup>
+                    )}
+                  </select>
+                  <button className="btn btn-sm" type="button" onClick={() => void loadScriptSources()}>
+                    <RefreshCw size={12} />
+                  </button>
+                </div>
+              </div>
+
+              <textarea
+                className="textarea"
+                data-testid="publish-ai-script"
+                rows={4}
+                value={aiScriptInput}
+                onChange={(e) => setAiScriptInput(e.target.value)}
+                placeholder="把你的视频口播稿、脚本文案或核心要点粘贴到这里（例如：今天给大家实测3个免费AI剪辑工具，不用买会员就能自动加字幕...）"
+              />
+
+              <div style={{ display: 'flex', gap: 8, alignItems: 'center', flexWrap: 'wrap', marginTop: 10 }}>
+                <input
+                  className="input"
+                  style={{ flex: '1 1 240px' }}
+                  value={aiStyleHint}
+                  onChange={(e) => setAiStyleHint(e.target.value)}
+                  placeholder="可选风格补充（例如：偏硬核干货 / 口语接地气 / 少用感叹号）"
+                />
+                <button
+                  type="button"
+                  data-testid="publish-ai-gen-btn"
+                  className="btn btn-primary btn-sm"
+                  disabled={aiGenerating}
+                  onClick={() => void handleGenerateAiCopy(false)}
+                >
+                  <Sparkles size={13} /> {aiGenerating ? 'AI 正在按四平台定制...' : 'AI 一键生成各平台标题和标签'}
+                </button>
+                {aiPlatformCopies && (
+                  <button
+                    type="button"
+                    className="btn btn-sm"
+                    disabled={aiGenerating}
+                    onClick={() => void handleGenerateAiCopy(true)}
+                  >
+                    <RotateCcw size={12} /> 换一版
+                  </button>
+                )}
+              </div>
+
+              {aiPlatformCopies && (
+                <div className="publish-ai-result">
+                  <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', gap: 8, flexWrap: 'wrap', marginBottom: 10 }}>
+                    <div style={{ display: 'flex', gap: 6, flexWrap: 'wrap' }}>
+                      {PLATFORM_OPTIONS.map((p) => {
+                        const active = aiPreviewPlatform === p.type;
+                        const isChosen = groupedSelectedAccounts.some(([pt]) => pt === p.type);
+                        return (
+                          <button
+                            key={p.type}
+                            type="button"
+                            data-testid={`publish-ai-plat-${p.type}`}
+                            className={`btn btn-sm ${active ? 'btn-primary' : ''}`}
+                            onClick={() => setAiPreviewPlatform(p.type)}
+                          >
+                            {p.label}
+                            {isChosen && <span style={{ fontSize: 10, opacity: 0.9 }}> · 已选</span>}
+                          </button>
+                        );
+                      })}
+                    </div>
+                    <label style={{ display: 'inline-flex', alignItems: 'center', gap: 6, fontSize: 12.5, fontWeight: 600, color: '#3730a3', cursor: 'pointer' }}>
+                      <input
+                        type="checkbox"
+                        checked={usePlatformAiCopy}
+                        onChange={(e) => setUsePlatformAiCopy(e.target.checked)}
+                      />
+                      发布时按各平台自动套用下方专属文案
+                    </label>
+                  </div>
+
+                  {(() => {
+                    const cur = aiPlatformCopies[aiPreviewPlatform] || { title: '', description: '', tags: [], tip: '' };
+                    return (
+                      <div style={{ display: 'grid', gap: 10 }}>
+                        <div>
+                          <div style={{ display: 'flex', justifyContent: 'space-between', fontSize: 12, fontWeight: 600, marginBottom: 4 }}>
+                            <span>{getPlatformMeta(aiPreviewPlatform).label}专属标题</span>
+                            <span style={{ color: 'var(--text-muted)', fontWeight: 400 }}>{cur.title.length} 字</span>
+                          </div>
+                          <input
+                            className="input"
+                            data-testid="publish-ai-title-input"
+                            value={cur.title}
+                            onChange={(e) => updateAiPlatformField(aiPreviewPlatform, { title: e.target.value })}
+                          />
+                        </div>
+
+                        <div>
+                          <div style={{ display: 'flex', justifyContent: 'space-between', fontSize: 12, fontWeight: 600, marginBottom: 4 }}>
+                            <span>{getPlatformMeta(aiPreviewPlatform).label}正文简介（抖音 / 小红书发布时会自动填入）</span>
+                            <span style={{ color: 'var(--text-muted)', fontWeight: 400 }}>{cur.description.length} 字</span>
+                          </div>
+                          <textarea
+                            className="textarea"
+                            rows={2}
+                            value={cur.description}
+                            onChange={(e) => updateAiPlatformField(aiPreviewPlatform, { description: e.target.value })}
+                          />
+                        </div>
+
+                        <div>
+                          <div style={{ display: 'flex', justifyContent: 'space-between', fontSize: 12, fontWeight: 600, marginBottom: 4 }}>
+                            <span>{getPlatformMeta(aiPreviewPlatform).label}话题标签（逗号分隔，自动加 #）</span>
+                            <span style={{ color: 'var(--text-muted)', fontWeight: 400 }}>{cur.tags.length} 个标签</span>
+                          </div>
+                          <input
+                            className="input"
+                            data-testid="publish-ai-tags-input"
+                            value={cur.tags.join(', ')}
+                            onChange={(e) =>
+                              updateAiPlatformField(aiPreviewPlatform, {
+                                tags: e.target.value
+                                  .split(/[,，\s#]+/)
+                                  .map((s) => s.trim())
+                                  .filter(Boolean),
+                              })
+                            }
+                          />
+                        </div>
+
+                        <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', gap: 8, flexWrap: 'wrap' }}>
+                          <span style={{ fontSize: 12, color: '#4338ca' }}>
+                            {cur.tip ? `起量建议：${cur.tip}` : '已自动按该平台调性优化，点击上方标签可随时修改'}
+                          </span>
+                          <div style={{ display: 'flex', gap: 6 }}>
+                            <button
+                              type="button"
+                              className="btn btn-sm"
+                              onClick={async () => {
+                                const txt = `${cur.title}\n\n${cur.description}\n\n${cur.tags.map((t) => `#${t}`).join(' ')}`;
+                                await navigator.clipboard?.writeText(txt);
+                                onToast(`已复制${getPlatformMeta(aiPreviewPlatform).label}完整文案`);
+                              }}
+                            >
+                              <Copy size={12} /> 复制本平台文案
+                            </button>
+                            <button
+                              type="button"
+                              className="btn btn-primary btn-sm"
+                              disabled={videoDrafts.length === 0}
+                              onClick={applyCurrentAiCopyToDrafts}
+                            >
+                              同步到下方视频列表
+                            </button>
+                          </div>
+                        </div>
+                      </div>
+                    );
+                  })()}
+                </div>
+              )}
             </div>
 
             <div

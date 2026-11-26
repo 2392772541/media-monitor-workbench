@@ -1,5 +1,9 @@
 import crypto from 'node:crypto';
+import { execFile } from 'node:child_process';
+import { promisify } from 'node:util';
 import { withHeadlessContext, updateProfileStatus } from '../browser/profileManager.js';
+
+const execFileAsync = promisify(execFile);
 import type {
   AuthorProfileSnapshot,
   AvailabilityResult,
@@ -278,6 +282,18 @@ export const bilibiliAdapter: PlatformAdapter = {
       // 无 cookie 时走免登录公开请求
     }
 
+    // 若未登录且无 buvid3，先从公开 spi 接口预热访客指纹 Cookie，大幅降低 -352 风控概率
+    if (!cookieHeader.includes('buvid3=')) {
+      const spi = await fetchJson<{ code?: number; data?: { b_3?: string; b_4?: string } }>(
+        'https://api.bilibili.com/x/frontend/finger/spi',
+        8000
+      );
+      if (spi?.code === 0 && spi.data?.b_3) {
+        const extra = `buvid3=${spi.data.b_3}${spi.data.b_4 ? `; buvid4=${spi.data.b_4}` : ''}`;
+        cookieHeader = cookieHeader ? `${cookieHeader}; ${extra}` : extra;
+      }
+    }
+
     const authorProfile = await fetchBiliAuthorProfile(mid, cookieHeader);
     if (authorProfile.name) {
       writeLog(`UP 主档案：${authorProfile.name}，粉丝数：${authorProfile.followerCount ?? '未提供'}`);
@@ -299,11 +315,11 @@ export const bilibiliAdapter: PlatformAdapter = {
         bvids = listRes.data.list.vlist.map((v) => v.bvid || '').filter(Boolean);
         writeLog(`WBI 接口返回 ${bvids.length} 条最新投稿`);
       } else {
-        writeLog(`WBI 接口受限 (${listRes?.code ?? 'network'} ${listRes?.message ?? ''})，切换独立浏览器读取投稿列表`);
+        writeLog(`WBI 接口受限 (${listRes?.code ?? 'network'} ${listRes?.message ?? ''})，自动切换浏览器接口拦截`);
       }
     }
 
-    // 路径二：独立浏览器兜底读取空间页 BV 列表
+    // 路径二：正常桌面 UA 浏览器访问空间页，直接拦截投稿 API JSON + 解析页面链接
     if (bvids.length === 0) {
       try {
         bvids = await withHeadlessContext(
@@ -311,31 +327,72 @@ export const bilibiliAdapter: PlatformAdapter = {
           `source:${source.id}`,
           async (ctx) => {
             const page = ctx.pages()[0] || (await ctx.newPage());
+            const captured = new Set<string>();
+            page.on('response', async (resp) => {
+              const u = resp.url();
+              if (!u.includes('/space/wbi/arc/search') && !u.includes('/space/arc/search')) return;
+              try {
+                const j = (await resp.json()) as { data?: { list?: { vlist?: Array<{ bvid?: string }> } } };
+                for (const v of j?.data?.list?.vlist || []) {
+                  if (v.bvid) captured.add(v.bvid);
+                }
+              } catch {
+                // ignore
+              }
+            });
+
             await page.goto(`https://space.bilibili.com/${mid}/video`, {
               waitUntil: 'domcontentloaded',
               timeout: 25000,
             });
-            await page.waitForTimeout(3000);
-            return await page.evaluate(() => {
-              const links = Array.from(document.querySelectorAll('a[href*="/video/BV"]'));
-              const out: string[] = [];
-              const seen = new Set<string>();
-              for (const a of links) {
-                const m = ((a as HTMLAnchorElement).href || '').match(/\/video\/(BV[a-zA-Z0-9]+)/i);
-                if (m && !seen.has(m[1])) {
-                  seen.add(m[1]);
-                  out.push(m[1]);
+            for (let i = 0; i < 12; i++) {
+              await page.waitForTimeout(500);
+              if (captured.size >= 8) break;
+            }
+            if (captured.size === 0) {
+              const domBvids = await page.evaluate(() => {
+                const links = Array.from(document.querySelectorAll('a[href*="/video/BV"]'));
+                const out: string[] = [];
+                const seen = new Set<string>();
+                for (const a of links) {
+                  const m = ((a as HTMLAnchorElement).href || '').match(/\/video\/(BV[a-zA-Z0-9]+)/i);
+                  if (m && !seen.has(m[1])) {
+                    seen.add(m[1]);
+                    out.push(m[1]);
+                  }
+                  if (out.length >= 15) break;
                 }
-                if (out.length >= 15) break;
-              }
-              return out;
-            });
+                return out;
+              });
+              for (const b of domBvids) captured.add(b);
+            }
+            return Array.from(captured).slice(0, 15);
           },
           { headless: options.headless }
         );
         writeLog(`独立浏览器提取到 ${bvids.length} 个投稿 BV 号`);
       } catch (err) {
         writeLog(`独立浏览器读取 B站空间失败: ${(err as Error).message}`);
+      }
+    }
+
+    // 路径三（终极免登录兜底）：调用 yt-dlp 拉平空间前 12 条投稿 BV 号，抗 -352 风控极稳
+    if (bvids.length === 0) {
+      try {
+        writeLog('切换 yt-dlp 兜底通道读取 UP 主最新投稿列表...');
+        const { stdout } = await execFileAsync(
+          'yt-dlp',
+          ['--flat-playlist', '--no-warnings', '--playlist-end', '12', '--print', '%(id)s', `https://space.bilibili.com/${mid}/video`],
+          { timeout: 30000, windowsHide: true }
+        );
+        const extracted = stdout
+          .split(/\r?\n/)
+          .map((s) => s.trim())
+          .filter((s) => /^BV[a-zA-Z0-9]+$/i.test(s));
+        bvids = Array.from(new Set(extracted)).slice(0, 12);
+        writeLog(`yt-dlp 兜底通道成功获取 ${bvids.length} 个投稿 BV 号`);
+      } catch (err) {
+        writeLog(`yt-dlp 兜底通道跳过: ${(err as Error).message.slice(0, 100)}`);
       }
     }
 

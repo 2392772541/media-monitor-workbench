@@ -128,7 +128,7 @@ export function ContentDrawer({
     void loadDetail(target.contentId);
   }, [target?.contentId, target?.initialTab]);
 
-  // 当通义听悟正在后台抽音频/转写时，每 4 秒静默刷新一次进度直到出稿
+  // 当本机显卡正在后台抽音频/转写时，每 2.5 秒静默刷新一次进度直到出稿
   useEffect(() => {
     if (!target || !detail) return;
     const st = detail.content.transcript_status;
@@ -140,12 +140,12 @@ export function ContentDrawer({
         .then((d) => {
           setDetail(d);
           if (d.content.transcript_status === 'done') {
-            onToast('口播逐字稿已转写完成！');
+            onToast('本机显卡口播逐字稿已转写完成！');
             onChanged();
           }
         })
         .catch(() => {});
-    }, 4000);
+    }, 2500);
     return () => clearInterval(timer);
   }, [target?.contentId, detail?.content.transcript_status, detail?.tingwuJobs?.[0]?.status]);
 
@@ -216,7 +216,7 @@ export function ContentDrawer({
     }
   };
 
-  // 通义听悟转口播稿
+  // 本机 RTX 显卡开源语音转写（免登录）
   const handleTranscribe = async () => {
     if (!content) return;
     setBusy('transcribe');
@@ -224,7 +224,7 @@ export function ContentDrawer({
       const res = await apiRequest<{ message?: string }>(`/api/radar/intel/${content.id}/transcribe`, {
         method: 'POST',
       });
-      onToast(res.message || '已提交通义听悟转写，稍后点「同步结果」即可查看');
+      onToast(res.message || '已启动本机显卡离线转写，约 10~25 秒自动出稿');
       await loadDetail(content.id);
       onChanged();
     } catch (err) {
@@ -234,14 +234,14 @@ export function ContentDrawer({
     }
   };
 
-  // 同步听悟结果
+  // 手动刷新最新转写状态
   const handleSyncTingwu = async () => {
     if (!content) return;
     setBusy('sync');
     try {
       await apiRequest('/api/radar/tingwu/sync', { method: 'POST' });
       await loadDetail(content.id);
-      onToast('已同步通义听悟最新转写状态');
+      onToast('已刷新最新口播转写状态');
       onChanged();
     } catch (err) {
       onToast((err as Error).message);
@@ -250,22 +250,7 @@ export function ContentDrawer({
     }
   };
 
-  // 弹出通义听悟扫码登录窗口
-  const handleTingwuLogin = async () => {
-    setBusy('tingwu-login');
-    try {
-      const res = await apiRequest<{ started: boolean; message: string }>('/api/radar/tingwu/login', {
-        method: 'POST',
-      });
-      onToast(res.message);
-    } catch (err) {
-      onToast((err as Error).message);
-    } finally {
-      setBusy(null);
-    }
-  };
-
-  // MediaCrawler 抓热评
+  // 抓取真实高赞热评（B站/抖音直连秒抓 + MediaCrawler 补全）
   const handleFetchComments = async () => {
     if (!content) return;
     setBusy('comments');
@@ -478,13 +463,13 @@ export function ContentDrawer({
                   状态：
                   <strong style={{ color: content.transcript_status === 'done' ? 'var(--success)' : 'var(--text)' }}>
                     {content.transcript_status === 'done'
-                      ? '已完成听悟转写'
+                      ? '已完成本机显卡转写'
                       : detail?.tingwuJobs?.[0]?.status === 'downloading'
-                        ? '第 1/2 步：正在抽取纯音频...'
+                        ? '第 1/2 步：免登录提取视频纯音频...'
                         : detail?.tingwuJobs?.[0]?.status === 'uploading' || content.transcript_status === 'transcribing'
-                          ? '第 2/2 步：已送通义听悟转写中（自动刷新）...'
+                          ? '第 2/2 步：RTX 显卡高速离线转写中（自动刷新）...'
                           : content.transcript_status === 'failed'
-                            ? '上次转写中断'
+                            ? '上次转写未完成（可重试）'
                             : '暂未转写'}
                   </strong>
                 </span>
@@ -494,14 +479,14 @@ export function ContentDrawer({
                     disabled={busy === 'transcribe' || content.transcript_status === 'transcribing'}
                     onClick={() => void handleTranscribe()}
                   >
-                    <Mic size={13} /> {busy === 'transcribe' || content.transcript_status === 'transcribing' ? '转写进行中...' : '通义听悟转口播稿'}
+                    <Mic size={13} /> {busy === 'transcribe' || content.transcript_status === 'transcribing' ? '显卡转写中...' : '本机显卡转口播稿 (免登录)'}
                   </button>
                   <button
                     className="btn btn-secondary btn-sm"
                     disabled={busy === 'sync'}
                     onClick={() => void handleSyncTingwu()}
                   >
-                    <RefreshCw size={12} /> 同步
+                    <RefreshCw size={12} /> 刷新
                   </button>
                   {displayTranscript && (
                     <button className="btn btn-secondary btn-sm" onClick={() => void handleCopyText(displayTranscript)}>
@@ -512,17 +497,8 @@ export function ContentDrawer({
               </div>
 
               {detail?.tingwuJobs?.[0]?.error_message && (
-                <div className="alert-banner-warn" style={{ marginBottom: 0, display: 'flex', justifyContent: 'space-between', alignItems: 'center', gap: 8, flexWrap: 'wrap' }}>
+                <div className="alert-banner-warn" style={{ marginBottom: 0 }}>
                   <span>{detail.tingwuJobs[0].error_message.replace(/^LOGIN_REQUIRED:\s*/, '')}</span>
-                  {detail.tingwuJobs[0].error_message.includes('登录') && (
-                    <button
-                      className="btn btn-primary btn-sm"
-                      disabled={busy === 'tingwu-login'}
-                      onClick={() => void handleTingwuLogin()}
-                    >
-                      扫码登录通义听悟
-                    </button>
-                  )}
                 </div>
               )}
 
@@ -532,13 +508,13 @@ export function ContentDrawer({
                 ) : displayTranscript ? (
                   <>
                     <div style={{ fontSize: 11.5, color: 'var(--text-muted)', marginBottom: 8 }}>
-                      （当前显示原网页正文/摘要，点击上方「通义听悟转口播稿」可抽取纯视频口播逐字稿）
+                      （当前显示原网页正文/摘要，点击上方「本机显卡转口播稿」即可免登录提取纯视频逐字稿）
                     </div>
                     {displayTranscript}
                   </>
                 ) : (
                   <span style={{ color: 'var(--text-muted)' }}>
-                    暂无口播稿。点击上方「通义听悟转口播稿」会自动提取纯音频并转出无时间轴文字稿。
+                    暂无口播稿。点击上方「本机显卡转口播稿 (免登录)」会自动用本机 RTX 显卡提取无时间轴逐字稿，永久免费不掉线。
                   </span>
                 )}
               </div>
@@ -547,7 +523,7 @@ export function ContentDrawer({
             <div style={{ display: 'flex', flexDirection: 'column', gap: 10 }}>
               <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', gap: 8, flexWrap: 'wrap' }}>
                 <span style={{ fontSize: 12, color: 'var(--text-muted)' }}>
-                  本机 MediaCrawler 抓取真实高赞评论
+                  抖音 / B站直连抓取真实高赞热评（按点赞从高到低）
                 </span>
                 {canCrawlComments ? (
                   <button

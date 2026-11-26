@@ -275,17 +275,27 @@ export function checkDueScheduledTasks() {
       | undefined;
     if (enabledRow?.value === 'false') return;
 
-    // Clean up stale queued/running jobs left over from unexpected crash
+    // 错峰调度：单轮最多入队 2 个到期监控源，并按连续失败自动指数退避，防止同时扎堆撞风控
     const now = Date.now();
     const sources = db
-      .prepare("SELECT id, interval_minutes, last_checked_at, status FROM sources WHERE status = 'active'")
-      .all() as Array<{ id: number; interval_minutes: number; last_checked_at: string | null; status: string }>;
+      .prepare("SELECT id, interval_minutes, last_checked_at, last_error, status FROM sources WHERE status = 'active' AND source_type != 'hot_board'")
+      .all() as Array<{ id: number; interval_minutes: number; last_checked_at: string | null; last_error: string | null; status: string }>;
 
+    let scheduledThisTick = 0;
     for (const s of sources) {
-      const intervalMs = Math.max(5, s.interval_minutes || 60) * 60 * 1000;
+      const baseIntervalMs = Math.max(15, s.interval_minutes || 120) * 60 * 1000;
+      // 若上次报错，自动把定时冷却延长 1.5 倍（最高 6 小时），避免频繁硬撞平台限流
+      const effectiveIntervalMs = s.last_error ? Math.min(baseIntervalMs * 1.5, 360 * 60 * 1000) : baseIntervalMs;
       const lastMs = s.last_checked_at ? Date.parse(s.last_checked_at) : 0;
-      if (!lastMs || now - lastMs >= intervalMs) {
-        enqueueCollection(s.id, 'scheduled');
+      if (!lastMs || now - lastMs >= effectiveIntervalMs) {
+        const delayMs = scheduledThisTick * 10000;
+        if (delayMs === 0) {
+          enqueueCollection(s.id, 'scheduled');
+        } else {
+          setTimeout(() => enqueueCollection(s.id, 'scheduled'), delayMs);
+        }
+        scheduledThisTick++;
+        if (scheduledThisTick >= 2) break;
       }
     }
   } catch (err) {

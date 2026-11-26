@@ -4,6 +4,7 @@ import {
   Users,
   Flame,
   Star,
+  MessageSquareText,
   Send,
   Monitor,
   ListChecks,
@@ -15,25 +16,27 @@ import { CockpitPage } from './pages/CockpitPage';
 import { CreatorsPage } from './pages/CreatorsPage';
 import { HotBoardPage } from './pages/HotBoardPage';
 import { TopicBoardPage } from './pages/TopicBoardPage';
+import { CommentsPage } from './pages/CommentsPage';
 import { PublishPage } from './pages/PublishPage';
 import { BrowsersPage } from './pages/BrowsersPage';
 import { TasksPage } from './pages/TasksPage';
 import { SettingsPage } from './pages/SettingsPage';
 import type { HotBoardItem, PublishInspirationDraft } from './types';
 
-// 核心精简 4 页：彻底去掉复杂打分、话题雷达、情报库、多阶段看板
+// 核心工作流导航：今日速览 / 对标博主 / 平台热榜 / 简易收藏本 / 评论采集
 const CORE_NAV_ITEMS = [
   { id: 'overview', label: '今日速览', sub: '一眼看清对标爆款与平台热榜', icon: Zap },
   { id: 'creators', label: '对标博主', sub: '贴主页链接盯盘，走势图红柱直标爆款', icon: Users },
   { id: 'hotboard', label: '平台热榜', sub: '分平台分类目看热榜，点开直出看点与口播', icon: Flame },
   { id: 'saved', label: '简易收藏本', sub: '随手标星存着拍，随时翻口播稿和热评', icon: Star },
+  { id: 'comments', label: '评论采集', sub: '贴链接 / 搜关键词 / 抓博主热评，AI 一键提炼痛点', icon: MessageSquareText },
 ] as const;
 
-// 原有实用工具入口保留在底部，不打扰核心看榜流程
+// 创作分发与运维入口保留在底部
 const OPS_NAV_ITEMS = [
-  { id: 'publish', label: '视频发布', sub: '多平台一键分发', icon: Send },
-  { id: 'browsers', label: '浏览器与登录', sub: '维护抖音 / B站 / 通义听悟登录态', icon: Monitor },
-  { id: 'tasks', label: '任务中心', sub: '查看自动抓取任务与日志', icon: ListChecks },
+  { id: 'publish', label: '视频发布', sub: 'AI 自动按平台写标题标签 · 多平台分发', icon: Send },
+  { id: 'browsers', label: '浏览器与登录', sub: '管理后台抓取登录态（本机显卡转写已免登录）', icon: Monitor },
+  { id: 'tasks', label: '任务中心', sub: '监控抓取记录、一键重试与失败清理', icon: ListChecks },
   { id: 'settings', label: '系统设置', sub: '本机大模型与抓取基础配置', icon: Settings },
 ] as const;
 
@@ -286,6 +289,9 @@ export function App() {
               onRefreshBadge={handleGlobalChanged}
               onToast={showToast}
             />
+          )}
+          {activeTab === 'comments' && (
+            <CommentsPage onToast={showToast} onNavigate={handleNavigate} />
           )}
           {activeTab === 'publish' && (
             <PublishPage

@@ -2,7 +2,15 @@ import type { FastifyInstance } from 'fastify';
 import { getDb } from '../db/database.js';
 import { recomputeAllBreakouts, recomputeSourceBreakout } from '../services/breakoutService.js';
 import { importHotItemToIntel, refreshHotBoards } from '../services/hotBoardService.js';
-import { fetchCommentsWithMediaCrawler, getMediaCrawlerStatus } from '../services/mediaCrawlerBridge.js';
+import {
+  analyzeCommentCrawlJob,
+  deleteCommentCrawlJob,
+  fetchCommentsWithMediaCrawler,
+  getCommentCrawlJob,
+  getMediaCrawlerStatus,
+  listCommentCrawlJobs,
+  startStandaloneCommentCrawl,
+} from '../services/mediaCrawlerBridge.js';
 import {
   getTingwuStatus,
   launchTingwuLogin,
@@ -11,6 +19,7 @@ import {
 } from '../services/tingwuBridge.js';
 import {
   analyzeContentDeep,
+  callAiJsonWithCache,
   clusterRecentContents,
   generateRecommendationForContent,
   getActiveAccount,
@@ -1132,5 +1141,146 @@ export function registerRadarRoutes(app: FastifyInstance): void {
 
   app.post('/api/radar/tingwu/sync', async () => {
     return await syncCompletedTingwuJobs();
+  });
+
+  // ===== 9. 视频发布 AI 按平台定制标题、正文与标签 =====
+  app.get('/api/publish/script-sources', async () => {
+    const db = getDb();
+    const transcripts = db
+      .prepare(`
+        SELECT id, title, platform, author, transcript, discovered_at
+        FROM contents
+        WHERE transcript IS NOT NULL AND length(transcript) >= 30
+        ORDER BY discovered_at DESC
+        LIMIT 20
+      `)
+      .all();
+    const saved = db
+      .prepare(`
+        SELECT id, title, core_angle, notes, source_content_id, updated_at
+        FROM topic_board
+        ORDER BY updated_at DESC
+        LIMIT 20
+      `)
+      .all();
+    return { transcripts, saved };
+  });
+
+  app.post<{
+    Body: {
+      script: string;
+      platforms?: number[];
+      styleHint?: string;
+      forceRefresh?: boolean;
+    };
+  }>('/api/publish/ai-generate', async (req, reply) => {
+    const script = String(req.body?.script || '').trim();
+    if (script.length < 8) {
+      return reply.code(400).send({ error: '请先粘贴一段口播稿、文案或核心思路（至少 8 个字）' });
+    }
+    const styleHint = String(req.body?.styleHint || '').trim();
+
+    try {
+      const { data, cached, model } = await callAiJsonWithCache<{
+        douyin?: { title?: string; description?: string; tags?: string[]; tip?: string };
+        xiaohongshu?: { title?: string; description?: string; tags?: string[]; tip?: string };
+        channels?: { title?: string; description?: string; tags?: string[]; tip?: string };
+        kuaishou?: { title?: string; description?: string; tags?: string[]; tip?: string };
+      }>({
+        purpose: 'publish_platform_copy',
+        system: `你是精通抖音、小红书、微信视频号、快手四大短视频平台算法的爆款标题与标签策划总监。
+请根据用户提供的视频文案/口播稿，为 4 个平台分别量身定制最容易起量的标题、简短正文和话题标签。
+严格要求：
+1. 抖音（douyin）：抓眼球强钩子/反常识短标题（15~28字，不要堆emoji），简短引导互动正文（30~60字），4~5个精准搜索+热门标签。
+2. 小红书（xiaohongshu）：种草感/痛点直击标题（12~20字，自然带1~2个emoji），分段干货正文+收藏引导（60~120字），5~6个高搜索标签。
+3. 微信视频号（channels）：克制、有信息量、适合转发朋友圈/微信群的稳重干货标题（15~28字），简洁要点正文（40~80字），3~5个标签。
+4. 快手（kuaishou）：大白话、接地气、直接给结果的老铁风格标题（15~28字），简短正文（30~60字），4~5个标签。
+5. 所有 tags 数组元素只写纯词（不要带 # 号和空格）。只输出严格 JSON，不要额外解释。`,
+        user: `${styleHint ? `额外风格要求：${styleHint}\n\n` : ''}视频文案 / 口播稿内容：
+${script.slice(0, 4500)}
+
+请返回 JSON：
+{
+  "douyin": { "title": "", "description": "", "tags": [""], "tip": "一句起量原因" },
+  "xiaohongshu": { "title": "", "description": "", "tags": [""], "tip": "一句起量原因" },
+  "channels": { "title": "", "description": "", "tags": [""], "tip": "一句起量原因" },
+  "kuaishou": { "title": "", "description": "", "tags": [""], "tip": "一句起量原因" }
+}`,
+        temperature: 0.45,
+        maxTokens: 1600,
+        forceRefresh: Boolean(req.body?.forceRefresh),
+      });
+
+      const norm = (obj?: { title?: string; description?: string; tags?: string[]; tip?: string }) => ({
+        title: String(obj?.title || '').trim(),
+        description: String(obj?.description || '').trim(),
+        tags: Array.isArray(obj?.tags)
+          ? obj!.tags.map((t) => String(t).replace(/^#+/, '').trim()).filter(Boolean).slice(0, 8)
+          : [],
+        tip: String(obj?.tip || '').trim(),
+      });
+
+      return {
+        ok: true,
+        cached,
+        model,
+        byPlatform: {
+          3: norm(data.douyin), // 抖音
+          1: norm(data.xiaohongshu), // 小红书
+          2: norm(data.channels), // 微信视频号
+          4: norm(data.kuaishou), // 快手
+        },
+      };
+    } catch (err) {
+      return reply.code(500).send({ error: (err as Error).message });
+    }
+  });
+
+  // ===== 10. 独立清爽「评论采集」工作台接口（单端口 18910 内完成） =====
+  app.get('/api/comments/jobs', async () => {
+    return {
+      status: getMediaCrawlerStatus(),
+      jobs: listCommentCrawlJobs(),
+    };
+  });
+
+  app.get<{ Params: { id: string } }>('/api/comments/jobs/:id', async (req, reply) => {
+    const job = getCommentCrawlJob(req.params.id);
+    if (!job) return reply.code(404).send({ error: '采集记录不存在' });
+    return { job };
+  });
+
+  app.post<{
+    Body: {
+      platform: 'douyin' | 'bilibili' | 'xiaohongshu' | 'kuaishou';
+      mode: 'detail' | 'search' | 'creator';
+      input: string;
+      maxComments?: number;
+      showBrowser?: boolean;
+    };
+  }>('/api/comments/crawl', async (req, reply) => {
+    const b = req.body || ({} as Record<string, unknown>);
+    const res = startStandaloneCommentCrawl({
+      platform: b.platform || 'douyin',
+      mode: b.mode || 'detail',
+      input: String(b.input || ''),
+      maxComments: b.maxComments ? Number(b.maxComments) : 30,
+      showBrowser: Boolean(b.showBrowser),
+    });
+    if (!res.started) return reply.code(400).send(res);
+    return res;
+  });
+
+  app.post<{ Params: { id: string } }>('/api/comments/jobs/:id/analyze', async (req, reply) => {
+    try {
+      const summary = await analyzeCommentCrawlJob(req.params.id);
+      return { ok: true, summary };
+    } catch (err) {
+      return reply.code(500).send({ error: (err as Error).message });
+    }
+  });
+
+  app.delete<{ Params: { id: string } }>('/api/comments/jobs/:id', async (req) => {
+    return { ok: deleteCommentCrawlJob(req.params.id) };
   });
 }

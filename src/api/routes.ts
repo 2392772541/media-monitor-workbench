@@ -551,6 +551,20 @@ export function registerRoutes(app: FastifyInstance, shutdownHandler: () => Prom
     return cancelCollection(Number(req.params.id));
   });
 
+  app.post<{ Params: { id: string } }>('/api/tasks/:id/retry', async (req, reply) => {
+    const id = Number(req.params.id);
+    const db = getDb();
+    const row = db.prepare('SELECT source_id FROM collections WHERE id = ?').get(id) as { source_id: number } | undefined;
+    if (!row) return reply.code(404).send({ error: '任务记录不存在' });
+    return enqueueCollection(row.source_id, 'manual');
+  });
+
+  app.delete('/api/tasks/failed', async () => {
+    const db = getDb();
+    const res = db.prepare("DELETE FROM collections WHERE status IN ('failed', 'cancelled')").run();
+    return { ok: true, deleted: res.changes };
+  });
+
   app.get('/api/settings', async () => {
     const db = getDb();
     const rows = db.prepare('SELECT key, value FROM app_settings').all() as Array<{ key: string; value: string }>;
