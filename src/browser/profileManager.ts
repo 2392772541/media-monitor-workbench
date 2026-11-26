@@ -177,6 +177,8 @@ export async function withHeadlessContext<T>(
       executablePath,
       headless,
       viewport: { width: 1280, height: 800 },
+      userAgent:
+        'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/134.0.0.0 Safari/537.36',
       args: ['--no-first-run', '--no-default-browser-check', '--disable-gpu'],
     });
     lockEntry.context = context;

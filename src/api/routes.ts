@@ -2,7 +2,7 @@ import type { FastifyInstance } from 'fastify';
 import { PATHS, PLATFORM_PROFILES, PORT, resolveChromiumExecutable, type ProfilePlatform } from '../config.js';
 import { backupDatabase, getDb } from '../db/database.js';
 import { getAdapter, listAdapters } from '../adapters/index.js';
-import { recognizeSourceUrl } from '../adapters/urlRecognizer.js';
+import { recognizeSourceUrl, resolveShortSourceUrl } from '../adapters/urlRecognizer.js';
 import {
   closeLoginWindow,
   listBrowserProfilesWithRuntime,
@@ -114,7 +114,12 @@ export function registerRoutes(app: FastifyInstance, shutdownHandler: () => Prom
   app.post<{ Body: { url: string; platform?: string } }>('/api/sources/probe', async (req, reply) => {
     const rawUrl = (req.body?.url || '').trim();
     if (!rawUrl) return reply.code(400).send({ error: '请输入有效链接' });
-    const recognized = recognizeSourceUrl(rawUrl);
+    const initial = recognizeSourceUrl(rawUrl);
+    if (!initial.valid) {
+      return reply.code(400).send({ error: '未识别到有效网址，请粘贴完整的博主主页链接或抖音分享口令' });
+    }
+    const { resolvedUrl } = await resolveShortSourceUrl(initial.normalizedUrl);
+    const recognized = recognizeSourceUrl(resolvedUrl);
     const platform = req.body?.platform || recognized.platform;
     const adapter = getAdapter(platform);
     const availability = await adapter.checkAvailability(recognized.normalizedUrl);
@@ -153,18 +158,41 @@ export function registerRoutes(app: FastifyInstance, shutdownHandler: () => Prom
     const rawUrl = (req.body?.url || '').trim();
     if (!rawUrl) return reply.code(400).send({ error: '主页链接不能为空' });
 
-    const recognized = recognizeSourceUrl(rawUrl);
+    const initial = recognizeSourceUrl(rawUrl);
+    if (!initial.valid) {
+      return reply.code(400).send({ error: '未识别到有效网址，请粘贴完整的博主主页链接或抖音分享口令' });
+    }
+    const { resolvedUrl } = await resolveShortSourceUrl(initial.normalizedUrl);
+    const recognized = recognizeSourceUrl(resolvedUrl);
     const platform = (req.body.platform || recognized.platform).trim();
     const sourceType = (req.body.source_type || recognized.sourceType).trim();
     const adapter = getAdapter(platform);
     const probe = await adapter.checkAvailability(recognized.normalizedUrl);
 
-    let finalName = (req.body.name || '').trim();
-    if (!finalName) {
-      finalName = probe.detectedTitle || new URL(recognized.normalizedUrl).hostname;
+    const db = getDb();
+    // 若已存在同规范 URL 的对标博主，直接触发一次最新抓取而不重复建多条
+    const existing = db
+      .prepare("SELECT * FROM sources WHERE url = ? AND source_type != 'hot_board' LIMIT 1")
+      .get(recognized.normalizedUrl) as { id: number; name: string } | undefined;
+    if (existing) {
+      let queuedTask = null;
+      if (req.body.check_immediately !== false) {
+        queuedTask = enqueueCollection(existing.id, 'manual');
+      }
+      return { source: existing, probe, queuedTask, deduplicated: true };
     }
 
-    const db = getDb();
+    let finalName = (req.body.name || '').trim();
+    if (!finalName) {
+      let fallbackHost = recognized.normalizedUrl;
+      try {
+        fallbackHost = new URL(recognized.normalizedUrl).hostname;
+      } catch {
+        // ignore
+      }
+      finalName = probe.detectedTitle || fallbackHost;
+    }
+
     const now = new Date().toISOString();
     // 读取用户在系统设置中配置的默认采集频率
     const settingKey = platform === 'website' || platform === 'rss' ? 'default_website_interval' : 'default_creator_interval';

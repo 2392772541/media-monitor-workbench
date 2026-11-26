@@ -152,7 +152,7 @@ export function CreatorsPage({
     }
     setAdding(true);
     try {
-      const res = await apiRequest<{ source: CreatorMonitorRow }>('/api/sources', {
+      const res = await apiRequest<{ source: CreatorMonitorRow; deduplicated?: boolean }>('/api/sources', {
         method: 'POST',
         body: JSON.stringify({
           url: newUrl.trim(),
@@ -161,12 +161,24 @@ export function CreatorsPage({
           interval_minutes: 120,
         }),
       });
-      onToast(`已添加「${res.source.name}」，正在抓取最新作品...`);
+      onToast(
+        res.deduplicated
+          ? `「${res.source.name}」已在监控列表，正在为您刷新最新作品...`
+          : `已添加「${res.source.name}」，正在抓取博主真名与最新作品（约 5～8 秒自动刷新）...`
+      );
       setNewUrl('');
       setNewName('');
-      await apiRequest(`/api/sources/${res.source.id}/run`, { method: 'POST' }).catch(() => {});
       await loadList();
       setSelectedId(res.source.id);
+      // 采集完成后自动刷新列表与作品墙，无需手动 F5
+      setTimeout(() => {
+        void loadList();
+        void loadAnalytics(res.source.id);
+      }, 5500);
+      setTimeout(() => {
+        void loadList();
+        void loadAnalytics(res.source.id);
+      }, 11000);
     } catch (err) {
       onToast((err as Error).message);
     } finally {
@@ -243,7 +255,7 @@ export function CreatorsPage({
           <input
             className="input"
             style={{ flex: '2 1 280px' }}
-            placeholder="贴对标博主主页链接（抖音 / B站 / YouTube / 行业网站 RSS）..."
+            placeholder="贴抖音/B站/YouTube博主链接，或直接贴抖音分享口令..."
             value={newUrl}
             onChange={(e) => setNewUrl(e.target.value)}
             onKeyDown={(e) => e.key === 'Enter' && void handleAddCreator()}

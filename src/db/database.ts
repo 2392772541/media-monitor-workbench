@@ -206,25 +206,40 @@ function inferContentType(platform: string, explicit?: string): 'video' | 'artic
   return 'article';
 }
 
-// 更新监控对象（博主）的真实档案字段（粉丝数、头像、简介）
+// 更新监控对象（博主）的真实档案字段（昵称自动替换域名占位、粉丝数、头像、简介）
 export function updateSourceAuthorProfile(
   sourceId: number,
-  profile?: { followerCount?: number | null; avatarUrl?: string; bio?: string }
+  profile?: { name?: string; followerCount?: number | null; avatarUrl?: string; bio?: string }
 ): void {
   if (!profile) return;
   const db = getDb();
+  const realName = (profile.name || '').trim();
   const hasFollower = typeof profile.followerCount === 'number' && Number.isFinite(profile.followerCount);
   const avatar = (profile.avatarUrl || '').trim();
   const bio = (profile.bio || '').trim();
-  if (!hasFollower && !avatar && !bio) return;
+  if (!realName && !hasFollower && !avatar && !bio) return;
+
+  // 若当前名称只是域名占位（如 www.douyin.com / v.douyin.com / space.bilibili.com），自动替换为博主真名
+  let nextName: string | null = null;
+  if (realName) {
+    const cur = db.prepare('SELECT name FROM sources WHERE id = ?').get(sourceId) as { name?: string } | undefined;
+    const curName = (cur?.name || '').trim();
+    if (!curName || /^(?:https?:\/\/)?[\w.-]+\.(?:com|cn|tv|net|org|io)(?:\/.*)?$/i.test(curName)) {
+      nextName = realName;
+    }
+  }
+
   db.prepare(`
     UPDATE sources SET
+      name = CASE WHEN ? IS NOT NULL THEN ? ELSE name END,
       follower_count = CASE WHEN ? IS NOT NULL THEN ? ELSE follower_count END,
       avatar_url = CASE WHEN ? != '' THEN ? ELSE avatar_url END,
       bio = CASE WHEN ? != '' THEN ? ELSE bio END,
       updated_at = ?
     WHERE id = ?
   `).run(
+    nextName,
+    nextName,
     hasFollower ? profile.followerCount! : null,
     hasFollower ? profile.followerCount! : null,
     avatar,

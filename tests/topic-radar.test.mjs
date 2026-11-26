@@ -13,13 +13,19 @@ const { recognizeSourceUrl } = await import('../dist/adapters/urlRecognizer.js')
 const { computeEngagementScore, recomputeSourceBreakout } = await import('../dist/services/breakoutService.js');
 const { titleSimilarity, findDuplicateTopics } = await import('../dist/services/topicBoardService.js');
 
-test('URL 识别正确支持 B站空间与视频链接', () => {
+test('URL 识别正确支持 B站空间与视频链接以及抖音带中文分享口令', () => {
   const space = recognizeSourceUrl('https://space.bilibili.com/946974');
   assert.equal(space.platform, 'bilibili');
   assert.equal(space.sourceType, 'creator');
 
   const bv = recognizeSourceUrl('https://www.bilibili.com/video/BV1xx411c7mD');
   assert.equal(bv.platform, 'bilibili');
+
+  const dyShare = recognizeSourceUrl('长按复制此条消息，打开抖音搜索，查看TA的更多作品。 https://v.douyin.com/kyLaUI9qlg4/');
+  assert.equal(dyShare.valid, true);
+  assert.equal(dyShare.platform, 'douyin');
+  assert.equal(dyShare.sourceType, 'creator');
+  assert.equal(dyShare.normalizedUrl, 'https://v.douyin.com/kyLaUI9qlg4/');
 });
 
 test('潜力爆款基线引擎：样本不足时不虚构倍数，满 3 条后准确识别异常爆款', () => {
