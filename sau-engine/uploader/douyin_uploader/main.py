@@ -50,14 +50,17 @@ def _build_login_result(success: bool, status: str, message: str, account_file: 
 
 def _douyin_launch_kwargs(headless: bool) -> dict:
     # 国内平台直连绕过系统代理，减少异地 IP 触发滑块与风控
+    args = [
+        "--no-proxy-server",
+        "--lang=zh-CN",
+        "--no-first-run",
+        "--no-default-browser-check",
+    ]
+    if not headless:
+        args.append("--window-size=1440,900")
     kwargs: dict = {
         "headless": headless,
-        "args": [
-            "--no-proxy-server",
-            "--lang=zh-CN",
-            "--no-first-run",
-            "--no-default-browser-check",
-        ],
+        "args": args,
     }
     if LOCAL_CHROME_PATH and os.path.exists(LOCAL_CHROME_PATH):
         kwargs["executable_path"] = LOCAL_CHROME_PATH
@@ -170,7 +173,6 @@ async def _is_douyin_login_completed(page: Page) -> bool:
         page.get_by_text("二维码失效", exact=True).first,
         page.get_by_text("二维码已过期", exact=True).first,
         page.get_by_text("安全验证").first,
-        page.get_by_text("获取验证码", exact=True).first,
         page.get_by_role("img", name="二维码").first,
     ]
 
@@ -194,10 +196,12 @@ async def _wait_for_douyin_login(
     qrcode_callback=None,
     poll_interval: int = 3,
     max_checks: int = 90,
+    qr_state: dict | None = None,
 ) -> dict:
     qrcode_path = Path(qrcode_info["image_path"]) if qrcode_info.get("image_path") else None
     last_logged_url = ""
     last_status_hint = ""
+    last_qr_api_status = ""
     for _ in range(max_checks):
         if page.is_closed():
             return _build_login_result(False, "closed", "登录浏览器窗口已关闭，请重新扫码", account_file, qrcode_info, "")
@@ -215,14 +219,34 @@ async def _wait_for_douyin_login(
                 return _build_login_result(True, "success", "抖音扫码登录成功", account_file, qrcode_info, cur_url)
             douyin_logger.warning(_msg("⏳", "检测到页面跳转但登录态尚未就绪，继续等待验证完成"))
 
-        # 检测是否出现已扫码待确认或二次验证弹窗，及时同步给前端提示
+        # 优先根据抖音真实扫码轮询接口 check_qrconnect 的返回状态反馈进度
+        if qr_state:
+            api_status = str(qr_state.get("status") or "")
+            api_desc = str(qr_state.get("description") or "")
+            api_err = int(qr_state.get("error_code") or 0)
+            state_sig = f"{api_status}|{api_err}|{api_desc}"
+            if state_sig != last_qr_api_status and (api_status not in ("", "new") or api_err != 0):
+                last_qr_api_status = state_sig
+                douyin_logger.info(_msg("📡", f"抖音扫码接口状态变更: status={api_status}, error_code={api_err}, desc={api_desc}"))
+                hint = ""
+                if api_status == "scanned":
+                    hint = "手机已扫码，请在抖音 App 上点击“确认登录”"
+                elif api_status == "confirmed":
+                    hint = "手机已确认登录，正在跳转同步（若弹出验证请在浏览器窗口完成）"
+                elif api_status == "expired":
+                    hint = "二维码已过期，正在自动刷新..."
+                elif api_err != 0 and api_desc:
+                    hint = f"抖音返回提示：{api_desc}（请在弹出的浏览器窗口处理）"
+                if hint and hint != last_status_hint:
+                    last_status_hint = hint
+                    await _emit_qrcode_callback(qrcode_callback, {"status_message": hint})
+
+        # 仅检测真正的二次安全验证弹窗（避开初始页面右侧自带的“获取验证码”按钮）
         try:
-            body_preview = await page.evaluate("() => (document.body && document.body.innerText ? document.body.innerText.slice(0, 600) : '')")
+            body_preview = await page.evaluate("() => (document.body && document.body.innerText ? document.body.innerText.slice(0, 800) : '')")
             hint = ""
-            if any(k in body_preview for k in ("安全验证", "短信验证", "获取验证码", "身份验证", "滑块", "拖动下方滑块", "验证手机号")):
-                hint = "检测到抖音弹出安全验证/短信验证，请在弹出的浏览器窗口内完成验证"
-            elif any(k in body_preview for k in ("扫描成功", "扫码成功", "已扫码", "请在手机上确认", "确认登录")):
-                hint = "手机已扫码，请在抖音 App 上点击“确认登录”"
+            if any(k in body_preview for k in ("为了你的账号安全", "安全验证", "请完成安全验证", "身份验证", "拖动下方滑块", "拖动滑块", "点击完成拼图", "手机验证码验证")):
+                hint = "检测到抖音弹出安全验证，请在弹出的浏览器窗口内完成验证"
             if hint and hint != last_status_hint:
                 last_status_hint = hint
                 douyin_logger.info(_msg("📢", hint))
@@ -230,19 +254,39 @@ async def _wait_for_douyin_login(
         except Exception:
             pass
 
-        for expired_text in ("二维码失效", "二维码已过期", "已失效"):
+        expired_by_api = bool(qr_state and qr_state.get("status") == "expired")
+        for expired_text in ("二维码失效", "二维码已过期", "已失效", "点击刷新"):
             try:
                 expired_box = page.get_by_text(expired_text, exact=True).locator("..").first
                 if await expired_box.count() and await expired_box.is_visible():
                     douyin_logger.warning(_msg("😵", "二维码失效了，小人马上去刷新"))
                     await expired_box.click()
-                    await asyncio.sleep(1)
+                    await asyncio.sleep(1.5)
                     qrcode_info = await _save_douyin_qrcode(page, account_file, qrcode_path, qrcode_callback=qrcode_callback)
                     qrcode_path = Path(qrcode_info["image_path"])
                     last_status_hint = ""
+                    last_qr_api_status = ""
+                    if qr_state:
+                        qr_state["status"] = "new"
+                    expired_by_api = False
                     break
             except Exception:
                 continue
+
+        if expired_by_api:
+            # 接口已返回 expired 但页面文字未匹配时，尝试直接点击二维码区域刷新
+            try:
+                qr_el = page.get_by_role("img", name="二维码").first
+                if await qr_el.count():
+                    await qr_el.click()
+                    await asyncio.sleep(1.5)
+                    qrcode_info = await _save_douyin_qrcode(page, account_file, qrcode_path, qrcode_callback=qrcode_callback)
+                    qrcode_path = Path(qrcode_info["image_path"])
+                    last_status_hint = ""
+                    last_qr_api_status = ""
+                    qr_state["status"] = "new"
+            except Exception:
+                pass
 
         await asyncio.sleep(poll_interval)
 
@@ -258,14 +302,35 @@ async def douyin_cookie_gen(
 ):
     async with async_playwright() as playwright:
         browser = await playwright.chromium.launch(**_douyin_launch_kwargs(headless=headless))
-        context = await browser.new_context()
+        context = await browser.new_context(viewport={"width": 1440, "height": 900} if not headless else None)
         context = await set_init_script(context)
         qrcode_path = None
         qrcode_info = {"image_path": "", "image_data_url": ""}
+        qr_state: dict = {"status": "new", "error_code": 0, "description": ""}
         result = _build_login_result(False, "failed", "抖音登录失败", account_file)
         try:
             page = await context.new_page()
+
+            async def _handle_qr_response(resp):
+                try:
+                    if "/passport/web/check_qrconnect/" not in (resp.url or ""):
+                        return
+                    payload = await resp.json()
+                    data = payload.get("data") if isinstance(payload, dict) else None
+                    if isinstance(data, dict):
+                        qr_state["status"] = data.get("status") or qr_state["status"]
+                        qr_state["error_code"] = data.get("error_code") or 0
+                        qr_state["description"] = data.get("description") or ""
+                except Exception:
+                    pass
+
+            page.on("response", lambda r: asyncio.create_task(_handle_qr_response(r)))
             await page.goto("https://creator.douyin.com/", wait_until="domcontentloaded", timeout=30000)
+            if not headless:
+                try:
+                    await page.bring_to_front()
+                except Exception:
+                    pass
             try:
                 qrcode_info = await _save_douyin_qrcode(page, account_file, qrcode_callback=qrcode_callback)
                 qrcode_path = Path(qrcode_info["image_path"])
@@ -286,6 +351,7 @@ async def douyin_cookie_gen(
                 qrcode_callback=qrcode_callback,
                 poll_interval=poll_interval,
                 max_checks=max_checks,
+                qr_state=qr_state,
             )
         except Exception as exc:
             current_url = ""

@@ -128,6 +128,27 @@ export function ContentDrawer({
     void loadDetail(target.contentId);
   }, [target?.contentId, target?.initialTab]);
 
+  // 当通义听悟正在后台抽音频/转写时，每 4 秒静默刷新一次进度直到出稿
+  useEffect(() => {
+    if (!target || !detail) return;
+    const st = detail.content.transcript_status;
+    const jobSt = detail.tingwuJobs[0]?.status;
+    const inFlight = st === 'transcribing' || jobSt === 'downloading' || jobSt === 'uploading';
+    if (!inFlight) return;
+    const timer = setInterval(() => {
+      void apiRequest<DetailResp>(`/api/radar/intel/${target.contentId}/detail`)
+        .then((d) => {
+          setDetail(d);
+          if (d.content.transcript_status === 'done') {
+            onToast('口播逐字稿已转写完成！');
+            onChanged();
+          }
+        })
+        .catch(() => {});
+    }, 4000);
+    return () => clearInterval(timer);
+  }, [target?.contentId, detail?.content.transcript_status, detail?.tingwuJobs?.[0]?.status]);
+
   // 支持按 Esc 快捷关闭抽屉
   useEffect(() => {
     if (!target) return;
@@ -222,6 +243,21 @@ export function ContentDrawer({
       await loadDetail(content.id);
       onToast('已同步通义听悟最新转写状态');
       onChanged();
+    } catch (err) {
+      onToast((err as Error).message);
+    } finally {
+      setBusy(null);
+    }
+  };
+
+  // 弹出通义听悟扫码登录窗口
+  const handleTingwuLogin = async () => {
+    setBusy('tingwu-login');
+    try {
+      const res = await apiRequest<{ started: boolean; message: string }>('/api/radar/tingwu/login', {
+        method: 'POST',
+      });
+      onToast(res.message);
     } catch (err) {
       onToast((err as Error).message);
     } finally {
@@ -443,18 +479,22 @@ export function ContentDrawer({
                   <strong style={{ color: content.transcript_status === 'done' ? 'var(--success)' : 'var(--text)' }}>
                     {content.transcript_status === 'done'
                       ? '已完成听悟转写'
-                      : content.transcript_status === 'running' || content.transcript_status === 'queued'
-                        ? '通义听悟转写中...'
-                        : '暂未转写'}
+                      : detail?.tingwuJobs?.[0]?.status === 'downloading'
+                        ? '第 1/2 步：正在抽取纯音频...'
+                        : detail?.tingwuJobs?.[0]?.status === 'uploading' || content.transcript_status === 'transcribing'
+                          ? '第 2/2 步：已送通义听悟转写中（自动刷新）...'
+                          : content.transcript_status === 'failed'
+                            ? '上次转写中断'
+                            : '暂未转写'}
                   </strong>
                 </span>
                 <div style={{ display: 'flex', gap: 6, flexWrap: 'wrap' }}>
                   <button
                     className="btn btn-primary btn-sm"
-                    disabled={busy === 'transcribe'}
+                    disabled={busy === 'transcribe' || content.transcript_status === 'transcribing'}
                     onClick={() => void handleTranscribe()}
                   >
-                    <Mic size={13} /> {busy === 'transcribe' ? '提交中...' : '通义听悟转口播稿'}
+                    <Mic size={13} /> {busy === 'transcribe' || content.transcript_status === 'transcribing' ? '转写进行中...' : '通义听悟转口播稿'}
                   </button>
                   <button
                     className="btn btn-secondary btn-sm"
@@ -472,8 +512,17 @@ export function ContentDrawer({
               </div>
 
               {detail?.tingwuJobs?.[0]?.error_message && (
-                <div className="alert-banner-warn" style={{ marginBottom: 0 }}>
-                  上次转写提示：{detail.tingwuJobs[0].error_message}
+                <div className="alert-banner-warn" style={{ marginBottom: 0, display: 'flex', justifyContent: 'space-between', alignItems: 'center', gap: 8, flexWrap: 'wrap' }}>
+                  <span>{detail.tingwuJobs[0].error_message.replace(/^LOGIN_REQUIRED:\s*/, '')}</span>
+                  {detail.tingwuJobs[0].error_message.includes('登录') && (
+                    <button
+                      className="btn btn-primary btn-sm"
+                      disabled={busy === 'tingwu-login'}
+                      onClick={() => void handleTingwuLogin()}
+                    >
+                      扫码登录通义听悟
+                    </button>
+                  )}
                 </div>
               )}
 
