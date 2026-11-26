@@ -260,6 +260,7 @@ export interface CockpitData {
     latest_views: number | null;
     latest_likes: number | null;
     latest_comments: number | null;
+    latest_favorites?: number | null;
     published_at: string | null;
     discovered_at: string;
   }>;

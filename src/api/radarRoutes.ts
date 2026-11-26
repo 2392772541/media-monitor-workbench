@@ -123,10 +123,10 @@ export function registerRadarRoutes(app: FastifyInstance): void {
       `)
       .all(activeAccount.id);
 
-    // 对标博主真爆款 TOP 8（严格筛选 >= 1.6x 或高爆款分，附带封面图与收藏状态）
-    const breakouts = db
+    // 对标博主真爆款：按「每博主轮询雨露均沾」排位，防止单个博主霸占全部首屏席位
+    const rawBreakouts = db
       .prepare(`
-        SELECT c.id, c.title, c.platform, c.author, c.canonical_url, c.cover_url, c.published_at, c.discovered_at,
+        SELECT c.id, c.source_id, c.title, c.platform, c.author, c.canonical_url, c.cover_url, c.published_at, c.discovered_at,
                c.breakout_score, c.breakout_ratio, c.growth_rate_per_hour, c.breakout_reason,
                c.transcript_status,
                s.name AS source_name, s.follower_count,
@@ -134,6 +134,7 @@ export function registerRadarRoutes(app: FastifyInstance): void {
                (SELECT views FROM content_metrics m WHERE m.content_id = c.id ORDER BY captured_at DESC LIMIT 1) AS latest_views,
                (SELECT likes FROM content_metrics m WHERE m.content_id = c.id ORDER BY captured_at DESC LIMIT 1) AS latest_likes,
                (SELECT comments FROM content_metrics m WHERE m.content_id = c.id ORDER BY captured_at DESC LIMIT 1) AS latest_comments,
+               (SELECT favorites FROM content_metrics m WHERE m.content_id = c.id ORDER BY captured_at DESC LIMIT 1) AS latest_favorites,
                (SELECT COUNT(*) FROM content_comments cm WHERE cm.content_id = c.id) AS comment_rows,
                (SELECT id FROM topic_board tb WHERE tb.source_content_id = c.id LIMIT 1) AS saved_board_id
         FROM contents c
@@ -142,9 +143,33 @@ export function registerRadarRoutes(app: FastifyInstance): void {
         WHERE s.source_type != 'hot_board'
           AND (c.breakout_ratio >= 1.6 OR c.breakout_score >= 68)
         ORDER BY COALESCE(c.breakout_ratio, 0) DESC, COALESCE(c.breakout_score, 0) DESC, c.discovered_at DESC
-        LIMIT 8
+        LIMIT 36
       `)
-      .all();
+      .all() as Array<Record<string, unknown>>;
+
+    // 按博主分组后轮询抽取（第 1 轮各取每个博主头号爆款，第 2 轮各取次爆，依次类推）
+    const bySource = new Map<number, Array<Record<string, unknown>>>();
+    for (const row of rawBreakouts) {
+      const sid = Number(row.source_id || 0);
+      const bucket = bySource.get(sid);
+      if (bucket) bucket.push(row);
+      else bySource.set(sid, [row]);
+    }
+    const buckets = Array.from(bySource.values());
+    const breakouts: Array<Record<string, unknown>> = [];
+    let round = 0;
+    while (breakouts.length < 16) {
+      let added = false;
+      for (const bucket of buckets) {
+        if (round < bucket.length) {
+          breakouts.push(bucket[round]);
+          added = true;
+          if (breakouts.length >= 16) break;
+        }
+      }
+      if (!added) break;
+      round++;
+    }
 
     // 今日平台热榜速递（严格只取各榜单最新一期，彻底杜绝重复 #1）
     const latestHotSql = `

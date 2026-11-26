@@ -48,6 +48,8 @@ export function CockpitPage({
   const [loading, setLoading] = useState(true);
   const [refreshing, setRefreshing] = useState(false);
   const [trendRange, setTrendRange] = useState<'7d' | '14d'>('7d');
+  const [boomPlatform, setBoomPlatform] = useState<string>('all');
+  const [expandBreakouts, setExpandBreakouts] = useState<boolean>(false);
 
   const load = async () => {
     try {
@@ -154,7 +156,11 @@ export function CockpitPage({
   }
   if (!data) return null;
 
-  const breakouts = data.breakouts || [];
+  const allBreakouts = data.breakouts || [];
+  const breakoutPlatforms = Array.from(new Set(allBreakouts.map((b) => b.platform)));
+  const filteredBreakouts =
+    boomPlatform === 'all' ? allBreakouts : allBreakouts.filter((b) => b.platform === boomPlatform);
+  const visibleBreakouts = expandBreakouts ? filteredBreakouts.slice(0, 12) : filteredBreakouts.slice(0, 4);
   const douyinHot = (data.douyinHot || data.hotTop?.filter((h) => h.platform === 'douyin') || []).slice(0, 10);
   const bilibiliHot = (data.bilibiliHot || data.hotTop?.filter((h) => h.platform === 'bilibili') || []).slice(0, 6);
   const trendSeries = trendRange === '14d' && data.trend14d?.length ? data.trend14d : data.trend7d || [];
@@ -190,29 +196,55 @@ export function CockpitPage({
         </div>
       </div>
 
-      {/* ===== 第一层：🔥 对标博主正在爆发（4 列 16:9 真封面大卡，零简介废话） ===== */}
+      {/* ===== 第一层：🔥 对标博主正在爆发（按博主轮询防霸屏，支持平台快筛与展开全部） ===== */}
       <section className="panel-card">
         <div className="panel-head">
           <div className="panel-title">
             <Flame size={17} color="#ea580c" />
             <span>对标博主 · 正在爆发</span>
-            <span className="badge badge-amber">仅展示 ≥1.6x 真爆款</span>
+            <span className="badge badge-amber">各博主轮流展示 · ≥1.6x</span>
           </div>
-          <div style={{ display: 'flex', alignItems: 'center', gap: 10 }}>
-            <span style={{ fontSize: 12, color: 'var(--text-muted)' }}>点任意封面直接看「看点 / 口播稿 / 热评」</span>
+          <div style={{ display: 'flex', alignItems: 'center', gap: 8, flexWrap: 'wrap' }}>
+            {breakoutPlatforms.length > 1 && (
+              <div className="pill-group">
+                <button
+                  className={`pill-btn ${boomPlatform === 'all' ? 'active' : ''}`}
+                  onClick={() => setBoomPlatform('all')}
+                >
+                  全部 ({allBreakouts.length})
+                </button>
+                {breakoutPlatforms.map((p) => (
+                  <button
+                    key={p}
+                    className={`pill-btn ${boomPlatform === p ? 'active' : ''}`}
+                    onClick={() => setBoomPlatform(p)}
+                  >
+                    {PLATFORM_LABELS[p] || p} ({allBreakouts.filter((x) => x.platform === p).length})
+                  </button>
+                ))}
+              </div>
+            )}
+            {filteredBreakouts.length > 4 && (
+              <button
+                className="btn btn-secondary btn-sm"
+                onClick={() => setExpandBreakouts((v) => !v)}
+              >
+                {expandBreakouts ? '收起' : `展开全部 (${filteredBreakouts.length})`}
+              </button>
+            )}
             <button className="btn btn-secondary btn-sm" onClick={() => onNavigate('creators')}>
               博主走势 <ArrowRight size={13} />
             </button>
           </div>
         </div>
 
-        {breakouts.length === 0 ? (
+        {visibleBreakouts.length === 0 ? (
           <div style={{ padding: '28px 12px', textAlign: 'center', color: 'var(--text-muted)', fontSize: 13 }}>
             暂未检测到 ≥1.6x 异常爆款。去「对标博主」添加同行并抓取作品后会自动显示在这里。
           </div>
         ) : (
           <div className="vcard-grid-4">
-            {breakouts.slice(0, 4).map((b) => (
+            {visibleBreakouts.map((b) => (
               <VideoCard
                 key={b.id}
                 title={b.title}
@@ -222,7 +254,11 @@ export function CockpitPage({
                 badgeText={b.breakout_ratio ? `🔥 ${b.breakout_ratio}x 爆` : '🔥 爆款'}
                 badgeTone="boom"
                 playLabel={b.latest_views != null ? fmtNum(b.latest_views) : undefined}
-                rightMetricLabel={b.latest_likes != null ? `👍 ${fmtNum(b.latest_likes)}` : undefined}
+                rightMetricLabel={
+                  b.latest_likes != null
+                    ? `👍 ${fmtNum(b.latest_likes)}${b.latest_views == null && b.latest_favorites != null ? ` · 藏 ${fmtNum(b.latest_favorites)}` : ''}`
+                    : undefined
+                }
                 starred={Boolean(b.saved_board_id)}
                 onClick={() => onOpenContent(b.id, 'point', b.saved_board_id)}
                 onToggleStar={(e) => void handleToggleBreakoutStar(b, e)}
