@@ -1,16 +1,8 @@
 import { useEffect, useState } from 'react';
-import {
-  Flame,
-  RefreshCw,
-  ExternalLink,
-  Search,
-  Star,
-  Mic,
-  MessageSquareText,
-  BarChart3,
-} from 'lucide-react';
-import { apiRequest, fmtTime, PLATFORM_LABELS } from '../api';
+import { RefreshCw, Search, Star, LayoutGrid } from 'lucide-react';
+import { apiRequest, PLATFORM_LABELS } from '../api';
 import type { DrawerTab } from '../components/ContentDrawer';
+import { VideoCard } from '../components/VideoCard';
 import type { HotBoardItem } from '../types';
 
 interface HotBoardPageProps {
@@ -20,13 +12,7 @@ interface HotBoardPageProps {
   onToast: (msg: string) => void;
 }
 
-const PLATFORM_COLORS: Record<string, string> = {
-  bilibili: '#4f46e5',
-  douyin: '#e11d48',
-  youtube: '#dc2626',
-  rss: '#0284c7',
-  website: '#0d9488',
-};
+const TREEMAP_COLORS = ['#4f46e5', '#0284c7', '#e11d48', '#ea580c', '#0d9488', '#7c3aed', '#16a34a', '#ca8a04'];
 
 export function HotBoardPage({
   refreshTick,
@@ -35,24 +21,17 @@ export function HotBoardPage({
   onToast,
 }: HotBoardPageProps) {
   const [items, setItems] = useState<HotBoardItem[]>([]);
-  const [categories, setCategories] = useState<Array<{ name: string; count: number }>>([]);
-  const [platform, setPlatform] = useState('');
-  const [category, setCategory] = useState('');
+  const [viewMode, setViewMode] = useState<'dual' | 'douyin' | 'bilibili'>('dual');
+  const [selectedCat, setSelectedCat] = useState('');
   const [query, setQuery] = useState('');
   const [refreshing, setRefreshing] = useState(false);
 
   const load = async () => {
     try {
       const qs = new URLSearchParams();
-      if (platform) qs.set('platform', platform);
-      if (category) qs.set('category', category);
       if (query.trim()) qs.set('q', query.trim());
-      const res = await apiRequest<{
-        items: HotBoardItem[];
-        categories?: Array<{ name: string; count: number }>;
-      }>(`/api/radar/hot-board?${qs.toString()}`);
+      const res = await apiRequest<{ items: HotBoardItem[] }>(`/api/radar/hot-board?${qs.toString()}`);
       setItems(res.items);
-      if (res.categories) setCategories(res.categories);
     } catch (err) {
       onToast((err as Error).message);
     }
@@ -60,7 +39,7 @@ export function HotBoardPage({
 
   useEffect(() => {
     void load();
-  }, [platform, category, refreshTick]);
+  }, [refreshTick]);
 
   const handleRefresh = async () => {
     setRefreshing(true);
@@ -72,8 +51,8 @@ export function HotBoardPage({
         method: 'POST',
         body: JSON.stringify({ platforms: ['bilibili', 'douyin'], scoreWithAi: false }),
       });
-      const summary = res.results.map((r) => `${r.board}:${r.count}${r.error ? `(${r.error})` : ''}`).join('；');
-      onToast(`热榜已更新：${summary}`);
+      const summary = res.results.map((r) => `${r.board} ${r.count}条`).join(' · ');
+      onToast(`热榜已更新为最新一期：${summary}`);
       await load();
     } catch (err) {
       onToast((err as Error).message);
@@ -99,7 +78,7 @@ export function HotBoardPage({
           body: JSON.stringify({
             title: item.title,
             source_content_id: cid,
-            core_angle: item.ai_summary || item.summary || `${item.board_name} · ${item.hot_label}`,
+            core_angle: item.ai_summary || `${item.board_name} · ${item.hot_label}`,
             tags: [PLATFORM_LABELS[item.platform] || item.platform, item.category].filter(Boolean),
             source_url: item.url,
           }),
@@ -113,199 +92,237 @@ export function HotBoardPage({
     }
   };
 
-  // 按各自平台最大值归一化热度条长度（不同平台量纲不同，展示原始真实 hot_label）
-  const maxByPlat = new Map<string, number>();
-  for (const it of items) {
-    const cur = maxByPlat.get(it.platform) || 0;
-    if ((it.hot_value || 0) > cur) maxByPlat.set(it.platform, it.hot_value || 0);
+  const douyinAll = items.filter((x) => x.platform === 'douyin').sort((a, b) => a.rank_no - b.rank_no);
+  const bilibiliAll = items.filter((x) => x.platform === 'bilibili').sort((a, b) => a.rank_no - b.rank_no);
+
+  // 统计 B 站最新一期真实分区赛道，供顶部色块图直接可视化筛选
+  const catCountMap = new Map<string, number>();
+  for (const b of bilibiliAll) {
+    const key = (b.category || '综合').trim() || '综合';
+    catCountMap.set(key, (catCountMap.get(key) || 0) + 1);
   }
-  const topBars = items.slice(0, 8);
+  const catBlocks = Array.from(catCountMap.entries())
+    .map(([name, count]) => ({ name, count }))
+    .sort((a, b) => b.count - a.count)
+    .slice(0, 8);
+  const catTotal = bilibiliAll.length || 1;
+
+  const shownBilibili = selectedCat
+    ? bilibiliAll.filter((b) => ((b.category || '综合').trim() || '综合') === selectedCat)
+    : bilibiliAll;
+
+  const renderDouyinRow = (h: HotBoardItem, idx: number) => {
+    const rank = h.rank_no || idx + 1;
+    const rankCls = rank === 1 ? 'r1' : rank === 2 ? 'r2' : rank === 3 ? 'r3' : '';
+    return (
+      <div key={h.id} className="hotsearch-row" onClick={() => void onOpenHotItem(h, 'point')}>
+        <div className="hotsearch-left">
+          <span className={`rank-num ${rankCls}`}>{rank}</span>
+          <span className="hotsearch-title" title={h.title}>
+            {h.title}
+          </span>
+        </div>
+        <div className="hotsearch-right">
+          <span className="hotsearch-heat">{h.hot_label.replace('热度', '')}</span>
+          <button
+            type="button"
+            className={`mini-action ${h.saved_board_id ? 'starred' : ''}`}
+            onClick={(e) => void handleToggleStar(h, e)}
+            title={h.saved_board_id ? '取消收藏' : '收藏'}
+          >
+            <Star size={11} fill={h.saved_board_id ? 'currentColor' : 'none'} />
+          </button>
+        </div>
+      </div>
+    );
+  };
 
   return (
     <div>
-      {/* 顶部清爽平台 + 分类筛选栏 */}
-      <div className="panel-card" style={{ display: 'flex', flexDirection: 'column', gap: 10 }}>
-        <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', gap: 10, flexWrap: 'wrap' }}>
-          <div className="pill-group">
-            {[
-              { k: '', l: '全部热榜' },
-              { k: 'douyin', l: '抖音实时热榜' },
-              { k: 'bilibili', l: 'B站全站热门' },
-            ].map((t) => (
-              <button
-                key={t.k}
-                className={`pill-btn ${platform === t.k ? 'active' : ''}`}
-                onClick={() => {
-                  setPlatform(t.k);
-                  setCategory('');
-                }}
-              >
-                {t.l}
-              </button>
-            ))}
-          </div>
-
-          <div style={{ display: 'flex', gap: 8, alignItems: 'center', flexWrap: 'wrap' }}>
-            <div style={{ display: 'flex', gap: 5 }}>
-              <input
-                className="input"
-                style={{ width: 185 }}
-                placeholder="搜热榜关键词..."
-                value={query}
-                onChange={(e) => setQuery(e.target.value)}
-                onKeyDown={(e) => e.key === 'Enter' && void load()}
-              />
-              <button className="btn btn-secondary btn-sm" onClick={() => void load()}>
-                <Search size={13} />
-              </button>
-            </div>
-            <button className="btn btn-primary btn-sm" disabled={refreshing} onClick={handleRefresh}>
-              <RefreshCw size={13} /> {refreshing ? '刷新中...' : '立即刷新热榜'}
+      {/* 顶部清爽视图切换与刷新栏 */}
+      <div className="panel-card" style={{ padding: '13px 16px', display: 'flex', justifyContent: 'space-between', alignItems: 'center', gap: 10, flexWrap: 'wrap' }}>
+        <div className="pill-group">
+          {[
+            { k: 'dual' as const, l: `双榜对照（抖音 ${douyinAll.length} · B站 ${bilibiliAll.length}）` },
+            { k: 'douyin' as const, l: `只看抖音热搜 (${douyinAll.length})` },
+            { k: 'bilibili' as const, l: `只看B站视频墙 (${bilibiliAll.length})` },
+          ].map((t) => (
+            <button
+              key={t.k}
+              className={`pill-btn ${viewMode === t.k ? 'active' : ''}`}
+              onClick={() => setViewMode(t.k)}
+            >
+              {t.l}
             </button>
-          </div>
+          ))}
         </div>
 
-        {/* 动态真实分类胶囊 */}
-        {categories.length > 1 && (
-          <div className="pill-group" style={{ paddingTop: 8, borderTop: '1px solid var(--border)' }}>
-            <span style={{ fontSize: 12, color: 'var(--text-muted)' }}>分类：</span>
-            <button
-              className={`pill-btn ${category === '' ? 'active' : ''}`}
-              onClick={() => setCategory('')}
-            >
-              全部
+        <div style={{ display: 'flex', gap: 8, alignItems: 'center', flexWrap: 'wrap' }}>
+          <div style={{ display: 'flex', gap: 5 }}>
+            <input
+              className="input"
+              style={{ width: 185 }}
+              placeholder="搜热点词..."
+              value={query}
+              onChange={(e) => setQuery(e.target.value)}
+              onKeyDown={(e) => e.key === 'Enter' && void load()}
+            />
+            <button className="btn btn-secondary btn-sm" onClick={() => void load()}>
+              <Search size={13} />
             </button>
-            {categories.slice(0, 12).map((c) => (
-              <button
-                key={c.name}
-                className={`pill-btn ${category === c.name ? 'active' : ''}`}
-                onClick={() => setCategory(c.name)}
-              >
-                {c.name} ({c.count})
-              </button>
-            ))}
           </div>
-        )}
+          <button className="btn btn-primary btn-sm" disabled={refreshing} onClick={handleRefresh}>
+            <RefreshCw size={13} /> {refreshing ? '刷新中...' : '刷新最新热榜'}
+          </button>
+        </div>
       </div>
 
-      {/* 热度 TOP 8 横向柱状对比图 */}
-      {topBars.length > 0 && (
+      {/* 赛道色块图（色块大小 = 当期上榜数量占比，点色块直接筛选 B 站热门视频墙） */}
+      {viewMode !== 'douyin' && catBlocks.length > 0 && (
         <div className="panel-card">
-          <div className="panel-head">
+          <div className="panel-head" style={{ marginBottom: 10 }}>
             <div className="panel-title">
-              <BarChart3 size={16} color="#4f46e5" />
-              <span>当前热榜 · 热度 TOP {topBars.length} 对比</span>
+              <LayoutGrid size={16} color="#4f46e5" />
+              <span>今日 B 站热门赛道色块（点色块筛选视频墙）</span>
             </div>
-            <span style={{ fontSize: 12, color: 'var(--text-muted)' }}>点任意一条右侧滑出「看点 / 口播稿 / 热评」</span>
+            {selectedCat ? (
+              <button className="btn btn-secondary btn-sm" onClick={() => setSelectedCat('')}>
+                清除筛选（当前：{selectedCat}）
+              </button>
+            ) : (
+              <span style={{ fontSize: 12, color: 'var(--text-muted)' }}>色块越大代表今天这个分区上榜越多</span>
+            )}
           </div>
 
-          <div style={{ display: 'flex', flexDirection: 'column', gap: 10 }}>
-            {topBars.map((h, i) => {
-              const pColor = PLATFORM_COLORS[h.platform] || '#4f46e5';
-              const maxV = maxByPlat.get(h.platform) || 1;
-              const pct = h.hot_value ? Math.min(100, Math.max(12, Math.round((h.hot_value / maxV) * 100))) : Math.max(25, 100 - i * 10);
+          <div className="treemap-strip">
+            {catBlocks.map((c, idx) => {
+              const pct = Math.round((c.count / catTotal) * 100);
+              const isSelected = selectedCat === c.name;
+              const isDim = Boolean(selectedCat) && !isSelected;
               return (
-                <div
-                  key={h.id}
-                  style={{ cursor: 'pointer' }}
-                  onClick={() => void onOpenHotItem(h, 'point')}
+                <button
+                  key={c.name}
+                  type="button"
+                  className={`treemap-block ${isSelected ? 'active' : ''} ${isDim ? 'dimmed' : ''}`}
+                  style={{
+                    flexGrow: Math.max(c.count, 1),
+                    flexBasis: `${Math.max(10, pct)}%`,
+                    background: TREEMAP_COLORS[idx % TREEMAP_COLORS.length],
+                  }}
+                  onClick={() => setSelectedCat(isSelected ? '' : c.name)}
                 >
-                  <div className="feed-row-head" style={{ fontSize: 12.5 }}>
-                    <div style={{ display: 'flex', alignItems: 'center', gap: 7, minWidth: 0, flex: 1 }}>
-                      <span style={{ fontWeight: 700, width: 22, color: i < 3 ? '#dc2626' : 'var(--text-muted)', flexShrink: 0 }}>
-                        #{h.rank_no || i + 1}
-                      </span>
-                      <span className="plat-badge" style={{ background: pColor }}>
-                        {PLATFORM_LABELS[h.platform] || h.platform}
-                      </span>
-                      <span className="feed-row-title" style={{ fontSize: 13 }}>
-                        {h.title}
-                      </span>
-                    </div>
-                    <span style={{ fontWeight: 700, color: pColor, flexShrink: 0 }}>{h.hot_label || '热榜'}</span>
-                  </div>
-                  <div className="heat-track" style={{ height: 6 }}>
-                    <div className="heat-fill" style={{ width: `${pct}%`, background: pColor }} />
-                  </div>
-                </div>
+                  <span className="treemap-name">{c.name}</span>
+                  <span className="treemap-stat">
+                    {c.count} 条 · {pct}%
+                  </span>
+                </button>
               );
             })}
           </div>
         </div>
       )}
 
-      {/* 完整清爽榜单列表 */}
-      <div className="panel-card" style={{ marginBottom: 0 }}>
-        <div className="panel-head">
-          <div className="panel-title">
-            <Flame size={17} color="#ea580c" />
-            <span>热榜明细（共 {items.length} 条）</span>
+      {/* 主榜单区：抖音极简热搜榜 + B 站高清封面视频墙 */}
+      {items.length === 0 ? (
+        <div className="panel-card" style={{ padding: 48, textAlign: 'center', color: 'var(--text-muted)' }}>
+          还没有热榜数据，点击右上角「刷新最新热榜」拉取抖音热搜与 B 站全站热门。
+        </div>
+      ) : viewMode === 'douyin' ? (
+        <div className="panel-card" style={{ marginBottom: 0 }}>
+          <div className="panel-head">
+            <div className="panel-title">
+              <span className="plat-dot" style={{ background: '#e11d48', width: 10, height: 10 }} />
+              <span>抖音实时热搜榜（最新一期 · 共 {douyinAll.length} 条）</span>
+            </div>
+            <span style={{ fontSize: 12, color: 'var(--text-muted)' }}>点任意词条右侧滑出「一句话看点 / 口播稿 / 热评」</span>
+          </div>
+          <div className="douyin-2col">
+            <div className="hotsearch-list">{douyinAll.slice(0, Math.ceil(douyinAll.length / 2)).map(renderDouyinRow)}</div>
+            <div className="hotsearch-list">
+              {douyinAll.slice(Math.ceil(douyinAll.length / 2)).map((h, i) => renderDouyinRow(h, i + Math.ceil(douyinAll.length / 2)))}
+            </div>
           </div>
         </div>
-
-        {items.length === 0 ? (
-          <div style={{ padding: 36, textAlign: 'center', color: 'var(--text-muted)' }}>
-            暂无热榜数据，点击右上角「立即刷新热榜」拉取抖音实时热榜与 B 站全站热门。
+      ) : viewMode === 'bilibili' ? (
+        <div className="panel-card" style={{ marginBottom: 0 }}>
+          <div className="panel-head">
+            <div className="panel-title">
+              <span className="plat-dot" style={{ background: '#4f46e5', width: 10, height: 10 }} />
+              <span>B站全站热门视频墙{selectedCat ? ` · ${selectedCat}` : ''}（共 {shownBilibili.length} 条）</span>
+            </div>
+            <span style={{ fontSize: 12, color: 'var(--text-muted)' }}>点任意封面滑出「看点 / 口播稿 / 热评」</span>
           </div>
-        ) : (
-          <div className="feed-list">
-            {items.map((h, idx) => {
-              const pColor = PLATFORM_COLORS[h.platform] || '#4f46e5';
+          <div className="vcard-grid-4">
+            {shownBilibili.map((h, i) => {
+              const rank = h.rank_no || i + 1;
+              const parts = h.hot_label.split('·').map((s) => s.trim());
               return (
-                <div key={h.id} className="feed-row" onClick={() => void onOpenHotItem(h, 'point')}>
-                  <div className="feed-row-head">
-                    <div style={{ display: 'flex', alignItems: 'center', gap: 8, minWidth: 0, flex: 1 }}>
-                      <span className={`rank-box ${idx < 3 ? 'top' : ''}`}>{h.rank_no || idx + 1}</span>
-                      <span className="plat-badge" style={{ background: pColor }}>
-                        {PLATFORM_LABELS[h.platform] || h.platform}
-                      </span>
-                      <span className="feed-row-title">{h.title}</span>
-                    </div>
-                    <span style={{ fontSize: 12, fontWeight: 700, color: pColor, flexShrink: 0 }}>
-                      {h.hot_label || '热门'}
-                    </span>
-                  </div>
-
-                  {(h.ai_summary || h.summary) && (
-                    <div className="feed-row-brief">💡 {h.ai_summary || h.summary}</div>
-                  )}
-
-                  <div className="feed-row-meta">
-                    <span>
-                      {h.board_name} · {h.category || '综合'}
-                      {h.author ? ` · ${h.author}` : ''} · {fmtTime(h.captured_at)}
-                    </span>
-                    <div style={{ display: 'flex', gap: 5 }} onClick={(e) => e.stopPropagation()}>
-                      <button className="mini-action" onClick={() => void onOpenHotItem(h, 'transcript')}>
-                        <Mic size={11} /> 口播稿
-                      </button>
-                      <button className="mini-action" onClick={() => void onOpenHotItem(h, 'comments')}>
-                        <MessageSquareText size={11} /> 热评
-                      </button>
-                      <button
-                        className={`mini-action ${h.saved_board_id ? 'starred' : ''}`}
-                        onClick={(e) => void handleToggleStar(h, e)}
-                      >
-                        <Star size={11} fill={h.saved_board_id ? 'currentColor' : 'none'} />
-                        {h.saved_board_id ? '已藏' : '收藏'}
-                      </button>
-                      <a
-                        href={h.url}
-                        target="_blank"
-                        rel="noreferrer"
-                        className="mini-action"
-                        style={{ textDecoration: 'none' }}
-                      >
-                        <ExternalLink size={11} /> 原链
-                      </a>
-                    </div>
-                  </div>
-                </div>
+                <VideoCard
+                  key={h.id}
+                  title={h.title}
+                  coverUrl={h.cover_url}
+                  author={h.author || 'B站UP主'}
+                  subLabel={h.category || '热门'}
+                  badgeText={`#${rank}`}
+                  badgeTone={rank <= 3 ? 'top' : 'rank'}
+                  playLabel={parts[0]?.replace('播放', '').trim() || undefined}
+                  rightMetricLabel={parts[1] ? `👍 ${parts[1].replace('赞', '')}` : undefined}
+                  starred={Boolean(h.saved_board_id)}
+                  onClick={() => void onOpenHotItem(h, 'point')}
+                  onToggleStar={(e) => void handleToggleStar(h, e)}
+                />
               );
             })}
           </div>
-        )}
-      </div>
+        </div>
+      ) : (
+        <div className="hotboard-dual-grid">
+          {/* 左 4 列：抖音极简热搜榜 */}
+          <div className="panel-card" style={{ marginBottom: 0 }}>
+            <div className="panel-head">
+              <div className="panel-title">
+                <span className="plat-dot" style={{ background: '#e11d48', width: 10, height: 10 }} />
+                <span>抖音热搜 ({douyinAll.length})</span>
+              </div>
+              <span style={{ fontSize: 11.5, color: 'var(--text-muted)' }}>1行1条</span>
+            </div>
+            <div className="hotsearch-list">{douyinAll.map(renderDouyinRow)}</div>
+          </div>
+
+          {/* 右 8 列：B 站高清封面视频墙 */}
+          <div className="panel-card" style={{ marginBottom: 0 }}>
+            <div className="panel-head">
+              <div className="panel-title">
+                <span className="plat-dot" style={{ background: '#4f46e5', width: 10, height: 10 }} />
+                <span>B站热门视频墙{selectedCat ? ` · ${selectedCat}` : ''} ({shownBilibili.length})</span>
+              </div>
+              <span style={{ fontSize: 11.5, color: 'var(--text-muted)' }}>点封面出看点/口播稿/热评</span>
+            </div>
+            <div className="vcard-grid-3">
+              {shownBilibili.map((h, i) => {
+                const rank = h.rank_no || i + 1;
+                const parts = h.hot_label.split('·').map((s) => s.trim());
+                return (
+                  <VideoCard
+                    key={h.id}
+                    title={h.title}
+                    coverUrl={h.cover_url}
+                    author={h.author || 'B站UP主'}
+                    subLabel={h.category || '热门'}
+                    badgeText={`#${rank}`}
+                    badgeTone={rank <= 3 ? 'top' : 'rank'}
+                    playLabel={parts[0]?.replace('播放', '').trim() || undefined}
+                    rightMetricLabel={parts[1] ? `👍 ${parts[1].replace('赞', '')}` : undefined}
+                    starred={Boolean(h.saved_board_id)}
+                    onClick={() => void onOpenHotItem(h, 'point')}
+                    onToggleStar={(e) => void handleToggleStar(h, e)}
+                  />
+                );
+              })}
+            </div>
+          </div>
+        </div>
+      )}
     </div>
   );
 }

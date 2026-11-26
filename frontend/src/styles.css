@@ -1464,3 +1464,447 @@ th {
   border-color: #c7d2fe;
   background: #ffffff;
 }
+
+/* ===== 「一眼看懂」高清封面卡片墙 + 极简热搜 + 赛道色块样式 ===== */
+
+.compact-status-bar {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  flex-wrap: wrap;
+  margin-bottom: 14px;
+}
+
+.status-chips {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  flex-wrap: wrap;
+}
+
+.status-chip {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  padding: 6px 12px;
+  border-radius: 999px;
+  background: var(--surface);
+  border: 1px solid var(--border);
+  font-size: 12.5px;
+  color: var(--text-muted);
+  cursor: pointer;
+  transition: all 0.14s ease;
+}
+
+.status-chip:hover {
+  border-color: #c7d2fe;
+  color: var(--text);
+}
+
+.status-chip strong {
+  color: var(--text);
+  font-weight: 700;
+}
+
+.status-chip.hot strong {
+  color: #ea580c;
+}
+
+.vcard-grid-4 {
+  display: grid;
+  grid-template-columns: repeat(4, minmax(0, 1fr));
+  gap: 14px;
+}
+
+.vcard-grid-3 {
+  display: grid;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  gap: 14px;
+}
+
+@media (max-width: 1280px) {
+  .vcard-grid-4 {
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+  }
+}
+
+@media (max-width: 1080px) {
+  .vcard-grid-3 {
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+  }
+}
+
+@media (max-width: 640px) {
+  .vcard-grid-4,
+  .vcard-grid-3 {
+    grid-template-columns: 1fr;
+  }
+}
+
+.vcard {
+  border-radius: 12px;
+  overflow: hidden;
+  background: var(--surface-muted);
+  cursor: pointer;
+  transition: transform 0.16s ease, box-shadow 0.16s ease;
+  display: flex;
+  flex-direction: column;
+}
+
+.vcard:hover {
+  transform: translateY(-2px);
+  box-shadow: 0 10px 24px rgba(15, 23, 42, 0.09);
+}
+
+.vcard-media {
+  position: relative;
+  width: 100%;
+  aspect-ratio: 16 / 9;
+  background: #1e293b;
+  overflow: hidden;
+}
+
+.vcard-img {
+  width: 100%;
+  height: 100%;
+  object-fit: cover;
+  display: block;
+  transition: transform 0.25s ease;
+}
+
+.vcard:hover .vcard-img {
+  transform: scale(1.03);
+}
+
+.vcard-fallback-text {
+  position: absolute;
+  inset: 0;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  color: rgba(255, 255, 255, 0.72);
+  font-size: 12px;
+  font-weight: 600;
+}
+
+.vcard-scrim {
+  position: absolute;
+  inset: 0;
+  background: linear-gradient(
+    180deg,
+    rgba(15, 23, 42, 0.42) 0%,
+    rgba(15, 23, 42, 0) 36%,
+    rgba(15, 23, 42, 0) 58%,
+    rgba(15, 23, 42, 0.78) 100%
+  );
+  pointer-events: none;
+}
+
+.vcard-top-row {
+  position: absolute;
+  top: 8px;
+  left: 8px;
+  right: 8px;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 6px;
+}
+
+.vcard-badge {
+  display: inline-flex;
+  align-items: center;
+  gap: 3px;
+  padding: 3px 8px;
+  border-radius: 6px;
+  font-size: 11.5px;
+  font-weight: 700;
+  color: #ffffff;
+  box-shadow: 0 2px 6px rgba(0, 0, 0, 0.22);
+}
+
+.vcard-badge-boom { background: #ea580c; }
+.vcard-badge-top { background: #dc2626; }
+.vcard-badge-rank { background: #4f46e5; }
+.vcard-badge-muted { background: rgba(15, 23, 42, 0.72); }
+
+.vcard-star {
+  width: 28px;
+  height: 28px;
+  border-radius: 999px;
+  border: none;
+  background: rgba(15, 23, 42, 0.48);
+  color: #ffffff;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  cursor: pointer;
+  transition: all 0.14s ease;
+}
+
+.vcard-star:hover {
+  background: rgba(15, 23, 42, 0.8);
+}
+
+.vcard-star.active {
+  background: #f59e0b;
+  color: #ffffff;
+}
+
+.vcard-bottom-row {
+  position: absolute;
+  bottom: 7px;
+  left: 8px;
+  right: 8px;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 6px;
+}
+
+.vcard-pill {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  padding: 2px 7px;
+  border-radius: 5px;
+  background: rgba(15, 23, 42, 0.65);
+  color: #f8fafc;
+  font-size: 11px;
+  font-weight: 600;
+  backdrop-filter: blur(4px);
+}
+
+.vcard-body {
+  padding: 10px 11px 11px;
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  flex: 1;
+}
+
+.vcard-title {
+  font-size: 13.5px;
+  font-weight: 700;
+  line-height: 1.4;
+  color: var(--text);
+  display: -webkit-box;
+  -webkit-line-clamp: 2;
+  -webkit-box-orient: vertical;
+  overflow: hidden;
+  min-height: 37px;
+}
+
+.vcard:hover .vcard-title {
+  color: var(--primary);
+}
+
+.vcard-foot {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  font-size: 11.5px;
+  color: var(--text-muted);
+}
+
+.vcard-author {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.vcard-cat {
+  flex-shrink: 0;
+  padding: 1px 7px;
+  border-radius: 999px;
+  background: #e2e8f0;
+  color: #475569;
+  font-size: 11px;
+  font-weight: 600;
+}
+
+/* 抖音极简热搜榜（严格 1 行一条，零废话） */
+.hotsearch-list {
+  display: flex;
+  flex-direction: column;
+}
+
+.hotsearch-row {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 10px;
+  padding: 9px 8px;
+  margin: 0 -8px;
+  border-bottom: 1px solid var(--border);
+  border-radius: 8px;
+  cursor: pointer;
+  transition: background 0.14s ease;
+}
+
+.hotsearch-row:last-child {
+  border-bottom: none;
+}
+
+.hotsearch-row:hover {
+  background: var(--surface-muted);
+}
+
+.hotsearch-left {
+  display: flex;
+  align-items: center;
+  gap: 9px;
+  min-width: 0;
+  flex: 1;
+}
+
+.hotsearch-title {
+  font-size: 13.5px;
+  font-weight: 600;
+  color: var(--text);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.hotsearch-row:hover .hotsearch-title {
+  color: var(--primary);
+}
+
+.hotsearch-right {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  flex-shrink: 0;
+}
+
+.hotsearch-heat {
+  font-size: 12px;
+  font-weight: 700;
+  color: #e11d48;
+  font-variant-numeric: tabular-nums;
+}
+
+.rank-num {
+  width: 22px;
+  height: 22px;
+  border-radius: 6px;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  font-size: 11.5px;
+  font-weight: 700;
+  flex-shrink: 0;
+  background: #f1f5f9;
+  color: #64748b;
+}
+
+.rank-num.r1 { background: #dc2626; color: #ffffff; }
+.rank-num.r2 { background: #ea580c; color: #ffffff; }
+.rank-num.r3 { background: #f59e0b; color: #ffffff; }
+
+/* 平台热榜双轨分栏 + 赛道色块图 */
+.dual-hot-grid {
+  display: grid;
+  grid-template-columns: minmax(300px, 5fr) minmax(0, 7fr);
+  gap: 16px;
+  align-items: start;
+  margin-bottom: 16px;
+}
+
+.hotboard-dual-grid {
+  display: grid;
+  grid-template-columns: minmax(300px, 4fr) minmax(0, 8fr);
+  gap: 16px;
+  align-items: start;
+}
+
+@media (max-width: 1120px) {
+  .dual-hot-grid,
+  .hotboard-dual-grid {
+    grid-template-columns: 1fr;
+  }
+}
+
+.treemap-strip {
+  display: flex;
+  gap: 8px;
+  min-height: 76px;
+  flex-wrap: wrap;
+}
+
+.treemap-block {
+  border: none;
+  border-radius: 11px;
+  padding: 10px 12px;
+  color: #ffffff;
+  text-align: left;
+  cursor: pointer;
+  display: flex;
+  flex-direction: column;
+  justify-content: space-between;
+  min-width: 84px;
+  transition: transform 0.14s ease, opacity 0.14s ease, box-shadow 0.14s ease;
+}
+
+.treemap-block:hover {
+  transform: translateY(-1px);
+  opacity: 1;
+}
+
+.treemap-block.dimmed {
+  opacity: 0.45;
+}
+
+.treemap-block.active {
+  box-shadow: 0 0 0 2.5px #ffffff, 0 0 0 5px #0f172a;
+}
+
+.treemap-name {
+  font-size: 13px;
+  font-weight: 700;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.treemap-stat {
+  font-size: 11.5px;
+  font-weight: 600;
+  opacity: 0.92;
+}
+
+.douyin-2col {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 0 24px;
+}
+
+@media (max-width: 900px) {
+  .douyin-2col {
+    grid-template-columns: 1fr;
+  }
+}
+
+.compact-article-row {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  padding: 10px 8px;
+  margin: 0 -8px;
+  border-bottom: 1px solid var(--border);
+  border-radius: 8px;
+  cursor: pointer;
+  transition: background 0.14s ease;
+}
+
+.compact-article-row:last-child {
+  border-bottom: none;
+}
+
+.compact-article-row:hover {
+  background: var(--surface-muted);
+}

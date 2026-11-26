@@ -11,8 +11,6 @@ import {
   BarChart3,
   Search,
   Star,
-  Mic,
-  MessageSquareText,
 } from 'lucide-react';
 import {
   ResponsiveContainer,
@@ -27,6 +25,7 @@ import {
 } from 'recharts';
 import { apiRequest, fmtNum, fmtTime, PLATFORM_LABELS } from '../api';
 import type { DrawerTab } from '../components/ContentDrawer';
+import { VideoCard } from '../components/VideoCard';
 import type { Category, CreatorMonitorRow } from '../types';
 
 interface CreatorsPageProps {
@@ -43,6 +42,7 @@ interface CreatorAnalyticsResp {
     id: number;
     title: string;
     canonical_url: string;
+    cover_url?: string;
     platform: string;
     content_type: string;
     published_at: string | null;
@@ -98,7 +98,6 @@ export function CreatorsPage({
   const [analytics, setAnalytics] = useState<CreatorAnalyticsResp | null>(null);
   const [loadingDetail, setLoadingDetail] = useState(false);
 
-  // 顶部极简一行添加博主条
   const [newUrl, setNewUrl] = useState('');
   const [newName, setNewName] = useState('');
   const [newCategoryId, setNewCategoryId] = useState('');
@@ -234,11 +233,12 @@ export function CreatorsPage({
       ? analytics.creator.baseline_views
       : analytics.creator.baseline_likes
     : null;
+  const hasCovers = Boolean(analytics?.works.some((w) => w.cover_url && w.cover_url.trim()));
 
   return (
     <div>
       {/* 顶部极简一行添加博主条 */}
-      <div className="panel-card" style={{ padding: '14px 16px' }}>
+      <div className="panel-card" style={{ padding: '13px 16px' }}>
         <div style={{ display: 'flex', gap: 8, flexWrap: 'wrap', alignItems: 'center' }}>
           <input
             className="input"
@@ -250,14 +250,14 @@ export function CreatorsPage({
           />
           <input
             className="input"
-            style={{ flex: '1 1 130px', maxWidth: 180 }}
+            style={{ flex: '1 1 130px', maxWidth: 175 }}
             placeholder="备注名（可选）"
             value={newName}
             onChange={(e) => setNewName(e.target.value)}
           />
           <select
             className="input"
-            style={{ width: 120 }}
+            style={{ width: 118 }}
             value={newCategoryId}
             onChange={(e) => setNewCategoryId(e.target.value)}
           >
@@ -268,7 +268,7 @@ export function CreatorsPage({
               </option>
             ))}
           </select>
-          <button className="btn btn-primary" disabled={adding} onClick={handleAddCreator}>
+          <button className="btn btn-primary btn-sm" disabled={adding} onClick={handleAddCreator}>
             <Plus size={14} /> {adding ? '添加中...' : '添加并抓取'}
           </button>
           <button className="btn btn-secondary btn-sm" onClick={() => onNavigate('browsers')}>
@@ -394,7 +394,7 @@ export function CreatorsPage({
           )}
         </div>
 
-        {/* 右宽栏：单博主动态表现走势 + 清爽作品列表 */}
+        {/* 右宽栏：单博主走势图 + 高清封面作品墙 */}
         <div>
           {!analytics ? (
             <div className="panel-card" style={{ color: 'var(--text-muted)', textAlign: 'center', padding: 48 }}>
@@ -404,29 +404,27 @@ export function CreatorsPage({
             <>
               <div className="panel-card">
                 <div className="panel-head">
-                  <div>
-                    <div style={{ display: 'flex', alignItems: 'center', gap: 8, flexWrap: 'wrap' }}>
-                      <strong style={{ fontSize: 17 }}>{analytics.creator.name}</strong>
-                      <span
-                        className="plat-badge"
-                        style={{ background: PLATFORM_COLORS[analytics.creator.platform] || '#4f46e5' }}
-                      >
-                        {PLATFORM_LABELS[analytics.creator.platform] || analytics.creator.platform}
-                      </span>
-                      <span style={{ fontSize: 12.5, color: 'var(--text-muted)' }}>
-                        粉丝 {fmtNum(analytics.creator.follower_count)} · 平时中位数{' '}
-                        <strong>{fmtNum(baselineVal)}</strong>
-                        {useViewsAxis ? ' 播放' : ' 赞'}
-                      </span>
-                      <a
-                        href={analytics.creator.url}
-                        target="_blank"
-                        rel="noreferrer"
-                        style={{ color: 'var(--primary)', fontSize: 12, display: 'inline-flex', alignItems: 'center', gap: 3 }}
-                      >
-                        主页 <ExternalLink size={12} />
-                      </a>
-                    </div>
+                  <div style={{ display: 'flex', alignItems: 'center', gap: 8, flexWrap: 'wrap' }}>
+                    <strong style={{ fontSize: 17 }}>{analytics.creator.name}</strong>
+                    <span
+                      className="plat-badge"
+                      style={{ background: PLATFORM_COLORS[analytics.creator.platform] || '#4f46e5' }}
+                    >
+                      {PLATFORM_LABELS[analytics.creator.platform] || analytics.creator.platform}
+                    </span>
+                    <span style={{ fontSize: 12.5, color: 'var(--text-muted)' }}>
+                      粉丝 {fmtNum(analytics.creator.follower_count)} · 平时中位数{' '}
+                      <strong>{fmtNum(baselineVal)}</strong>
+                      {useViewsAxis ? ' 播放' : ' 赞'}
+                    </span>
+                    <a
+                      href={analytics.creator.url}
+                      target="_blank"
+                      rel="noreferrer"
+                      style={{ color: 'var(--primary)', fontSize: 12, display: 'inline-flex', alignItems: 'center', gap: 3 }}
+                    >
+                      主页 <ExternalLink size={12} />
+                    </a>
                   </div>
                   <button
                     className="btn btn-primary btn-sm"
@@ -436,16 +434,13 @@ export function CreatorsPage({
                   </button>
                 </div>
 
-                {/* 近期作品表现柱状图（带常态中位数虚线 + 橙色爆款柱，点击直开抽屉） */}
-                {analytics.chartData.length > 0 ? (
+                {analytics.chartData.some((d) => d.views > 0 || d.likes > 0) ? (
                   <div>
-                    <div style={{ fontSize: 12.5, color: 'var(--text-muted)', marginBottom: 8, display: 'flex', alignItems: 'center', gap: 6 }}>
+                    <div style={{ fontSize: 12, color: 'var(--text-muted)', marginBottom: 8, display: 'flex', alignItems: 'center', gap: 6 }}>
                       <BarChart3 size={14} color="#ea580c" />
-                      <span>
-                        橙色柱子 = 超过平时水平的爆款作品（点击任意柱子直接看口播稿与热评）
-                      </span>
+                      <span>橙色柱子 = 超过平时水平的爆款作品（点击柱子直接看口播稿与热评）</span>
                     </div>
-                    <div style={{ width: '100%', height: 215 }}>
+                    <div style={{ width: '100%', height: 210 }}>
                       <ResponsiveContainer>
                         <BarChart
                           data={analytics.chartData}
@@ -497,79 +492,80 @@ export function CreatorsPage({
                     </div>
                   </div>
                 ) : (
-                  <div style={{ padding: '20px 0', textAlign: 'center', color: 'var(--text-muted)', fontSize: 13 }}>
-                    暂无足够数据绘制走势图，点右上角「更新作品」抓一次即可。
+                  <div style={{ fontSize: 12.5, color: 'var(--text-muted)', padding: '6px 0' }}>
+                    该来源为纯文章/资讯站，平台未提供播放量，下方已按发布时间排好。
                   </div>
                 )}
               </div>
 
-              {/* 清爽作品清单（无拥挤表格、无文字墙） */}
+              {/* 作品展示区：有视频封面 → 3 列高清封面墙；纯文章源 → 极简 1 行一条 */}
               <div className="panel-card" style={{ marginBottom: 0 }}>
                 <div className="panel-head">
                   <div className="panel-title">
                     <Flame size={16} color="#ea580c" />
-                    <span>近期作品清单 ({analytics.works.length})</span>
+                    <span>近期作品 ({analytics.works.length})</span>
                   </div>
-                  <span style={{ fontSize: 12, color: 'var(--text-muted)' }}>点任意一条滑出「看点 / 口播稿 / 热评」</span>
+                  <span style={{ fontSize: 12, color: 'var(--text-muted)' }}>点任意作品右侧滑出「看点 / 口播稿 / 热评」</span>
                 </div>
 
                 {analytics.works.length === 0 ? (
                   <div style={{ fontSize: 13, color: 'var(--text-muted)', padding: '20px 0', textAlign: 'center' }}>
                     暂无作品，点上方「更新作品」立即抓取。
                   </div>
-                ) : (
-                  <div className="feed-list">
+                ) : hasCovers ? (
+                  <div className="vcard-grid-3">
                     {analytics.works.map((w) => {
                       const isBoom = (w.breakout_ratio ?? 0) >= 1.6 || (w.breakout_score ?? 0) >= 68;
                       return (
-                        <div
+                        <VideoCard
                           key={w.id}
-                          className="feed-row"
+                          title={w.title}
+                          coverUrl={w.cover_url}
+                          author={fmtTime(w.published_at || w.discovered_at)}
+                          subLabel={w.transcript_status === 'done' ? '已有口播稿' : w.comment_rows > 0 ? `${w.comment_rows}热评` : undefined}
+                          badgeText={
+                            isBoom && w.breakout_ratio
+                              ? `🔥 ${w.breakout_ratio}x 爆`
+                              : w.breakout_ratio
+                                ? `${w.breakout_ratio}x`
+                                : undefined
+                          }
+                          badgeTone={isBoom ? 'boom' : 'muted'}
+                          playLabel={w.latest_views != null ? fmtNum(w.latest_views) : undefined}
+                          rightMetricLabel={w.latest_likes != null ? `👍 ${fmtNum(w.latest_likes)}` : undefined}
+                          starred={Boolean(w.saved_board_id)}
                           onClick={() => onOpenContent(w.id, 'point', w.saved_board_id)}
-                        >
-                          <div className="feed-row-head">
-                            <span className="feed-row-title">{w.title}</span>
-                            {w.breakout_ratio != null ? (
-                              <span className={isBoom ? 'breakout-badge' : 'badge badge-gray'}>
-                                {isBoom ? '🔥 ' : ''}
-                                {w.breakout_ratio}x
-                              </span>
-                            ) : (
-                              <span className="badge badge-gray">样本不足</span>
-                            )}
-                          </div>
-
-                          {w.brief && <div className="feed-row-brief">💡 {w.brief}</div>}
-
-                          <div className="feed-row-meta">
-                            <span>
-                              {fmtTime(w.published_at || w.discovered_at)} · 播 {fmtNum(w.latest_views)} · 赞 {fmtNum(w.latest_likes)} · 评 {fmtNum(w.latest_comments)}
-                            </span>
-                            <div style={{ display: 'flex', gap: 5 }} onClick={(e) => e.stopPropagation()}>
-                              <button
-                                className="mini-action"
-                                onClick={() => onOpenContent(w.id, 'transcript', w.saved_board_id)}
-                              >
-                                <Mic size={11} /> {w.transcript_status === 'done' ? '看口播稿 ✓' : '口播稿'}
-                              </button>
-                              <button
-                                className="mini-action"
-                                onClick={() => onOpenContent(w.id, 'comments', w.saved_board_id)}
-                              >
-                                <MessageSquareText size={11} /> 热评{w.comment_rows ? `(${w.comment_rows})` : ''}
-                              </button>
-                              <button
-                                className={`mini-action ${w.saved_board_id ? 'starred' : ''}`}
-                                onClick={(e) => void handleToggleStar(w, e)}
-                              >
-                                <Star size={11} fill={w.saved_board_id ? 'currentColor' : 'none'} />
-                                {w.saved_board_id ? '已藏' : '收藏'}
-                              </button>
-                            </div>
-                          </div>
-                        </div>
+                          onToggleStar={(e) => void handleToggleStar(w, e)}
+                        />
                       );
                     })}
+                  </div>
+                ) : (
+                  <div className="hotsearch-list">
+                    {analytics.works.map((w) => (
+                      <div
+                        key={w.id}
+                        className="compact-article-row"
+                        onClick={() => onOpenContent(w.id, 'point', w.saved_board_id)}
+                      >
+                        <div className="hotsearch-left">
+                          <span style={{ fontSize: 11.5, color: 'var(--text-muted)', flexShrink: 0 }}>
+                            {fmtTime(w.published_at || w.discovered_at)}
+                          </span>
+                          <span className="hotsearch-title" title={w.title}>
+                            {w.title}
+                          </span>
+                        </div>
+                        <button
+                          type="button"
+                          className={`mini-action ${w.saved_board_id ? 'starred' : ''}`}
+                          onClick={(e) => void handleToggleStar(w, e)}
+                          title={w.saved_board_id ? '取消收藏' : '收藏'}
+                        >
+                          <Star size={11} fill={w.saved_board_id ? 'currentColor' : 'none'} />
+                        </button>
+                      </div>
+                    ))}
                   </div>
                 )}
               </div>

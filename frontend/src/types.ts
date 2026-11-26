@@ -235,7 +235,10 @@ export interface CockpitData {
   trend7d: Array<{ day: string; total: number; breakouts: number }>;
   trend14d?: Array<{ day: string; total: number; breakouts: number }>;
   platformDistribution?: Array<{ platform: string; count: number }>;
+  hotCategoryDistribution?: Array<{ name: string; count: number }>;
   hotTop?: HotBoardItem[];
+  douyinHot?: HotBoardItem[];
+  bilibiliHot?: HotBoardItem[];
   recommendations: TopicRecommendation[];
   breakouts: Array<{
     id: number;
@@ -243,6 +246,7 @@ export interface CockpitData {
     platform: string;
     author: string;
     canonical_url: string;
+    cover_url?: string;
     source_name: string;
     follower_count: number | null;
     breakout_score: number | null;

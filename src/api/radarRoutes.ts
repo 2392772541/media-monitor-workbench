@@ -65,7 +65,17 @@ export function registerRadarRoutes(app: FastifyInstance): void {
     ).c;
     const savedCount = (db.prepare('SELECT COUNT(*) AS c FROM topic_board').get() as { c: number }).c;
     const hotBoardCount = (
-      db.prepare("SELECT COUNT(*) AS c FROM hot_board_items WHERE board_name != '站内监控高热'").get() as { c: number }
+      db
+        .prepare(`
+          SELECT COUNT(*) AS c
+          FROM hot_board_items h
+          WHERE h.board_name != '站内监控高热'
+            AND h.captured_at = (
+              SELECT MAX(h2.captured_at) FROM hot_board_items h2
+              WHERE h2.platform = h.platform AND h2.board_name = h.board_name
+            )
+        `)
+        .get() as { c: number }
     ).c;
 
     // 14 日采集量与潜力爆款趋势数据（同时截取最近 7 天兼容旧字段）
@@ -113,14 +123,14 @@ export function registerRadarRoutes(app: FastifyInstance): void {
       `)
       .all(activeAccount.id);
 
-    // 对标博主潜力爆款雷达 TOP 10（排除热榜虚拟导入源，附带看点/口播/热评/收藏状态）
+    // 对标博主真爆款 TOP 8（严格筛选 >= 1.6x 或高爆款分，附带封面图与收藏状态）
     const breakouts = db
       .prepare(`
-        SELECT c.id, c.title, c.platform, c.author, c.canonical_url, c.published_at, c.discovered_at,
+        SELECT c.id, c.title, c.platform, c.author, c.canonical_url, c.cover_url, c.published_at, c.discovered_at,
                c.breakout_score, c.breakout_ratio, c.growth_rate_per_hour, c.breakout_reason,
                c.transcript_status,
                s.name AS source_name, s.follower_count,
-               COALESCE(a.summary_zh, c.summary, '') AS brief,
+               COALESCE(a.summary_zh, '') AS brief,
                (SELECT views FROM content_metrics m WHERE m.content_id = c.id ORDER BY captured_at DESC LIMIT 1) AS latest_views,
                (SELECT likes FROM content_metrics m WHERE m.content_id = c.id ORDER BY captured_at DESC LIMIT 1) AS latest_likes,
                (SELECT comments FROM content_metrics m WHERE m.content_id = c.id ORDER BY captured_at DESC LIMIT 1) AS latest_comments,
@@ -129,36 +139,61 @@ export function registerRadarRoutes(app: FastifyInstance): void {
         FROM contents c
         JOIN sources s ON s.id = c.source_id
         LEFT JOIN content_analyses a ON a.content_id = c.id
-        WHERE s.source_type != 'hot_board' AND (c.breakout_score IS NOT NULL OR c.breakout_ratio IS NOT NULL)
+        WHERE s.source_type != 'hot_board'
+          AND (c.breakout_ratio >= 1.6 OR c.breakout_score >= 68)
         ORDER BY COALESCE(c.breakout_ratio, 0) DESC, COALESCE(c.breakout_score, 0) DESC, c.discovered_at DESC
-        LIMIT 10
+        LIMIT 8
       `)
       .all();
 
-    // 今日平台热榜速递（优先取抖音 + B站各前 10 条真实榜单）
-    const hotTop = db
+    // 今日平台热榜速递（严格只取各榜单最新一期，彻底杜绝重复 #1）
+    const latestHotSql = `
+      SELECT h.*,
+             (SELECT a.summary_zh FROM content_analyses a WHERE a.content_id = h.content_id LIMIT 1) AS ai_summary,
+             (SELECT tb.id FROM topic_board tb
+              WHERE (h.content_id IS NOT NULL AND tb.source_content_id = h.content_id)
+                 OR (h.url != '' AND tb.source_url = h.url)
+              LIMIT 1) AS saved_board_id
+      FROM hot_board_items h
+      WHERE h.board_name != '站内监控高热'
+        AND h.captured_at = (
+          SELECT MAX(h2.captured_at) FROM hot_board_items h2
+          WHERE h2.platform = h.platform AND h2.board_name = h.board_name
+        )
+    `;
+    const douyinHot = db.prepare(`${latestHotSql} AND h.platform = 'douyin' ORDER BY h.rank_no ASC LIMIT 12`).all();
+    const bilibiliHot = db.prepare(`${latestHotSql} AND h.platform = 'bilibili' ORDER BY h.rank_no ASC LIMIT 12`).all();
+    const hotTop = [...douyinHot, ...bilibiliHot];
+
+    // 最新一期热榜分类分布（用于今日速览底部分区环图）
+    const hotCategoryDistribution = db
       .prepare(`
-        SELECT h.*,
-               (SELECT a.summary_zh FROM content_analyses a WHERE a.content_id = h.content_id LIMIT 1) AS ai_summary,
-               (SELECT tb.id FROM topic_board tb
-                WHERE (h.content_id IS NOT NULL AND tb.source_content_id = h.content_id)
-                   OR (h.url != '' AND tb.source_url = h.url)
-                LIMIT 1) AS saved_board_id
+        SELECT COALESCE(NULLIF(TRIM(h.category), ''), '综合') AS name, COUNT(*) AS count
         FROM hot_board_items h
-        WHERE h.board_name != '站内监控高热'
-        ORDER BY h.rank_no ASC, COALESCE(h.hot_value, 0) DESC, h.captured_at DESC
-        LIMIT 24
+        WHERE h.board_name = 'B站全站热门'
+          AND h.captured_at = (
+            SELECT MAX(h2.captured_at) FROM hot_board_items h2
+            WHERE h2.platform = h.platform AND h2.board_name = h.board_name
+          )
+        GROUP BY name
+        ORDER BY count DESC
+        LIMIT 8
       `)
-      .all();
+      .all() as Array<{ name: string; count: number }>;
 
-    // 平台真实监控内容分布（用于底部环形图）
+    // 平台真实监控内容分布（仅统计最新热榜+博主内容）
     const platformDistribution = db
       .prepare(`
         SELECT platform, COUNT(*) AS count
         FROM (
           SELECT c.platform AS platform FROM contents c JOIN sources s ON s.id = c.source_id WHERE s.source_type != 'hot_board'
           UNION ALL
-          SELECT h.platform AS platform FROM hot_board_items h WHERE h.board_name != '站内监控高热'
+          SELECT h.platform AS platform FROM hot_board_items h
+          WHERE h.board_name != '站内监控高热'
+            AND h.captured_at = (
+              SELECT MAX(h2.captured_at) FROM hot_board_items h2
+              WHERE h2.platform = h.platform AND h2.board_name = h.board_name
+            )
         )
         GROUP BY platform
         ORDER BY count DESC
@@ -214,7 +249,10 @@ export function registerRadarRoutes(app: FastifyInstance): void {
       trend7d,
       trend14d,
       platformDistribution,
+      hotCategoryDistribution,
       hotTop,
+      douyinHot,
+      bilibiliHot,
       recommendations,
       breakouts,
       clusters,
@@ -409,10 +447,10 @@ export function registerRadarRoutes(app: FastifyInstance): void {
 
     const works = db
       .prepare(`
-        SELECT c.id, c.title, c.canonical_url, c.platform, c.content_type, c.published_at, c.discovered_at,
+        SELECT c.id, c.title, c.canonical_url, c.cover_url, c.platform, c.content_type, c.published_at, c.discovered_at,
                c.tags_json, c.transcript_status, c.breakout_score, c.breakout_ratio, c.growth_rate_per_hour, c.breakout_reason,
                COALESCE(a.category, '') AS ai_category,
-               COALESCE(a.summary_zh, c.summary, '') AS brief,
+               COALESCE(a.summary_zh, '') AS brief,
                (SELECT views FROM content_metrics m WHERE m.content_id = c.id ORDER BY captured_at DESC LIMIT 1) AS latest_views,
                (SELECT likes FROM content_metrics m WHERE m.content_id = c.id ORDER BY captured_at DESC LIMIT 1) AS latest_likes,
                (SELECT comments FROM content_metrics m WHERE m.content_id = c.id ORDER BY captured_at DESC LIMIT 1) AS latest_comments,
@@ -464,12 +502,17 @@ export function registerRadarRoutes(app: FastifyInstance): void {
     return { ok: true, ...recomputeAllBreakouts() };
   });
 
-  // ===== 4. 平台热榜 =====
+  // ===== 4. 平台热榜（默认仅返回各榜单最新一期快照，绝不出现重复 #1） =====
   app.get<{ Querystring: { platform?: string; category?: string; contentType?: string; minRelevance?: string; q?: string; includeLocal?: string } }>(
     '/api/radar/hot-board',
     async (req) => {
       const db = getDb();
-      const baseWhere: string[] = [];
+      const baseWhere: string[] = [
+        `h.captured_at = (
+          SELECT MAX(h2.captured_at) FROM hot_board_items h2
+          WHERE h2.platform = h.platform AND h2.board_name = h.board_name
+        )`,
+      ];
       const baseParams: (string | number)[] = [];
       if (req.query.includeLocal !== 'true') {
         baseWhere.push("h.board_name != '站内监控高热'");

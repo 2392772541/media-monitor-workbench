@@ -276,6 +276,13 @@ export async function refreshHotBoards(platforms?: string[]): Promise<{
     );
   }
 
+  // 按本次成功拉取的榜单，清理掉旧快照中已落榜的条目，避免出现重复 #1 #2
+  const refreshedBoards = new Set(collected.map((it) => `${it.platform}:::${it.boardName}`));
+  for (const key of refreshedBoards) {
+    const [plat, board] = key.split(':::');
+    db.prepare('DELETE FROM hot_board_items WHERE platform = ? AND board_name = ? AND captured_at < ?').run(plat, board, now);
+  }
+
   log('INFO', 'hot-board', `Refreshed hot boards: total=${collected.length}`);
   return { ok: collected.length > 0, totalSaved: collected.length, results };
 }
