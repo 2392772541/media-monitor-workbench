@@ -33,6 +33,35 @@ function appendTaskLog(collectionId: number, sourceId: number, level: 'INFO' | '
   log(level, `task#${collectionId}`, message);
 }
 
+export function getRunningSourceIds(): number[] {
+  return Array.from(runningBySource);
+}
+
+// 错峰触发全部活跃对标博主立刻检查一次最新更新（间隔 4 秒防并发撞风控）
+export function enqueueAllActiveCreators(): { queued: number; total: number; skipped: number } {
+  const db = getDb();
+  const rows = db
+    .prepare("SELECT id FROM sources WHERE status = 'active' AND source_type != 'hot_board' ORDER BY id ASC")
+    .all() as Array<{ id: number }>;
+
+  let queued = 0;
+  let skipped = 0;
+  rows.forEach((row, idx) => {
+    if (runningBySource.has(row.id)) {
+      skipped++;
+      return;
+    }
+    const delayMs = queued * 4000;
+    queued++;
+    if (delayMs === 0) {
+      enqueueCollection(row.id, 'manual');
+    } else {
+      setTimeout(() => enqueueCollection(row.id, 'manual'), delayMs);
+    }
+  });
+  return { queued, total: rows.length, skipped };
+}
+
 export function enqueueCollection(sourceId: number, triggerType: 'manual' | 'scheduled' | 'retry' = 'manual'): { queued: boolean; collectionId?: number; reason?: string } {
   const db = getDb();
   const source = db.prepare('SELECT * FROM sources WHERE id = ?').get(sourceId) as SourceRecord | undefined;
@@ -155,6 +184,13 @@ async function executeCollection(collectionId: number) {
       updateSourceAuthorProfile(source.id, res.authorProfile);
     }
 
+    // 首次添加博主建档时，把超过 7 天的历史老视频自动标为已读，不混充“最新更新”打扰用户
+    const prevCount = (
+      db.prepare('SELECT COUNT(*) AS c FROM contents WHERE source_id = ?').get(source.id) as { c: number }
+    ).c;
+    const isInitialSeed = prevCount === 0;
+    const sevenDaysAgoMs = Date.now() - 7 * 24 * 60 * 60 * 1000;
+
     let itemsNew = 0;
     let itemsUpdated = 0;
     for (const item of res.items) {
@@ -175,8 +211,17 @@ async function executeCollection(collectionId: number) {
         rawMeta: item.rawMeta,
         metrics: item.metrics,
       });
-      if (saved.isNew) itemsNew++;
-      else if (saved.metricsUpdated) itemsUpdated++;
+      if (saved.isNew) {
+        itemsNew++;
+        if (isInitialSeed && item.publishedAt) {
+          const pubMs = Date.parse(item.publishedAt);
+          if (Number.isFinite(pubMs) && pubMs < sevenDaysAgoMs) {
+            db.prepare('UPDATE contents SET is_read = 1 WHERE id = ?').run(saved.contentId);
+          }
+        }
+      } else if (saved.metricsUpdated) {
+        itemsUpdated++;
+      }
     }
 
     // 采集完成后自动刷新博主历史作品基线与潜力爆款指数

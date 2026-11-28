@@ -27,7 +27,7 @@ import type { HotBoardItem, PublishInspirationDraft } from './types';
 // 核心工作流导航：今日速览 / 对标博主 / 平台热榜 / 简易收藏本 / 评论采集
 const CORE_NAV_ITEMS = [
   { id: 'overview', label: '今日速览', sub: '国内外 AI 科技早报 + 每日值得拍的爆款速递', icon: Zap },
-  { id: 'creators', label: '对标博主', sub: '跨账号爆款总排行 + 扒口播 / 拆结构 / 一键二创写稿', icon: Users },
+  { id: 'creators', label: '对标博主', sub: '实时追更最新作品 · 按博主分类 · 一键拿口播文案', icon: Users },
   { id: 'hotboard', label: '平台热榜', sub: '按关注词降噪过滤，自由勾加想看的精准榜单', icon: Flame },
   { id: 'saved', label: '简易收藏本', sub: '随手标星存着拍，随时翻口播稿、二创稿和热评', icon: Star },
   { id: 'comments', label: '评论采集', sub: '贴链接 / 搜关键词 / 抓博主热评，AI 一键提炼痛点', icon: MessageSquareText },
@@ -73,6 +73,7 @@ export function App() {
   const [toast, setToast] = useState<string | null>(null);
   const [healthOk, setHealthOk] = useState<boolean>(true);
   const [savedCount, setSavedCount] = useState<number>(0);
+  const [creatorUnreadCount, setCreatorUnreadCount] = useState<number>(0);
 
   // 全站共用右侧深读抽屉（看点 / 口播稿 / 真实热评）与爆款拆解二创工坊
   const [drawerTarget, setDrawerTarget] = useState<DrawerTarget | null>(null);
@@ -88,8 +89,12 @@ export function App() {
 
   const refreshSavedBadge = async () => {
     try {
-      const res = await apiRequest<{ items: unknown[] }>('/api/radar/board');
-      setSavedCount(res.items.length);
+      const [boardRes, feedRes] = await Promise.all([
+        apiRequest<{ items: unknown[] }>('/api/radar/board'),
+        apiRequest<{ totalUnread: number }>('/api/radar/creators/feed?days=7&limit=5').catch(() => ({ totalUnread: 0 })),
+      ]);
+      setSavedCount(boardRes.items.length);
+      setCreatorUnreadCount(feedRes.totalUnread || 0);
     } catch {
       // ignore
     }
@@ -168,6 +173,8 @@ export function App() {
       .then((r) => setHealthOk(r.ok))
       .catch(() => setHealthOk(false));
     void refreshSavedBadge();
+    const timer = window.setInterval(() => void refreshSavedBadge(), 45000);
+    return () => window.clearInterval(timer);
   }, []);
 
   const currentNav = ALL_NAV_ITEMS.find((n) => n.id === activeTab) || CORE_NAV_ITEMS[0];
@@ -198,6 +205,11 @@ export function App() {
               >
                 <Icon size={17} />
                 <span>{item.label}</span>
+                {item.id === 'creators' && creatorUnreadCount > 0 && (
+                  <span className="nav-count" style={{ background: '#ef4444', color: '#ffffff' }}>
+                    {creatorUnreadCount}
+                  </span>
+                )}
                 {item.id === 'saved' && savedCount > 0 && <span className="nav-count">{savedCount}</span>}
               </button>
             );

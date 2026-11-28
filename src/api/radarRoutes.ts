@@ -1,5 +1,6 @@
 import type { FastifyInstance } from 'fastify';
 import { getDb } from '../db/database.js';
+import { enqueueAllActiveCreators, getRunningSourceIds } from '../scheduler/taskRunner.js';
 import { recomputeAllBreakouts, recomputeSourceBreakout } from '../services/breakoutService.js';
 import {
   addCustomHotBoard,
@@ -1458,5 +1459,169 @@ ${script.slice(0, 4500)}
     } catch (err) {
       return reply.code(500).send({ error: (err as Error).message });
     }
+  });
+
+  // ===== 13. 对标博主极简追更流（实时追更 + 按博主分类 + 直接拿口播文案） =====
+  app.get<{
+    Querystring: {
+      creatorId?: string;
+      days?: string;
+      onlyUnread?: string;
+      limit?: string;
+    };
+  }>('/api/radar/creators/feed', async (req) => {
+    const db = getDb();
+    const runningSet = new Set(getRunningSourceIds());
+    const creatorId = req.query.creatorId ? Number(req.query.creatorId) : null;
+    const days = req.query.days !== undefined ? Number(req.query.days) : 7;
+    const onlyUnread = req.query.onlyUnread === 'true';
+    const limit = Math.min(Math.max(Number(req.query.limit || 30), 5), 100);
+
+    // 仅统计 14 天内新发布且未读的作品为“新更新”提醒，防止老视频积压成红点
+    const rawCreators = db
+      .prepare(`
+        SELECT s.id, s.name, s.platform, s.url, s.status, s.interval_minutes,
+               s.last_checked_at, s.last_error, s.follower_count,
+               (SELECT COUNT(*) FROM contents c WHERE c.source_id = s.id) AS content_count,
+               (SELECT COUNT(*) FROM contents c
+                WHERE c.source_id = s.id
+                  AND c.is_read = 0
+                  AND COALESCE(c.published_at, c.discovered_at) >= datetime('now', '-14 days')) AS unread_count,
+               (SELECT MAX(COALESCE(c.published_at, c.discovered_at)) FROM contents c WHERE c.source_id = s.id) AS latest_published_at
+        FROM sources s
+        WHERE s.source_type != 'hot_board'
+        ORDER BY unread_count DESC, latest_published_at DESC, s.id DESC
+      `)
+      .all() as Array<Record<string, unknown>>;
+
+    const creators = rawCreators.map((c) => ({
+      ...c,
+      unread_count: Number(c.unread_count || 0),
+      is_running: runningSet.has(Number(c.id)),
+    }));
+    const totalUnread = creators.reduce((sum, c) => sum + c.unread_count, 0);
+
+    const buildQuery = (applyDays: number) => {
+      const where: string[] = ["s.source_type != 'hot_board'"];
+      const args: (string | number)[] = [];
+      if (creatorId) {
+        where.push('c.source_id = ?');
+        args.push(creatorId);
+      }
+      if (applyDays > 0) {
+        where.push(`COALESCE(c.published_at, c.discovered_at) >= datetime('now', '-' || ? || ' days')`);
+        args.push(applyDays);
+      }
+      if (onlyUnread) {
+        where.push('c.is_read = 0');
+      }
+      const sql = `
+        SELECT c.id, c.source_id, c.platform, c.canonical_url, c.title, c.author, c.cover_url,
+               c.summary, c.body, c.transcript, c.transcript_status,
+               length(COALESCE(c.transcript, '')) AS transcript_chars,
+               c.published_at, c.discovered_at, c.is_read,
+               s.name AS source_name,
+               (SELECT views FROM content_metrics m WHERE m.content_id = c.id ORDER BY captured_at DESC LIMIT 1) AS latest_views,
+               (SELECT likes FROM content_metrics m WHERE m.content_id = c.id ORDER BY captured_at DESC LIMIT 1) AS latest_likes,
+               (SELECT comments FROM content_metrics m WHERE m.content_id = c.id ORDER BY captured_at DESC LIMIT 1) AS latest_comments,
+               (SELECT id FROM topic_board tb WHERE tb.source_content_id = c.id LIMIT 1) AS saved_board_id,
+               (SELECT status FROM tingwu_jobs tj WHERE tj.content_id = c.id ORDER BY tj.created_at DESC LIMIT 1) AS asr_job_status,
+               (SELECT error_message FROM tingwu_jobs tj WHERE tj.content_id = c.id ORDER BY tj.created_at DESC LIMIT 1) AS asr_error
+        FROM contents c
+        JOIN sources s ON s.id = c.source_id
+        WHERE ${where.join(' AND ')}
+        ORDER BY COALESCE(c.published_at, c.discovered_at) DESC, c.id DESC
+        LIMIT ?
+      `;
+      return db.prepare(sql).all(...args, limit) as Array<Record<string, unknown>>;
+    };
+
+    let items = buildQuery(days);
+    let fallbackShown = false;
+    // 若用户选了近 7 天且该博主近 7 天刚好没发新视频，温柔回退显示最近 5 条（绝不翻几十条老黄历，也不给一片空白）
+    if (items.length === 0 && days > 0 && !onlyUnread) {
+      const fallbackLimit = creatorId ? 5 : 8;
+      const where: string[] = ["s.source_type != 'hot_board'"];
+      const args: (string | number)[] = [];
+      if (creatorId) {
+        where.push('c.source_id = ?');
+        args.push(creatorId);
+      }
+      items = db
+        .prepare(`
+          SELECT c.id, c.source_id, c.platform, c.canonical_url, c.title, c.author, c.cover_url,
+                 c.summary, c.body, c.transcript, c.transcript_status,
+                 length(COALESCE(c.transcript, '')) AS transcript_chars,
+                 c.published_at, c.discovered_at, c.is_read,
+                 s.name AS source_name,
+                 (SELECT views FROM content_metrics m WHERE m.content_id = c.id ORDER BY captured_at DESC LIMIT 1) AS latest_views,
+                 (SELECT likes FROM content_metrics m WHERE m.content_id = c.id ORDER BY captured_at DESC LIMIT 1) AS latest_likes,
+                 (SELECT comments FROM content_metrics m WHERE m.content_id = c.id ORDER BY captured_at DESC LIMIT 1) AS latest_comments,
+                 (SELECT id FROM topic_board tb WHERE tb.source_content_id = c.id LIMIT 1) AS saved_board_id,
+                 (SELECT status FROM tingwu_jobs tj WHERE tj.content_id = c.id ORDER BY tj.created_at DESC LIMIT 1) AS asr_job_status,
+                 (SELECT error_message FROM tingwu_jobs tj WHERE tj.content_id = c.id ORDER BY tj.created_at DESC LIMIT 1) AS asr_error
+          FROM contents c
+          JOIN sources s ON s.id = c.source_id
+          WHERE ${where.join(' AND ')}
+          ORDER BY COALESCE(c.published_at, c.discovered_at) DESC, c.id DESC
+          LIMIT ?
+        `)
+        .all(...args, fallbackLimit) as Array<Record<string, unknown>>;
+      if (items.length > 0) fallbackShown = true;
+    }
+
+    const intervalRow = db.prepare("SELECT value FROM app_settings WHERE key = 'default_creator_interval'").get() as
+      | { value?: string }
+      | undefined;
+    const checkIntervalMinutes = Number(intervalRow?.value) > 0 ? Number(intervalRow?.value) : 30;
+
+    return {
+      creators,
+      items,
+      fallbackShown,
+      totalUnread,
+      checkIntervalMinutes,
+      anyRunning: runningSet.size > 0,
+    };
+  });
+
+  app.post('/api/radar/creators/check-all', async () => {
+    const res = enqueueAllActiveCreators();
+    return {
+      ok: true,
+      ...res,
+      message: res.queued > 0 ? `已启动追更，正在依次检查 ${res.queued} 位对标博主的最新更新...` : '所有博主都在检查中，请稍候',
+    };
+  });
+
+  app.post<{ Body: { creatorId?: number; contentId?: number } }>('/api/radar/creators/mark-read', async (req) => {
+    const db = getDb();
+    const { creatorId, contentId } = req.body || {};
+    let changes = 0;
+    if (contentId) {
+      changes = Number(db.prepare('UPDATE contents SET is_read = 1 WHERE id = ?').run(Number(contentId)).changes);
+    } else if (creatorId) {
+      changes = Number(db.prepare('UPDATE contents SET is_read = 1 WHERE source_id = ? AND is_read = 0').run(Number(creatorId)).changes);
+    } else {
+      changes = Number(
+        db
+          .prepare("UPDATE contents SET is_read = 1 WHERE is_read = 0 AND source_id IN (SELECT id FROM sources WHERE source_type != 'hot_board')")
+          .run().changes
+      );
+    }
+    return { ok: true, updated: changes };
+  });
+
+  app.put<{ Body: { intervalMinutes: number } }>('/api/radar/creators/interval', async (req) => {
+    const mins = Math.min(240, Math.max(15, Number(req.body?.intervalMinutes || 30)));
+    const db = getDb();
+    const now = new Date().toISOString();
+    db.prepare(`
+      INSERT INTO app_settings (key, value, updated_at)
+      VALUES ('default_creator_interval', ?, ?)
+      ON CONFLICT(key) DO UPDATE SET value = excluded.value, updated_at = excluded.updated_at
+    `).run(String(mins), now);
+    db.prepare("UPDATE sources SET interval_minutes = ?, updated_at = ? WHERE source_type != 'hot_board'").run(mins, now);
+    return { ok: true, intervalMinutes: mins };
   });
 }

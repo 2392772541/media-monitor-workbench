@@ -197,7 +197,7 @@ export function registerRoutes(app: FastifyInstance, shutdownHandler: () => Prom
     // 读取用户在系统设置中配置的默认采集频率
     const settingKey = platform === 'website' || platform === 'rss' ? 'default_website_interval' : 'default_creator_interval';
     const settingRow = db.prepare('SELECT value FROM app_settings WHERE key = ?').get(settingKey) as { value?: string } | undefined;
-    const fallbackInterval = platform === 'website' || platform === 'rss' ? 60 : 120;
+    const fallbackInterval = platform === 'website' || platform === 'rss' ? 60 : 30;
     const defaultInterval = Number(settingRow?.value) > 0 ? Number(settingRow?.value) : fallbackInterval;
     const interval = Math.max(5, Number(req.body.interval_minutes || defaultInterval));
     const priority = Number(req.body.priority || 2);
