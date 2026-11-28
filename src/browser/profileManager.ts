@@ -1,6 +1,7 @@
 import { chromium, type BrowserContext } from 'playwright';
 import { getSafeProfileDir, resolveChromiumExecutable, type ProfilePlatform } from '../config.js';
 import { getDb } from '../db/database.js';
+import { syncSauCookiesToContext } from '../services/sauCookieSync.js';
 import { log } from '../utils/logger.js';
 
 interface LockEntry {
@@ -183,6 +184,16 @@ export async function withHeadlessContext<T>(
     });
     lockEntry.context = context;
     touchProfileUsage(platform);
+    // 若采集浏览器本身处于游客态/已过期，自动从「视频发布」复用同平台最新有效登录态并持久化保存
+    const syncRes = await syncSauCookiesToContext(platform, context, false);
+    if (syncRes.synced) {
+      updateProfileStatus(platform, {
+        login_status: 'logged_in',
+        capability_status: '已接入并验证',
+        needs_attention: 0,
+        note: `已自动同步保存「视频发布」登录态（${syncRes.accountName || platform}）`,
+      });
+    }
     return await fn(context);
   } finally {
     if (context) {
@@ -190,6 +201,27 @@ export async function withHeadlessContext<T>(
     }
     activeLocks.delete(platform);
   }
+}
+
+export async function syncPublishLoginToProfile(
+  platform: ProfilePlatform,
+  force = true
+): Promise<{ ok: boolean; synced: boolean; message: string }> {
+  const res = await withHeadlessContext(
+    platform,
+    'publish-cookie-sync',
+    async (ctx) => syncSauCookiesToContext(platform, ctx, force),
+    { headless: true }
+  );
+  if (res.synced) {
+    updateProfileStatus(platform, {
+      login_status: 'logged_in',
+      capability_status: '已接入并验证',
+      needs_attention: 0,
+      note: `已同步保存「视频发布」登录态（${res.accountName || platform}）`,
+    });
+  }
+  return { ok: Boolean(res.synced || res.alreadyLoggedIn), synced: res.synced, message: res.message };
 }
 
 export async function closeAllBrowsers(): Promise<void> {

@@ -14,6 +14,7 @@ import {
   pendingIfOffline,
   pickCreatorAndContentIds,
   scanForSecrets,
+  throwIfMcpOfflineOrPreM3,
 } from './lib/helpers.mjs';
 
 export function getTier3Checks() {
@@ -202,12 +203,21 @@ export function getTier3Checks() {
               tags: ['t1', 't2', 't3', 't4', 't5', 't6', 't7', 't8'],
             },
           });
+          throwIfMcpOfflineOrPreM3(ctx, copyResp, 'T3-05 prepare_publish_copy');
           assert.notEqual(copyResp.result?.isError, true);
           const copyData = parseMcpToolJson(copyResp);
-          const xhsCopy = copyData?.xiaohongshu || copyData?.byPlatform?.[1] || copyData?.byPlatform?.['1'];
-          if (xhsCopy && Array.isArray(xhsCopy.tags)) {
-            assert.ok(xhsCopy.tags.length <= 6);
-          }
+          const xhsCopy =
+            copyData?.xiaohongshu ||
+            copyData?.byPlatform?.[1] ||
+            copyData?.byPlatform?.['1'] ||
+            copyData?.platforms?.['1'] ||
+            copyData?.platforms?.[1] ||
+            copyData?.platforms?.xiaohongshu;
+          assert.ok(
+            xhsCopy && Array.isArray(xhsCopy.tags),
+            `Expected Xiaohongshu platform copy with tags array in prepare_publish_copy output, got: ${JSON.stringify(copyData)}`
+          );
+          assert.ok(xhsCopy.tags.length <= 6, `Expected XHS tags <= 6, got ${xhsCopy.tags.length}`);
 
           const pubResp = await client.request('tools/call', {
             name: 'publish_video_to_platforms',
@@ -220,6 +230,7 @@ export function getTier3Checks() {
               tags: ['t1', 't2', 't3', 't4', 't5', 't6', 't7', 't8'],
             },
           });
+          throwIfMcpOfflineOrPreM3(ctx, pubResp, 'T3-05 publish_video_to_platforms');
           assert.notEqual(pubResp.result?.isError, true);
           const pubRaw = JSON.stringify(parseMcpToolJson(pubResp) || pubResp.result);
           assert.ok(pubRaw.includes('话题前完整简介段落'));
@@ -367,14 +378,23 @@ export function getTier3Checks() {
               tags: dy.tags?.length ? dy.tags : ['玉米种植', '农资干货'],
             },
           });
+          throwIfMcpOfflineOrPreM3(ctx, prep, 'T3-10 prepare_publish_copy');
           assert.notEqual(prep.result?.isError, true);
           const data = parseMcpToolJson(prep);
           const raw = JSON.stringify(data || prep.result);
           assert.ok(!raw.includes('##'));
-          const xhs = data?.xiaohongshu || data?.byPlatform?.[1] || data?.byPlatform?.['1'];
-          if (xhs && Array.isArray(xhs.tags)) {
-            assert.ok(xhs.tags.length <= 6);
-          }
+          const xhs =
+            data?.xiaohongshu ||
+            data?.byPlatform?.[1] ||
+            data?.byPlatform?.['1'] ||
+            data?.platforms?.['1'] ||
+            data?.platforms?.[1] ||
+            data?.platforms?.xiaohongshu;
+          assert.ok(
+            xhs && Array.isArray(xhs.tags),
+            `Expected Xiaohongshu platform copy with tags array in prepare_publish_copy output, got: ${JSON.stringify(data)}`
+          );
+          assert.ok(xhs.tags.length <= 6, `Expected XHS tags <= 6, got ${xhs.tags.length}`);
         } finally {
           await client.close();
         }
@@ -438,6 +458,7 @@ export function getTier3Checks() {
             ['get_publish_history', { limit: 10 }],
           ]) {
             const resp = await client.request('tools/call', { name: tool, arguments: args });
+            throwIfMcpOfflineOrPreM3(ctx, resp, `T3-12 ${tool}`);
             assert.notEqual(resp.result?.isError, true);
             const leaks = scanForSecrets(JSON.stringify(resp), `mcp:${tool}`);
             assert.deepEqual(leaks, [], `Secret leak in ${tool}: ${leaks.join('; ')}`);

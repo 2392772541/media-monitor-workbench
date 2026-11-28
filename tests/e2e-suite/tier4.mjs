@@ -23,6 +23,7 @@ import {
   runCommandSync,
   scanCssCompliance,
   scanForSecrets,
+  throwIfMcpOfflineOrPreM3,
 } from './lib/helpers.mjs';
 
 export function getTier4Checks() {
@@ -222,9 +223,11 @@ export function getTier4Checks() {
           client.start();
           await client.initialize();
           const st = await client.request('tools/call', { name: 'check_workbench_status', arguments: {} });
+          throwIfMcpOfflineOrPreM3(ctx, st, 'T4-04 check_workbench_status');
           assert.notEqual(st.result?.isError, true);
 
           const acc = await client.request('tools/call', { name: 'list_publish_accounts', arguments: { validate: false } });
+          throwIfMcpOfflineOrPreM3(ctx, acc, 'T4-04 list_publish_accounts');
           assert.notEqual(acc.result?.isError, true);
           assert.deepEqual(scanForSecrets(JSON.stringify(acc), 'T4-04_accounts'), []);
 
@@ -236,6 +239,7 @@ export function getTier4Checks() {
               tags: ['t1', 't2', 't3', 't4', 't5', 't6', 't7', 't8'],
             },
           });
+          throwIfMcpOfflineOrPreM3(ctx, copy, 'T4-04 prepare_publish_copy');
           assert.notEqual(copy.result?.isError, true);
 
           const dryPub = await client.request('tools/call', {
@@ -250,6 +254,7 @@ export function getTier4Checks() {
               tags: ['t1', 't2', 't3', 't4', 't5', 't6', 't7', 't8'],
             },
           });
+          throwIfMcpOfflineOrPreM3(ctx, dryPub, 'T4-04 publish_video_to_platforms(dryRun)');
           assert.notEqual(dryPub.result?.isError, true);
 
           const draftBlock = await client.request('tools/call', {
@@ -315,8 +320,9 @@ export function getTier4Checks() {
           .filter((f) => /^mcp_config\.json\.bak/i.test(f))
           .filter((f) => {
             const full = path.join(cfgDir, f);
+            const stat = fs.statSync(full);
             return (
-              fs.statSync(full).mtimeMs >= freshCutoffMs &&
+              Math.max(stat.mtimeMs, stat.birthtimeMs || 0) >= freshCutoffMs &&
               !fs.readFileSync(full, 'utf8').includes('video_publisher')
             );
           });

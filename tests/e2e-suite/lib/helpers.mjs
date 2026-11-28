@@ -390,6 +390,28 @@ export function parseMcpToolJson(callResp) {
   }
 }
 
+export function getMcpCallText(callResp) {
+  const content = callResp?.result?.content;
+  if (!Array.isArray(content)) return '';
+  return content
+    .filter((c) => c?.type === 'text' && typeof c?.text === 'string')
+    .map((c) => c.text)
+    .join('\n');
+}
+
+export function throwIfMcpOfflineOrPreM3(ctx, callResp, label = 'MCP tool') {
+  if (!ctx?.offlineCheck) return;
+  if (callResp?.result?.isError !== true) return;
+  const text = getMcpCallText(callResp);
+  if (
+    /fetch failed|ECONNREFUSED|ECONNRESET|ETIMEDOUT|无法连接本地媒体工作台|HTTP 404|Route .* not found/i.test(
+      text
+    )
+  ) {
+    throw new PendingLiveError(`${label} requires live M3 workbench/routes in offline-check: ${text}`);
+  }
+}
+
 export function listFilesRecursive(dir, extFilter) {
   const out = [];
   if (!fs.existsSync(dir)) return out;
@@ -436,13 +458,34 @@ export function scanCssCompliance(projectRoot = PROJECT_ROOT) {
     }
     if (/\.css$/i.test(file)) {
       for (const m of content.matchAll(nestedCardRuleRe)) {
-        const block = m[1] || '';
-        const hasBorderShorthand =
-          /(?:^|;)\s*border(?:-top|-right|-bottom|-left|-inline|-block)?\s*:\s*(?!(?:none|0(?:px)?)\s*(?:;|$))/i.test(
-            block
-          );
-        const hasBorderWidth = /(?:^|;)\s*border-width\s*:\s*(?!0(?:px)?\s*(?:;|$))/i.test(block);
-        const hasBorderStyle = /(?:^|;)\s*border-style\s*:\s*(?!none\s*(?:;|$))/i.test(block);
+        const block = (m[1] || '').replace(/\/\*[\s\S]*?\*\//g, '');
+        let hasBorderShorthand = false;
+        let hasBorderWidth = false;
+        let hasBorderStyle = false;
+        for (const decl of block.split(';')) {
+          const colonIdx = decl.indexOf(':');
+          if (colonIdx === -1) continue;
+          const prop = decl.slice(0, colonIdx).trim().toLowerCase();
+          const val = decl
+            .slice(colonIdx + 1)
+            .replace(/!important/gi, '')
+            .trim()
+            .toLowerCase();
+          if (!val) continue;
+          if (/^border(?:-top|-right|-bottom|-left|-inline|-block)?$/.test(prop)) {
+            if (!/^(?:none|0(?:px|em|rem)?(?:\s+(?:none|solid|dashed|dotted|transparent))*)$/.test(val)) {
+              hasBorderShorthand = true;
+            }
+          } else if (prop === 'border-width') {
+            if (!/^(?:0(?:px|em|rem)?\s*)+$/.test(val)) {
+              hasBorderWidth = true;
+            }
+          } else if (prop === 'border-style') {
+            if (!/^(?:none\s*)+$/.test(val)) {
+              hasBorderStyle = true;
+            }
+          }
+        }
         if (hasBorderShorthand || (hasBorderWidth && hasBorderStyle)) {
           violations.push(`Nested bordered card selector violation in ${path.relative(projectRoot, file)}`);
           break;

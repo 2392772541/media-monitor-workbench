@@ -2,6 +2,8 @@ import { getDb, updateSourceAuthorProfile, upsertContentWithMetrics } from '../d
 import { getAdapter } from '../adapters/index.js';
 import type { SourceRecord } from '../adapters/types.js';
 import { recomputeSourceBreakout } from '../services/breakoutService.js';
+import { refreshHotBoards } from '../services/hotBoardService.js';
+import { getNewsBriefSnapshot, refreshNewsBrief } from '../services/newsBriefService.js';
 import { log } from '../utils/logger.js';
 
 interface RunningTask {
@@ -15,6 +17,9 @@ const runningBySource = new Set<number>();
 const runningControllers = new Map<number, RunningTask>();
 let isProcessing = false;
 let schedulerTimer: NodeJS.Timeout | null = null;
+let auxRefreshTimer: NodeJS.Timeout | null = null;
+let hotBoardRefreshing = false;
+let newsBriefRefreshing = false;
 const retryCounts = new Map<number, number>();
 
 function appendTaskLog(collectionId: number, sourceId: number, level: 'INFO' | 'WARN' | 'ERROR', message: string) {
@@ -328,9 +333,9 @@ export function checkDueScheduledTasks() {
 
     let scheduledThisTick = 0;
     for (const s of sources) {
-      const baseIntervalMs = Math.max(15, s.interval_minutes || 120) * 60 * 1000;
-      // 若上次报错，自动把定时冷却延长 1.5 倍（最高 6 小时），避免频繁硬撞平台限流
-      const effectiveIntervalMs = s.last_error ? Math.min(baseIntervalMs * 1.5, 360 * 60 * 1000) : baseIntervalMs;
+      const baseIntervalMs = Math.max(5, s.interval_minutes || 30) * 60 * 1000;
+      // 若上次报错，适度退避 1.5 倍（最高 90 分钟），避免长时间死等漏掉新视频
+      const effectiveIntervalMs = s.last_error ? Math.min(baseIntervalMs * 1.5, 90 * 60 * 1000) : baseIntervalMs;
       const lastMs = s.last_checked_at ? Date.parse(s.last_checked_at) : 0;
       if (!lastMs || now - lastMs >= effectiveIntervalMs) {
         const delayMs = scheduledThisTick * 10000;
@@ -345,6 +350,60 @@ export function checkDueScheduledTasks() {
     }
   } catch (err) {
     log('WARN', 'scheduler', `Scheduler tick error: ${(err as Error).message}`);
+  }
+}
+
+// 后台自动刷新「平台热榜」和「国内外 AI 热点早报」（每 30 分钟自动更新，防止数据几天不动）
+export async function checkDueAuxiliaryRefreshes(): Promise<void> {
+  try {
+    const db = getDb();
+    const enabledRow = db.prepare("SELECT value FROM app_settings WHERE key = 'scheduler_enabled'").get() as
+      | { value: string }
+      | undefined;
+    if (enabledRow?.value === 'false') return;
+
+    const now = Date.now();
+    const refreshIntervalMs = 30 * 60 * 1000;
+
+    if (!hotBoardRefreshing) {
+      const latestHot = db
+        .prepare("SELECT MAX(captured_at) AS last_at FROM hot_board_items WHERE board_name != '站内监控高热'")
+        .get() as { last_at?: string | null } | undefined;
+      const lastHotMs = latestHot?.last_at ? Date.parse(latestHot.last_at) : 0;
+      if (!lastHotMs || now - lastHotMs >= refreshIntervalMs) {
+        hotBoardRefreshing = true;
+        void refreshHotBoards()
+          .then((res) => {
+            log('INFO', 'scheduler', `后台自动刷新平台热榜完成：入库 ${res.totalSaved} 条`);
+          })
+          .catch((err) => {
+            log('WARN', 'scheduler', `后台刷新平台热榜失败: ${(err as Error).message}`);
+          })
+          .finally(() => {
+            hotBoardRefreshing = false;
+          });
+      }
+    }
+
+    if (!newsBriefRefreshing) {
+      const snap = getNewsBriefSnapshot();
+      const lastNewsMs = snap.updatedAt ? Date.parse(snap.updatedAt) : 0;
+      if (!lastNewsMs || now - lastNewsMs >= refreshIntervalMs) {
+        newsBriefRefreshing = true;
+        void refreshNewsBrief()
+          .then((res) => {
+            log('INFO', 'scheduler', `后台自动刷新国内外 AI 早报完成：共 ${res.items.length} 条`);
+          })
+          .catch((err) => {
+            log('WARN', 'scheduler', `后台刷新 AI 早报失败: ${(err as Error).message}`);
+          })
+          .finally(() => {
+            newsBriefRefreshing = false;
+          });
+      }
+    }
+  } catch (err) {
+    log('WARN', 'scheduler', `Auxiliary refresh tick error: ${(err as Error).message}`);
   }
 }
 
@@ -368,13 +427,26 @@ export function startScheduler() {
   }, 30000);
   // Run initial check 5s after startup (also handles sleep/reboot catch-up!)
   setTimeout(() => checkDueScheduledTasks(), 5000);
-  log('INFO', 'scheduler', 'Background task scheduler started (30s interval)');
+
+  // 每 5 分钟巡检一次平台热榜与 AI 早报是否超过 30 分钟未刷新；启动 15 秒后补拉一次陈旧数据
+  auxRefreshTimer = setInterval(() => {
+    void checkDueAuxiliaryRefreshes();
+  }, 5 * 60 * 1000);
+  setTimeout(() => {
+    void checkDueAuxiliaryRefreshes();
+  }, 15000);
+
+  log('INFO', 'scheduler', 'Background task scheduler started (creators 30s tick + hot-boards/news-brief 30m auto-refresh)');
 }
 
 export function stopScheduler() {
   if (schedulerTimer) {
     clearInterval(schedulerTimer);
     schedulerTimer = null;
+  }
+  if (auxRefreshTimer) {
+    clearInterval(auxRefreshTimer);
+    auxRefreshTimer = null;
   }
   for (const [, running] of runningControllers) {
     running.controller.abort(new Error('服务关闭'));

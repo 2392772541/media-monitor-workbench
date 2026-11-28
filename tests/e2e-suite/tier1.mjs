@@ -26,6 +26,7 @@ import {
   runCommandSync,
   scanCssCompliance,
   scanForSecrets,
+  throwIfMcpOfflineOrPreM3,
 } from './lib/helpers.mjs';
 
 export function getTier1Checks() {
@@ -415,7 +416,7 @@ export function getTier1Checks() {
         } else {
           assert.equal(digRes.json?.status, 'done');
           const d = digRes.json?.digest;
-          assert.ok(d && typeof d.overview === 'string');
+          assert.ok(d && typeof d.overview === 'string' && d.overview.trim().length > 0);
           assert.ok(Array.isArray(d.keyPoints));
           assert.ok(Array.isArray(d.actionItems));
         }
@@ -1118,6 +1119,7 @@ export function getTier1Checks() {
             name: 'check_workbench_status',
             arguments: {},
           });
+          throwIfMcpOfflineOrPreM3(ctx, callResp, 'T1-F8-03 check_workbench_status');
           assert.notEqual(callResp.result?.isError, true);
           const data = parseMcpToolJson(callResp);
           const raw = JSON.stringify(data || callResp.result);
@@ -1143,6 +1145,7 @@ export function getTier1Checks() {
             name: 'list_publish_accounts',
             arguments: { validate: false },
           });
+          throwIfMcpOfflineOrPreM3(ctx, callResp, 'T1-F8-04 list_publish_accounts');
           assert.notEqual(callResp.result?.isError, true);
           const data = parseMcpToolJson(callResp);
           const serialized = JSON.stringify(data || callResp.result);
@@ -1173,6 +1176,7 @@ export function getTier1Checks() {
               tags: ['干货', '效率'],
             },
           });
+          throwIfMcpOfflineOrPreM3(ctx, copyResp, 'T1-F8-05 prepare_publish_copy');
           assert.notEqual(copyResp.result?.isError, true);
           const copyText = JSON.stringify(parseMcpToolJson(copyResp) || copyResp.result);
           assert.ok(copyText.includes('测试标题'));
@@ -1182,6 +1186,7 @@ export function getTier1Checks() {
             name: 'get_publish_history',
             arguments: { limit: 5 },
           });
+          throwIfMcpOfflineOrPreM3(ctx, histResp, 'T1-F8-05 get_publish_history');
           assert.notEqual(histResp.result?.isError, true);
           const histData = parseMcpToolJson(histResp);
           assert.ok(histData && (Array.isArray(histData.records) || Array.isArray(histData.data) || Array.isArray(histData)));
@@ -1222,6 +1227,7 @@ export function getTier1Checks() {
               tags: ['农业', '效率'],
             },
           });
+          throwIfMcpOfflineOrPreM3(ctx, pubResp, 'T1-F8-06 publish_video_to_platforms');
           assert.notEqual(pubResp.result?.isError, true);
           const data = parseMcpToolJson(pubResp);
           const raw = JSON.stringify(data || pubResp.result);
@@ -1437,19 +1443,19 @@ export function getTier1Checks() {
                 const text = fs.readFileSync(full, 'utf8');
                 return {
                   name: f,
-                  mtimeMs: stat.mtimeMs,
+                  freshMs: Math.max(stat.mtimeMs, stat.birthtimeMs || 0),
                   hasVideoPublisher: text.includes('video_publisher'),
                 };
               })
           : [];
 
         if (!hasVideoPublisher) {
-          const hasFreshBackup = backups.some((b) => b.mtimeMs >= freshCutoffMs);
+          const hasFreshBackup = backups.some((b) => b.freshMs >= freshCutoffMs);
           if (!hasFreshBackup) {
             pendingIfOffline(ctx, 'M3 mcp_config.json video_publisher & fresh .bak* backup not yet created');
           }
         } else {
-          const freshPreEditBackup = backups.some((b) => b.mtimeMs >= freshCutoffMs && !b.hasVideoPublisher);
+          const freshPreEditBackup = backups.some((b) => b.freshMs >= freshCutoffMs && !b.hasVideoPublisher);
           assert.ok(
             freshPreEditBackup,
             `Expected fresh pre-M3 mcp_config.json.bak* (>= 2026-11-28, without video_publisher); found: ${backups.map((b) => b.name).join(', ')}`

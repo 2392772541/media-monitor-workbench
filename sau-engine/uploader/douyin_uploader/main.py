@@ -435,7 +435,10 @@ class DouYinBaseUploader(BaseVideoUploader):
         await page.keyboard.type(description or "")
 
         for tag in tags or []:
-            await page.keyboard.type(" #" + tag)
+            clean_tag = str(tag or "").strip().lstrip("#").strip()
+            if not clean_tag:
+                continue
+            await page.keyboard.type(" #" + clean_tag)
             await page.keyboard.press("Space")
 
     async def set_location(self, page: Page, location: str = ""):

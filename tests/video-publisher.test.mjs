@@ -256,15 +256,44 @@ test('mcp/video-publisher-mcp.mjs stdio JSON-RPC 2.0 握手与全部 5 个工具
   rlErr.on('line', (line) => stderrLines.push(line));
 
   const pending = new Map();
+  const nullIdFrames = [];
+  const nullIdWaiters = [];
   const rlOut = readline.createInterface({ input: child.stdout });
   rlOut.on('line', (line) => {
     const msg = JSON.parse(line);
+    if (msg.id === null) {
+      if (nullIdWaiters.length > 0) {
+        const waiter = nullIdWaiters.shift();
+        waiter(msg);
+      } else {
+        nullIdFrames.push(msg);
+      }
+      return;
+    }
     if (msg.id !== undefined && pending.has(msg.id)) {
       const { resolve } = pending.get(msg.id);
       pending.delete(msg.id);
       resolve(msg);
     }
   });
+
+  const nextNullIdFrame = () =>
+    new Promise((resolve, reject) => {
+      if (nullIdFrames.length > 0) {
+        resolve(nullIdFrames.shift());
+        return;
+      }
+      const timer = setTimeout(() => {
+        const idx = nullIdWaiters.indexOf(onFrame);
+        if (idx >= 0) nullIdWaiters.splice(idx, 1);
+        reject(new Error('RPC timeout waiting for id=null error frame'));
+      }, 10000);
+      const onFrame = (msg) => {
+        clearTimeout(timer);
+        resolve(msg);
+      };
+      nullIdWaiters.push(onFrame);
+    });
 
   let nextId = 1;
   const rpc = (method, params = {}) =>
@@ -297,7 +326,18 @@ test('mcp/video-publisher-mcp.mjs stdio JSON-RPC 2.0 握手与全部 5 个工具
     const unknownRes = await rpc('unknown/method');
     assert.equal(unknownRes.error.code, -32601);
 
-    // 2. tools/list 5 tools
+    // 1.5 JSON-RPC 2.0 错误帧：语法错误返回 -32700，非对象返回 -32600
+    child.stdin.write('{bad json\n');
+    const parseErrRes = await nextNullIdFrame();
+    assert.equal(parseErrRes.id, null);
+    assert.equal(parseErrRes.error.code, -32700);
+
+    child.stdin.write('[1, 2]\n');
+    const invalidReqRes = await nextNullIdFrame();
+    assert.equal(invalidReqRes.id, null);
+    assert.equal(invalidReqRes.error.code, -32600);
+
+    // 2. tools/list 5 tools 及关键参数 schema 校验
     const listToolsRes = await rpc('tools/list');
     const toolNames = listToolsRes.result.tools.map((t) => t.name);
     assert.deepEqual(toolNames, [
@@ -307,6 +347,13 @@ test('mcp/video-publisher-mcp.mjs stdio JSON-RPC 2.0 握手与全部 5 个工具
       'publish_video_to_platforms',
       'get_publish_history',
     ]);
+    const prepSchema = listToolsRes.result.tools.find((t) => t.name === 'prepare_publish_copy').inputSchema;
+    assert.equal(prepSchema.required.includes('rawCopy'), false);
+    assert.ok(prepSchema.properties.title);
+    assert.ok(prepSchema.properties.description);
+    assert.ok(prepSchema.properties.script);
+    const pubSchema = listToolsRes.result.tools.find((t) => t.name === 'publish_video_to_platforms').inputSchema;
+    assert.equal(pubSchema.properties.confirmed?.type, 'boolean');
 
     // 3. check_workbench_status
     const statusRes = await rpc('tools/call', { name: 'check_workbench_status', arguments: {} });
@@ -346,6 +393,49 @@ test('mcp/video-publisher-mcp.mjs stdio JSON-RPC 2.0 握手与全部 5 个工具
     assert.ok(copyData.platforms['1'].warnings.length > 0);
     assert.ok(copyData.platforms['4'].warnings.length > 0);
 
+    // 5.5 prepare_publish_copy 支持无 rawCopy 的 { title, description, tags }，并修复空白 tags 覆盖与短标题前缀重复
+    const structuredCopyRes = await rpc('tools/call', {
+      name: 'prepare_publish_copy',
+      arguments: {
+        title: '农资实操小技巧',
+        description: '话题前的一段通俗简介',
+        tags: ['#玉米', '水肥'],
+        platforms: [1, 2, 3, 4],
+      },
+    });
+    assert.equal(structuredCopyRes.result.isError ?? false, false);
+    const structuredCopy = structuredCopyRes.result.structuredContent;
+    assert.equal(structuredCopy.platforms['3'].title, '农资实操小技巧');
+    assert.equal(structuredCopy.platforms['3'].description, '话题前的一段通俗简介');
+    assert.deepEqual(structuredCopy.platforms['3'].tags, ['玉米', '水肥']);
+    assert.ok(structuredCopy.platforms['2'].shortTitle.length >= 6);
+
+    const emptyCopyRes = await rpc('tools/call', {
+      name: 'prepare_publish_copy',
+      arguments: { tags: ['玉米'] },
+    });
+    assert.equal(emptyCopyRes.result.isError, true);
+
+    const blankTagsRes = await rpc('tools/call', {
+      name: 'prepare_publish_copy',
+      arguments: {
+        rawCopy: '正文标题\n正文内容 #自动标签',
+        tags: [' ', '# '],
+        platforms: [3],
+      },
+    });
+    assert.deepEqual(blankTagsRes.result.structuredContent.platforms['3'].tags, ['自动标签']);
+
+    const shortPrefixRes = await rpc('tools/call', {
+      name: 'prepare_publish_copy',
+      arguments: {
+        rawCopy: 'Hi!!!\n短',
+        titleHint: 'Hi!!!',
+        platforms: [2],
+      },
+    });
+    assert.equal(shortPrefixRes.result.structuredContent.platforms['2'].shortTitle.startsWith('HiHi'), false);
+
     // 6. publish_video_to_platforms: dryRun 不触发导入也不发布
     workbenchCalls.length = 0;
     const dryRes = await rpc('tools/call', {
@@ -365,7 +455,41 @@ test('mcp/video-publisher-mcp.mjs stdio JSON-RPC 2.0 握手与全部 5 个工具
     assert.equal(workbenchCalls.some((c) => c.pathname === '/api/sau/post-video'), false);
     assert.ok(!dryRes.result.content[0].text.includes('secret_'));
 
-    // 7. publish_video_to_platforms: isDraft=true 安全拦截非视频号平台（1/3/4），仅提交平台 2
+    // 6.5 publish_video_to_platforms: 未传 confirmed: true 或 confirmed: false 时（非 dryRun）必须拦截，0 次导入与发布调用
+    workbenchCalls.length = 0;
+    const unconfirmedRes = await rpc('tools/call', {
+      name: 'publish_video_to_platforms',
+      arguments: {
+        filePath: sampleVideoPath,
+        platforms: [3],
+        title: '未确认不应发布',
+        description: '简介',
+        tags: ['测试'],
+        dryRun: false,
+      },
+    });
+    assert.equal(unconfirmedRes.result.isError, true);
+    assert.equal(unconfirmedRes.result.structuredContent?.requiresConfirmation, true);
+    assert.equal(JSON.parse(unconfirmedRes.result.content[0].text).requiresConfirmation, true);
+    assert.equal(workbenchCalls.some((c) => c.pathname === '/api/sau/import-local-file'), false);
+    assert.equal(workbenchCalls.some((c) => c.pathname === '/api/sau/post-video'), false);
+
+    workbenchCalls.length = 0;
+    const confirmedFalseRes = await rpc('tools/call', {
+      name: 'publish_video_to_platforms',
+      arguments: {
+        filePath: sampleVideoPath,
+        platforms: [3],
+        title: 'confirmed=false 不应发布',
+        confirmed: false,
+      },
+    });
+    assert.equal(confirmedFalseRes.result.isError, true);
+    assert.equal(confirmedFalseRes.result.structuredContent?.requiresConfirmation, true);
+    assert.equal(workbenchCalls.some((c) => c.pathname === '/api/sau/import-local-file'), false);
+    assert.equal(workbenchCalls.some((c) => c.pathname === '/api/sau/post-video'), false);
+
+    // 7. publish_video_to_platforms: confirmed=true + isDraft=true 安全拦截非视频号平台（1/3/4），仅提交平台 2
     workbenchCalls.length = 0;
     const draftRes = await rpc('tools/call', {
       name: 'publish_video_to_platforms',
@@ -376,6 +500,7 @@ test('mcp/video-publisher-mcp.mjs stdio JSON-RPC 2.0 握手与全部 5 个工具
         description: '视频号草稿简介',
         tags: ['干货'],
         isDraft: true,
+        confirmed: true,
       },
     });
     const draftResults = draftRes.result.structuredContent.results;
@@ -393,6 +518,24 @@ test('mcp/video-publisher-mcp.mjs stdio JSON-RPC 2.0 握手与全部 5 个工具
     assert.equal(postCalls[0].body.isDraft, true);
     assert.equal(postCalls[0].body.description, '视频号草稿简介');
     assert.deepEqual(postCalls[0].body.fileList, ['uuid-88_sample.mp4']);
+
+    // 7.5 publish_video_to_platforms: confirmed=true 且非草稿模式正常提交
+    workbenchCalls.length = 0;
+    const normalPubRes = await rpc('tools/call', {
+      name: 'publish_video_to_platforms',
+      arguments: {
+        filePath: sampleVideoPath,
+        platforms: [3],
+        title: '确认后正常发布',
+        description: '抖音简介',
+        tags: ['农资'],
+        confirmed: true,
+      },
+    });
+    assert.equal(normalPubRes.result.isError ?? false, false);
+    assert.equal(normalPubRes.result.structuredContent.results[0].status, 'submitted');
+    assert.equal(workbenchCalls.filter((c) => c.pathname === '/api/sau/import-local-file').length, 1);
+    assert.equal(workbenchCalls.filter((c) => c.pathname === '/api/sau/post-video').length, 1);
 
     // 8. get_publish_history（脱敏 account_list）
     const histRes = await rpc('tools/call', {
@@ -428,6 +571,7 @@ test('sau-engine 新增 /importLocalFile、4 平台 description 透传、小红�
 
   const pyScript = `
 import asyncio
+import gc
 import json
 import sqlite3
 import tempfile
@@ -439,13 +583,15 @@ from uploader.tencent_uploader.main import TencentVideo
 from uploader.xiaohongshu_uploader.main import XiaoHongShuVideo
 from uploader.douyin_uploader.main import DouYinVideo
 
-with tempfile.TemporaryDirectory() as td:
+with tempfile.TemporaryDirectory(ignore_cleanup_errors=True) as td:
     tmp = Path(td)
     sau_backend.BASE_DIR = tmp
     sau_backend.ensure_runtime_ready()
     client = sau_backend.app.test_client()
 
-    # 1. /importLocalFile 校验与正常导入
+    # 1. /importLocalFile 校验与正常导入（含非 dict JSON 与路径穿越拦截）
+    assert client.post("/importLocalFile", json=[1, 2, 3]).status_code == 400
+    assert client.post("/importLocalFile", json="not-an-object").status_code == 400
     assert client.post("/importLocalFile", json={"filePath": "relative.mp4"}).status_code == 400
     assert client.post("/importLocalFile", json={"filePath": str(tmp / "missing.mp4")}).status_code == 404
     bad_txt = tmp / "note.txt"
@@ -455,6 +601,8 @@ with tempfile.TemporaryDirectory() as td:
     src_mp4 = tmp / "origin.mp4"
     src_mp4.write_bytes(b"video-bytes-123")
     assert client.post("/importLocalFile", json={"filePath": str(src_mp4), "filename": ".."}).status_code == 400
+    assert client.post("/importLocalFile", json={"filePath": str(src_mp4), "filename": "../evil"}).status_code == 400
+    assert client.post("/importLocalFile", json={"filePath": str(src_mp4), "filename": "sub\\\\evil"}).status_code == 400
 
     ok_resp = client.post("/importLocalFile", json={"filePath": f'"{src_mp4}"', "filename": "custom_clip"})
     assert ok_resp.status_code == 200
@@ -501,12 +649,24 @@ with tempfile.TemporaryDirectory() as td:
             {"type": 4, "title": "b4", "description": "bd4", "fileList": ["a.mp4"], "accountList": ["c.json"]},
         ])
         assert rb.status_code == 200
+        rb_bad = client.post("/postVideoBatch", json=[
+            {"type": 99, "title": "bad", "fileList": ["a.mp4"], "accountList": ["c.json"]},
+        ])
+        assert rb_bad.status_code == 400
     assert calls[0][0] == "tencent" and calls[0][2]["desc"] == "d2"
     assert calls[1][0] == "ks" and calls[1][2]["desc"] == "d4"
     assert calls[2][0] == "xhs" and calls[2][2]["desc"] == "bd1"
     assert calls[3][0] == "tencent" and calls[3][2]["desc"] == "bd2"
     assert calls[4][0] == "douyin" and calls[4][2]["desc"] == "bd3"
     assert calls[5][0] == "ks" and calls[5][2]["desc"] == "bd4"
+
+    # 校验未知平台 type=99 未写入 publish_records，且显式关闭 sqlite3 连接防止 Windows WinError 32
+    db_conn = sqlite3.connect(tmp / "db" / "database.db")
+    try:
+        bad_rows = db_conn.execute("SELECT COUNT(1) FROM publish_records WHERE platform_type = 99").fetchone()[0]
+        assert bad_rows == 0
+    finally:
+        db_conn.close()
 
     # 3. TencentVideo.add_title_tags 在话题前写入 desc
     class FakeKeyboard:
@@ -565,10 +725,25 @@ with tempfile.TemporaryDirectory() as td:
     assert ("press", "Space") in xp.keyboard.events
     assert xp.topic_item.clicks == 5
 
-    # 5. DouYinVideo tags=None 防护
+    # 5. DouYinVideo tags=None 防护与 fill_title_and_description 前导 # 清洗（防 ##农资）
     dv = DouYinVideo("抖音标题", "a.mp4", None, 0, "c.json", desc=None)
     assert dv.tags == []
     assert len(dv.tags or []) == 0
+
+    class DyInputLocator(FakeLocator):
+        def locator(self, sel): return self
+        async def fill(self, text): pass
+    class DyPage:
+        def __init__(self):
+            self.keyboard = FakeKeyboard()
+            self._loc = DyInputLocator()
+        def get_by_text(self, text, exact=False): return self._loc
+
+    dy_page = DyPage()
+    asyncio.run(dv.fill_title_and_description(dy_page, "抖音标题", "抖音简介", ["#农资", " ", "# ", " 玉米 "]))
+    dy_typed_tags = [v for k, v in dy_page.keyboard.events if k == "type" and v.startswith(" #")]
+    assert dy_typed_tags == [" #农资", " #玉米"]
+    gc.collect()
 print("PY_M3_OK")
 `;
 

@@ -1,5 +1,6 @@
 import { getDb } from '../db/database.js';
 import { withHeadlessContext, updateProfileStatus } from '../browser/profileManager.js';
+import { hasActiveAuthCookies } from '../services/sauCookieSync.js';
 import { parseCountText } from './socialUtils.js';
 import { resolveShortSourceUrl } from './urlRecognizer.js';
 import type { AvailabilityResult, ExtractedContentItem, FetchResult, LoginCheckResult, PlatformAdapter, SourceRecord } from './types.js';
@@ -187,16 +188,20 @@ async function fetchDouyinPages(
           return { hasCaptcha, hasLoginWall, authorName, fansText, bio, videos };
         }, maxItems);
 
+        const cookies = await ctx.cookies('https://www.douyin.com');
+        const hasAuthCookie = hasActiveAuthCookies('douyin', cookies);
+
         return {
           apiProfile: apiProfile as DouyinApiProfile | null,
           apiPosts: Array.from(apiPosts.values()).slice(0, maxItems),
           domState,
+          hasAuthCookie,
         };
       },
       { headless: options.headless }
     );
 
-    const { apiProfile, apiPosts, domState } = result;
+    const { apiProfile, apiPosts, domState, hasAuthCookie } = result;
     const resolvedAuthorName =
       apiProfile?.nickname ||
       apiPosts[0]?.author?.nickname ||
@@ -276,18 +281,30 @@ async function fetchDouyinPages(
     const bio = apiProfile?.bio || domState.bio || '';
 
     writeLog(
-      `采集完成，博主「${resolvedAuthorName}」提取到 ${items.length} 条真实抖音作品${followerCount != null ? `，粉丝数 ${followerCount}` : ''}`
+      `采集完成，博主「${resolvedAuthorName}」提取到 ${items.length} 条真实抖音作品${followerCount != null ? `，粉丝数 ${followerCount}` : ''}（${hasAuthCookie ? '已登录完整实时流' : '未登录游客态，抖音可能隐藏近 7 天新视频'}）`
     );
     if (items.length > 0) {
-      updateProfileStatus('douyin', {
-        capability_status: '已接入并验证',
-        needs_attention: 0,
-      });
+      if (hasAuthCookie) {
+        updateProfileStatus('douyin', {
+          login_status: 'logged_in',
+          capability_status: '已接入并验证',
+          needs_attention: 0,
+          note: '抖音登录态有效，可实时抓取最新视频',
+        });
+      } else {
+        // 严禁把未登录游客态误报成“已登录”：抖音对游客会隐藏最近 7 天新发视频
+        updateProfileStatus('douyin', {
+          login_status: 'auth_required',
+          capability_status: '需要登录',
+          needs_attention: 1,
+          note: '当前为未登录游客态，抖音会隐藏最近 7 天新视频！请扫码登录或在「视频发布」登录抖音后自动同步',
+        });
+      }
     }
 
     return {
       ok: items.length > 0,
-      capabilityStatus: items.length > 0 ? '已接入并验证' : '暂时不可用',
+      capabilityStatus: items.length > 0 ? (hasAuthCookie ? '已接入并验证' : '需要登录') : '暂时不可用',
       items,
       authorProfile: {
         name: resolvedAuthorName !== source.name ? resolvedAuthorName : apiProfile?.nickname || undefined,
@@ -298,8 +315,10 @@ async function fetchDouyinPages(
       logs,
       errorMessage:
         items.length === 0
-          ? '未读取到该博主的作品列表（可去「浏览器与登录」扫码登录抖音后重试，或确认粘贴的是博主主页链接而非单个视频链接）'
-          : undefined,
+          ? '未读取到该博主的作品列表（可去「浏览器与登录」扫码登录抖音或同步「视频发布」登录态后重试）'
+          : !hasAuthCookie
+            ? '当前抖音为未登录游客态，抖音会隐藏最近 7 天新视频；请在「浏览器与登录」点击同步发布登录态或扫码登录'
+            : undefined,
     };
   } catch (err) {
     const msg = (err as Error).message;

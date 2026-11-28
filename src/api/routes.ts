@@ -7,8 +7,10 @@ import {
   closeLoginWindow,
   listBrowserProfilesWithRuntime,
   openLoginWindow,
+  syncPublishLoginToProfile,
   updateProfileStatus,
 } from '../browser/profileManager.js';
+import { isSauSyncSupportedPlatform } from '../services/sauCookieSync.js';
 import { cancelCollection, enqueueCollection } from '../scheduler/taskRunner.js';
 import { readRecentLogs } from '../utils/logger.js';
 import {
@@ -525,6 +527,21 @@ export function registerRoutes(app: FastifyInstance, shutdownHandler: () => Prom
       updateProfileStatus('other', { login_status: 'optional', capability_status: '已接入并验证', needs_attention: 0 });
     }
     return res;
+  });
+
+  // 一键将「视频发布」中已登录的平台凭证同步并持久保存到对应采集浏览器（无需重复扫码）
+  app.post<{ Params: { platform: string } }>('/api/browsers/:platform/sync-from-publish', async (req, reply) => {
+    const p = req.params.platform as ProfilePlatform;
+    if (!PLATFORM_PROFILES.includes(p) || !isSauSyncSupportedPlatform(p)) {
+      return reply.code(400).send({ ok: false, error: '该平台暂不支持从「视频发布」同步登录态' });
+    }
+    try {
+      const res = await syncPublishLoginToProfile(p, true);
+      if (!res.ok) return reply.code(400).send(res);
+      return res;
+    } catch (err) {
+      return reply.code(500).send({ ok: false, error: (err as Error).message });
+    }
   });
 
   app.get('/api/tasks', async () => {

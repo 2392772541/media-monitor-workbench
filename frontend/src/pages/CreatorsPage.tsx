@@ -731,6 +731,8 @@ export function CreatorsPage({
                 value={feed?.checkIntervalMinutes || 30}
                 onChange={(e) => void handleChangeInterval(Number(e.target.value))}
               >
+                <option value={5}>每 5 分钟</option>
+                <option value={10}>每 10 分钟</option>
                 <option value={15}>每 15 分钟</option>
                 <option value={30}>每 30 分钟</option>
                 <option value={60}>每 1 小时</option>

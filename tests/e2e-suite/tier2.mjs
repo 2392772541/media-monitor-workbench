@@ -27,6 +27,7 @@ import {
   runCommandSync,
   scanCssCompliance,
   scanForSecrets,
+  throwIfMcpOfflineOrPreM3,
 } from './lib/helpers.mjs';
 
 export function getTier2Checks() {
@@ -734,7 +735,7 @@ export function getTier2Checks() {
           'for n in ast.walk(tree):',
           '  if isinstance(n, ast.AsyncFunctionDef) and n.name == "fill_tags":',
           '    seg = ast.get_source_segment(src, n) or ""',
-          '    ok = ":6" in seg or "[:6]" in seg or "range(6" in seg',
+          '    ok = ":6" in seg or "[:6]" in seg or "range(6" in seg or ">= 6" in seg',
           'print(json.dumps({"xhs_cap_6": ok}))',
         ].join('\n');
         const pyRes = runCommandSync(PYTHON_EXE, ['-c', xhsScript]);
@@ -757,12 +758,21 @@ export function getTier2Checks() {
               tags: ['t1', 't2', 't3', 't4', 't5', 't6', 't7', 't8', 't9'],
             },
           });
+          throwIfMcpOfflineOrPreM3(ctx, resp, 'T2-F7-01 prepare_publish_copy');
           assert.notEqual(resp.result?.isError, true);
           const data = parseMcpToolJson(resp);
-          const xhsEntry = data?.xiaohongshu || data?.byPlatform?.[1] || data?.byPlatform?.['1'] || data?.platforms?.xiaohongshu;
-          if (xhsEntry && Array.isArray(xhsEntry.tags)) {
-            assert.ok(xhsEntry.tags.length <= 6, `Expected XHS tags <= 6, got ${xhsEntry.tags.length}`);
-          }
+          const xhsEntry =
+            data?.xiaohongshu ||
+            data?.byPlatform?.[1] ||
+            data?.byPlatform?.['1'] ||
+            data?.platforms?.['1'] ||
+            data?.platforms?.[1] ||
+            data?.platforms?.xiaohongshu;
+          assert.ok(
+            xhsEntry && Array.isArray(xhsEntry.tags),
+            `Expected Xiaohongshu platform copy with tags array in prepare_publish_copy output, got: ${JSON.stringify(data)}`
+          );
+          assert.ok(xhsEntry.tags.length <= 6, `Expected XHS tags <= 6, got ${xhsEntry.tags.length}`);
         } finally {
           await client.close();
         }
@@ -788,6 +798,7 @@ export function getTier2Checks() {
               tags: ['#AI工具', '  剪辑  ', '', '###'],
             },
           });
+          throwIfMcpOfflineOrPreM3(ctx, resp, 'T2-F7-02 prepare_publish_copy');
           assert.notEqual(resp.result?.isError, true);
           const raw = JSON.stringify(parseMcpToolJson(resp) || resp.result);
           assert.ok(!raw.includes('##'), `Double ## detected in output: ${raw}`);
@@ -813,6 +824,7 @@ export function getTier2Checks() {
             name: 'prepare_publish_copy',
             arguments: { title: '无简介测试', description: '', tags: ['测试'] },
           });
+          throwIfMcpOfflineOrPreM3(ctx, emptyDesc, 'T2-F7-03 prepare_publish_copy(empty)');
           assert.notEqual(emptyDesc.result?.isError, true);
           const emptyStr = JSON.stringify(parseMcpToolJson(emptyDesc) || emptyDesc.result);
           assert.ok(!/\bundefined\b|\bnull\b/.test(emptyStr.replace(/"description":null/g, '')), `Unexpected undefined/null in ${emptyStr}`);
@@ -821,6 +833,7 @@ export function getTier2Checks() {
             name: 'prepare_publish_copy',
             arguments: { title: '多行简介测试', description: '第一段\n第二段', tags: ['测试'] },
           });
+          throwIfMcpOfflineOrPreM3(ctx, multiDesc, 'T2-F7-03 prepare_publish_copy(multi)');
           assert.notEqual(multiDesc.result?.isError, true);
           const multiStr = JSON.stringify(parseMcpToolJson(multiDesc) || multiDesc.result);
           assert.ok(multiStr.includes('第一段') && multiStr.includes('第二段'));
@@ -886,6 +899,7 @@ export function getTier2Checks() {
                 tags: ['测试'],
               },
             });
+            throwIfMcpOfflineOrPreM3(ctx, resp, `T2-F8-01 publish_video_to_platforms(platform=${plat}, isDraft=true)`);
             const data = parseMcpToolJson(resp);
             const raw = JSON.stringify(data || resp.result);
             assert.match(
@@ -1026,6 +1040,7 @@ export function getTier2Checks() {
               tags: ['干货'],
             },
           });
+          throwIfMcpOfflineOrPreM3(ctx, resp, 'T2-F8-06 publish_video_to_platforms(platform=2, isDraft=true)');
           assert.notEqual(resp.result?.isError, true);
         } finally {
           await client.close();

@@ -113,7 +113,8 @@ function buildTencentShortTitle(titleText, fallbackText, warnings) {
   if (candidate.length < 6 && fallbackText) {
     const extra = filterAllowed(fallbackText);
     if (extra) {
-      candidate = (candidate + extra).trim();
+      // 避免 fallback 本身已以 candidate 开头时重复拼接前缀（如 "Hi" + "Hi短" -> "HiHi短"）
+      candidate = candidate && extra.startsWith(candidate) ? extra : (candidate + extra).trim();
     }
   }
 
@@ -356,31 +357,61 @@ async function handlePreparePublishCopy(args) {
     : typeof args?.script === 'string'
       ? args.script
       : '';
-  if (!rawCopy.trim()) {
-    return makeToolError('rawCopy 不能为空');
+  const explicitTitle = typeof args?.title === 'string' ? args.title.trim() : '';
+  const explicitDescription = typeof args?.description === 'string' ? args.description.trim() : '';
+  const titleHint = typeof args?.titleHint === 'string' ? args.titleHint.trim() : '';
+  const styleHint = typeof args?.styleHint === 'string' ? args.styleHint.trim() : '';
+
+  if (!rawCopy.trim() && !explicitTitle && !explicitDescription) {
+    return makeToolError('rawCopy、script、title、description 不能全部为空');
   }
 
   const targetPlatforms = normalizePlatformList(args?.platforms);
-  const titleHint = typeof args?.titleHint === 'string' ? args.titleHint : '';
   const explicitTags = args?.tags;
+  const normalizedExplicitTags = normalizeTags(explicitTags);
   const useAi = Boolean(args?.useAi);
 
-  const ruleParts = splitRawCopyByRules(rawCopy, titleHint, explicitTags);
+  const effectiveRawCopy = rawCopy.trim()
+    ? rawCopy
+    : [explicitTitle, explicitDescription].filter(Boolean).join('\n');
+
+  let ruleParts;
+  if (rawCopy.trim()) {
+    ruleParts = splitRawCopyByRules(rawCopy, explicitTitle || titleHint, explicitTags);
+    if (explicitDescription) {
+      ruleParts.baseDesc = explicitDescription;
+    }
+  } else if (explicitTitle) {
+    const titleExtracted = extractTagsFromCopy(explicitTitle);
+    const descExtracted = extractTagsFromCopy(explicitDescription);
+    const mergedTags = normalizeTags([
+      ...normalizedExplicitTags,
+      ...titleExtracted.extracted,
+      ...descExtracted.extracted,
+    ]);
+    const baseTitle = titleExtracted.cleanText || explicitTitle;
+    const baseDesc = descExtracted.cleanText || explicitDescription || baseTitle;
+    ruleParts = { baseTitle, baseDesc, mergedTags };
+  } else {
+    ruleParts = splitRawCopyByRules(explicitDescription, titleHint, explicitTags);
+  }
+
   let aiByPlatform = null;
   let usedAi = false;
   let aiFallbackReason = '';
 
-  if (useAi && rawCopy.trim().length >= 8) {
+  if (useAi && effectiveRawCopy.trim().length >= 8) {
     try {
+      const effectiveStyleHint = styleHint || titleHint;
       const res = await fetchWorkbench(
         '/api/publish/ai-generate',
         {
           method: 'POST',
           headers: { 'Content-Type': 'application/json' },
           body: JSON.stringify({
-            script: rawCopy,
+            script: effectiveRawCopy,
             platforms: targetPlatforms,
-            ...(titleHint.trim() ? { styleHint: titleHint.trim() } : {}),
+            ...(effectiveStyleHint ? { styleHint: effectiveStyleHint } : {}),
           }),
         },
         60_000
@@ -401,10 +432,11 @@ async function handlePreparePublishCopy(args) {
     const aiEntry = aiByPlatform ? aiByPlatform[String(p)] || aiByPlatform[p] : null;
     const candidateTitle = aiEntry?.title || ruleParts.baseTitle;
     const candidateDesc = aiEntry?.description || ruleParts.baseDesc;
+    // 仅当显式传入有效标签时才覆盖提取/AI 标签，避免 [" ", "# "] 误清空自动提取的 #话题
     const candidateTags =
-      Array.isArray(explicitTags) && explicitTags.length > 0
-        ? explicitTags
-        : aiEntry?.tags && Array.isArray(aiEntry.tags) && aiEntry.tags.length > 0
+      normalizedExplicitTags.length > 0
+        ? normalizedExplicitTags
+        : aiEntry?.tags && normalizeTags(aiEntry.tags).length > 0
           ? aiEntry.tags
           : ruleParts.mergedTags;
 
@@ -413,7 +445,7 @@ async function handlePreparePublishCopy(args) {
       candidateTitle,
       candidateDesc,
       candidateTags,
-      rawCopy
+      effectiveRawCopy
     );
   }
 
@@ -468,6 +500,22 @@ async function handlePublishVideoToPlatforms(args) {
     if (!platTitle) {
       return makeToolError(`平台 ${PLATFORM_NAMES[p]} 缺少发布标题 title`);
     }
+  }
+
+  // 防误发硬守卫：非 dryRun 实际导入/发布前必须显式传入 confirmed: true
+  if (!dryRun && args?.confirmed !== true) {
+    const guardPayload = {
+      ok: false,
+      requiresConfirmation: true,
+      message:
+        '发布保护：实际导入与发布前必须先展示标题/简介/标签并获得用户确认，确认后请传入 confirmed: true（或先用 dryRun: true 预演）。',
+      platforms: targetPlatforms,
+    };
+    return {
+      isError: true,
+      content: [{ type: 'text', text: JSON.stringify(guardPayload, null, 2) }],
+      structuredContent: guardPayload,
+    };
   }
 
   // 查询当前账号池（内部匹配 cookie 文件名，不输出到工具响应）
@@ -755,13 +803,26 @@ const TOOLS = [
   },
   {
     name: 'prepare_publish_copy',
-    description: '按抖音/小红书/微信视频号/快手各平台字数与标签上限，将原始文案拆分为标题、话题前简介与标签，并输出规范校验告警。',
+    description:
+      '按抖音/小红书/微信视频号/快手各平台字数与标签上限，将原始文案（rawCopy/script）或结构化标题简介（title/description/tags）拆分为标题、话题前简介与标签，并输出规范校验告警。',
     inputSchema: {
       type: 'object',
       properties: {
         rawCopy: {
           type: 'string',
-          description: '原始口播或待发布文案',
+          description: '原始口播或待发布文案（rawCopy/script 与 title/description 至少提供一项）',
+        },
+        script: {
+          type: 'string',
+          description: 'rawCopy 的别名，原始口播或待发布文案',
+        },
+        title: {
+          type: 'string',
+          description: '可选主标题（未传 rawCopy/script 时可与 description/tags 配合使用）',
+        },
+        description: {
+          type: 'string',
+          description: '可选话题前简介文字（未传 rawCopy/script 时可与 title/tags 配合使用）',
         },
         platforms: {
           type: 'array',
@@ -771,6 +832,10 @@ const TOOLS = [
         titleHint: {
           type: 'string',
           description: '可选标题偏好或主标题提示',
+        },
+        styleHint: {
+          type: 'string',
+          description: '可选风格提示（useAi 为 true 时透传给工作台 AI）',
         },
         tags: {
           type: 'array',
@@ -782,13 +847,14 @@ const TOOLS = [
           description: '是否优先调用工作台 AI 生成四平台差异化文案（失败自动回退规则拆分）',
         },
       },
-      required: ['rawCopy'],
+      required: [],
       additionalProperties: false,
     },
   },
   {
     name: 'publish_video_to_platforms',
-    description: '免拖拽导入本机视频并向指定平台提交发布（支持 dryRun 预检与仅微信视频号的 isDraft 草稿保护）。',
+    description:
+      '免拖拽导入本机视频并向指定平台提交发布（默认开启防误发保护，非 dryRun 须先向用户展示文案并传入 confirmed: true；支持仅微信视频号的 isDraft 草稿保护）。',
     inputSchema: {
       type: 'object',
       properties: {
@@ -864,6 +930,10 @@ const TOOLS = [
         dryRun: {
           type: 'boolean',
           description: '仅校验与预览发布计划，不复制文件也不提交发布',
+        },
+        confirmed: {
+          type: 'boolean',
+          description: '防误发确认开关：实际导入与发布（dryRun 非 true）前必须先展示文案给用户确认后传入 true',
         },
       },
       required: ['platforms', 'title'],
@@ -941,9 +1011,11 @@ async function processLine(line) {
   try {
     message = JSON.parse(trimmed);
   } catch {
+    sendError(null, -32700, 'Parse error');
     return;
   }
   if (!message || typeof message !== 'object' || Array.isArray(message)) {
+    sendError(null, -32600, 'Invalid Request');
     return;
   }
   if (typeof message.method !== 'string' || !message.method) {

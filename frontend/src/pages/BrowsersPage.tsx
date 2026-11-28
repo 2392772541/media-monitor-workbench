@@ -16,6 +16,7 @@ function loginStatusLabel(s: string) {
 }
 
 const PRIORITY_PLATFORMS = ['douyin', 'bilibili', 'xiaohongshu', 'kuaishou', 'youtube', 'x', 'rss'];
+const PUBLISH_SYNC_PLATFORMS = new Set(['douyin', 'kuaishou', 'wechat-channels']);
 
 export function BrowsersPage({
   onToast,
@@ -93,6 +94,22 @@ export function BrowsersPage({
     }
   };
 
+  const syncFromPublish = async (platform: string) => {
+    setBusyPlatform(platform);
+    try {
+      const res = await apiRequest<{ ok: boolean; message: string }>(`/api/browsers/${platform}/sync-from-publish`, {
+        method: 'POST',
+        body: JSON.stringify({}),
+      });
+      onToast(res.message);
+      await load();
+    } catch (err) {
+      onToast((err as Error).message);
+    } finally {
+      setBusyPlatform(null);
+    }
+  };
+
   return (
     <div>
       {/* 极简人话说明条 */}
@@ -101,10 +118,10 @@ export function BrowsersPage({
           <div style={{ display: 'flex', alignItems: 'flex-start', gap: 10, flex: '1 1 440px' }}>
             <ShieldCheck size={20} color="#0284c7" style={{ marginTop: 2, flexShrink: 0 }} />
             <div>
-              <div style={{ fontWeight: 700, color: '#0369a1' }}>这里只管「后台抓博主/评论」用的独立浏览器（平时不用动）</div>
+              <div style={{ fontWeight: 700, color: '#0369a1' }}>已打通登录态自动复用：在「视频发布」登过的抖音/快手会自动同步保存到这里</div>
               <div style={{ fontSize: 13, color: '#0c4a6e', marginTop: 3 }}>
-                抖音和 B站平时大多能直接免登录抓取；只有遇到平台弹出「需要登录」提醒时，才点对应平台右侧的「打开登录窗口」扫一次码。
-                它和你平时用的 Chrome 完全隔离，也和「视频发布」里的发布账号互不干扰。
+                抖音未登录时平台会隐藏最近 7 天新视频；只要你在「视频发布」里扫过码，后台抓对标博主时会自动复用并保存登录态（无需重复扫码）。
+                B站扫一次码可避免限流漏抓，全程与你日常 Chrome 完全隔离。
               </div>
             </div>
           </div>
@@ -224,7 +241,18 @@ export function BrowsersPage({
                     <div style={{ color: 'var(--text-muted)' }}>用：{fmtTime(p.last_used_at)}</div>
                   </td>
                   <td>
-                    <div style={{ display: 'flex', flexWrap: 'nowrap', gap: 6 }}>
+                    <div style={{ display: 'flex', flexWrap: 'wrap', gap: 6 }}>
+                      {PUBLISH_SYNC_PLATFORMS.has(p.platform) && (
+                        <button
+                          className="btn btn-sm"
+                          style={{ background: '#f0fdf4', color: '#15803d', borderColor: '#bbf7d0' }}
+                          disabled={isBusy}
+                          title="直接把「视频发布」里已扫码的登录状态同步保存过来"
+                          onClick={() => void syncFromPublish(p.platform)}
+                        >
+                          <Send size={12} /> 同步发布登录态
+                        </button>
+                      )}
                       <button
                         className={`btn btn-sm ${isOptional ? '' : 'btn-primary'}`}
                         disabled={isBusy}

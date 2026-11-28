@@ -295,7 +295,14 @@ def upload_save():
 @app.route('/importLocalFile', methods=['POST'])
 def import_local_file():
     """免拖拽导入本机绝对路径视频文件到素材库，并登记到 file_records。"""
-    data = request.get_json(silent=True) or {}
+    raw = request.get_json(silent=True)
+    if not isinstance(raw, dict):
+        return jsonify({
+            "code": 400,
+            "msg": "Invalid JSON object payload",
+            "data": None
+        }), 400
+    data = raw
     raw_val = data.get('filePath')
     raw_path = raw_val.strip().strip('"').strip("'").strip() if isinstance(raw_val, str) else ''
 
@@ -337,16 +344,17 @@ def import_local_file():
             }), 400
         custom_stripped = custom_raw.strip()
         if custom_stripped:
-            if custom_stripped in {".", ".."} or any(sep in custom_stripped for sep in ("/", "\\")):
-                safe_candidate = Path(custom_stripped).name
-                if not safe_candidate or safe_candidate in {".", ".."}:
-                    return jsonify({
-                        "code": 400,
-                        "msg": "Invalid filename",
-                        "data": None
-                    }), 400
-            else:
-                safe_candidate = Path(custom_stripped).name
+            if (
+                custom_stripped in {".", ".."}
+                or any(sep in custom_stripped for sep in ("/", "\\"))
+                or Path(custom_stripped).name != custom_stripped
+            ):
+                return jsonify({
+                    "code": 400,
+                    "msg": "Invalid filename",
+                    "data": None
+                }), 400
+            safe_candidate = Path(custom_stripped).name
             if not safe_candidate or safe_candidate in {".", ".."}:
                 return jsonify({
                     "code": 400,
@@ -798,6 +806,12 @@ def postVideoBatch():
     if not isinstance(data_list, list):
         return jsonify({"code": 400, "msg": "Expected a JSON array", "data": None}), 400
     for data in data_list:
+        if not isinstance(data, dict):
+            return jsonify({"code": 400, "msg": "Each batch item must be a JSON object", "data": None}), 400
+        platform_type = data.get('type')
+        if not isinstance(platform_type, int) or isinstance(platform_type, bool) or platform_type not in (1, 2, 3, 4):
+            return jsonify({"code": 400, "msg": f"Unsupported platform type: {platform_type}", "data": None}), 400
+    for data in data_list:
         # 从JSON数据中提取fileList和accountList
         file_list = data.get('fileList', [])
         account_list = data.get('accountList', [])
@@ -834,6 +848,8 @@ def postVideoBatch():
                 case 4:
                     post_video_ks(title, file_list, tags, account_list, category, enableTimer, videos_per_day, daily_times,
                               start_days, desc=description)
+                case _:
+                    return jsonify({"code": 400, "msg": f"Unsupported platform type: {type}", "data": None}), 400
             record_publish_history(
                 type, title, file_list, account_list, tags,
                 enableTimer, videos_per_day, daily_times, start_days,

@@ -2088,7 +2088,7 @@ ${script.slice(0, 4500)}
   });
 
   app.put<{ Body: { intervalMinutes: number } }>('/api/radar/creators/interval', async (req) => {
-    const mins = Math.min(240, Math.max(15, Number(req.body?.intervalMinutes || 30)));
+    const mins = Math.min(240, Math.max(5, Number(req.body?.intervalMinutes || 30)));
     const db = getDb();
     const now = new Date().toISOString();
     db.prepare(`
