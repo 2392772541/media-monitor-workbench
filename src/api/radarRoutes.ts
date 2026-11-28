@@ -28,6 +28,10 @@ import {
   getCreatorLeaderboard,
 } from '../services/remixService.js';
 import {
+  generateCreatorCopyDigest,
+  getCreatorCopyDigestMap,
+} from '../services/creatorDigestService.js';
+import {
   analyzeCommentCrawlJob,
   deleteCommentCrawlJob,
   fetchCommentsWithMediaCrawler,
@@ -1570,6 +1574,12 @@ ${script.slice(0, 4500)}
       if (items.length > 0) fallbackShown = true;
     }
 
+    const digestMap = getCreatorCopyDigestMap();
+    const enrichedItems = items.map((it) => ({
+      ...it,
+      copy_digest: digestMap[String(it.id)] || null,
+    }));
+
     const intervalRow = db.prepare("SELECT value FROM app_settings WHERE key = 'default_creator_interval'").get() as
       | { value?: string }
       | undefined;
@@ -1577,13 +1587,26 @@ ${script.slice(0, 4500)}
 
     return {
       creators,
-      items,
+      items: enrichedItems,
       fallbackShown,
       totalUnread,
       checkIntervalMinutes,
       anyRunning: runningSet.size > 0,
     };
   });
+
+  // 单条视频简洁文案归纳（大概讲什么 + 1234核心要点 + 1234可以做什么）
+  app.post<{ Params: { id: string }; Body: { forceRefresh?: boolean } }>(
+    '/api/radar/intel/:id/copy-digest',
+    async (req, reply) => {
+      try {
+        const res = await generateCreatorCopyDigest(Number(req.params.id), Boolean(req.body?.forceRefresh));
+        return { ok: true, ...res };
+      } catch (err) {
+        return reply.code(500).send({ error: (err as Error).message });
+      }
+    }
+  );
 
   app.post('/api/radar/creators/check-all', async () => {
     const res = enqueueAllActiveCreators();

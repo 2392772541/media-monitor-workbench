@@ -17,6 +17,8 @@ import {
   Star,
   Clock,
   Sparkles,
+  ListChecks,
+  RotateCcw,
 } from 'lucide-react';
 import { apiRequest, fmtNum, fmtTime, PLATFORM_LABELS } from '../api';
 import type { DrawerTab } from '../components/ContentDrawer';
@@ -28,6 +30,16 @@ interface CreatorsPageProps {
   onOpenContent: (contentId: number, tab?: DrawerTab, savedBoardId?: number | null) => void;
   onOpenRemix: (contentId: number) => void;
   onRefreshBadge: () => void;
+}
+
+interface CreatorCopyDigest {
+  contentId: number;
+  overview: string;
+  keyPoints: string[];
+  actionItems: string[];
+  usedTranscript: boolean;
+  sourceChars: number;
+  generatedAt: string;
 }
 
 interface TrackerCreator {
@@ -69,6 +81,7 @@ interface TrackerVideoItem {
   saved_board_id: number | null;
   asr_job_status: string | null;
   asr_error: string | null;
+  copy_digest?: CreatorCopyDigest | null;
 }
 
 interface CreatorsFeedResp {
@@ -84,10 +97,37 @@ const PLATFORM_COLORS: Record<string, string> = {
   bilibili: '#4f46e5',
   douyin: '#e11d48',
   youtube: '#dc2626',
+  kuaishou: '#f97316',
+  xiaohongshu: '#ef4444',
+  'wechat-channels': '#10b981',
   rss: '#0284c7',
   website: '#0d9488',
   x: '#0f172a',
 };
+
+const VERTICAL_PLATFORMS = new Set(['douyin', 'kuaishou', 'xiaohongshu', 'wechat-channels']);
+
+// 按平台原生画幅决定封面展示方式：抖音/快手/小红书用 9:16 竖屏，B站/YouTube用 16:9 横屏，无封面的图文源不占空黑框
+function getMediaOrientation(item: TrackerVideoItem): 'vertical' | 'horizontal' | 'none' {
+  if (VERTICAL_PLATFORMS.has(item.platform)) return 'vertical';
+  if (item.platform === 'bilibili' || item.platform === 'youtube') return 'horizontal';
+  if (item.cover_url && item.cover_url.trim()) return 'horizontal';
+  return 'none';
+}
+
+function formatDigestForCopy(item: TrackerVideoItem, digest: CreatorCopyDigest): string {
+  const lines = [
+    `【${item.source_name}】${item.title.slice(0, 60)}`,
+    `大概讲什么：${digest.overview}`,
+    '',
+    '核心要点：',
+    ...digest.keyPoints.map((pt, idx) => `${idx + 1}. ${pt}`),
+    '',
+    '对我有啥用 / 可以做什么：',
+    ...digest.actionItems.map((act, idx) => `${idx + 1}. ${act}`),
+  ];
+  return lines.join('\n');
+}
 
 function fmtRelativeTime(iso: string | null): string {
   if (!iso) return '尚未检查';
@@ -133,10 +173,12 @@ export function CreatorsPage({
     }
   });
 
-  // 文案展开与复制状态（直接在视频下方看/复制完整口播文案）
+  // 文案展开、复制与 1234 归纳状态（直接在视频卡片里看懂要点与可执行动作）
   const [expandedCopyIds, setExpandedCopyIds] = useState<Record<number, 'transcript' | 'caption'>>({});
-  const [copiedId, setCopiedId] = useState<number | null>(null);
+  const [copiedKey, setCopiedKey] = useState<string | null>(null);
   const [busyTranscribeId, setBusyTranscribeId] = useState<number | null>(null);
+  const [busyDigestId, setBusyDigestId] = useState<number | null>(null);
+  const [batchProgress, setBatchProgress] = useState<{ done: number; total: number } | null>(null);
   const prevTopItemIdsRef = useRef<Set<number> | null>(null);
 
   const loadFeed = async (silent = false) => {
@@ -340,15 +382,89 @@ export function CreatorsPage({
     }
   };
 
-  const handleCopyText = async (id: number, text: string) => {
+  const handleCopyText = async (key: string, text: string, label = '已复制完整文案') => {
     if (!text.trim()) return;
     try {
       await navigator.clipboard.writeText(text.trim());
-      setCopiedId(id);
-      onToast('已复制完整文案');
-      window.setTimeout(() => setCopiedId((cur) => (cur === id ? null : cur)), 1800);
+      setCopiedKey(key);
+      onToast(label);
+      window.setTimeout(() => setCopiedKey((cur) => (cur === key ? null : cur)), 1800);
     } catch {
       onToast('复制失败，请手动选中复制');
+    }
+  };
+
+  // 单条视频生成「大概讲什么 + 1234要点 + 1234能做什么」简洁归纳
+  const handleGenerateDigest = async (item: TrackerVideoItem, forceRefresh = false) => {
+    setBusyDigestId(item.id);
+    try {
+      const res = await apiRequest<{ ok: boolean; digest: CreatorCopyDigest; cached?: boolean }>(
+        `/api/radar/intel/${item.id}/copy-digest`,
+        {
+          method: 'POST',
+          body: JSON.stringify({ forceRefresh }),
+        }
+      );
+      setFeed((prev) => {
+        if (!prev) return prev;
+        return {
+          ...prev,
+          items: prev.items.map((x) => (x.id === item.id ? { ...x, copy_digest: res.digest } : x)),
+        };
+      });
+      if (item.is_read === 0) {
+        void apiRequest('/api/radar/creators/mark-read', {
+          method: 'POST',
+          body: JSON.stringify({ contentId: item.id }),
+        }).then(() => onRefreshBadge());
+      }
+      onToast(forceRefresh ? '已重新归纳 1234 要点与行动建议' : '已归纳出核心要点和可执行建议');
+    } catch (err) {
+      onToast((err as Error).message);
+    } finally {
+      setBusyDigestId(null);
+    }
+  };
+
+  // 顺次归纳当前页面未归纳的前 5 条视频（串行执行，不卡机器）
+  const handleBatchDigest = async () => {
+    const targets = items.filter((it) => !it.copy_digest).slice(0, 5);
+    if (targets.length === 0) {
+      onToast('当前这页视频都已经归纳好了');
+      return;
+    }
+    setBatchProgress({ done: 0, total: targets.length });
+    let okCount = 0;
+    for (let i = 0; i < targets.length; i++) {
+      const target = targets[i];
+      setBusyDigestId(target.id);
+      try {
+        const res = await apiRequest<{ ok: boolean; digest: CreatorCopyDigest }>(
+          `/api/radar/intel/${target.id}/copy-digest`,
+          {
+            method: 'POST',
+            body: JSON.stringify({ forceRefresh: false }),
+          }
+        );
+        okCount++;
+        setFeed((prev) => {
+          if (!prev) return prev;
+          return {
+            ...prev,
+            items: prev.items.map((x) => (x.id === target.id ? { ...x, copy_digest: res.digest } : x)),
+          };
+        });
+      } catch (err) {
+        onToast(`《${target.title.slice(0, 14)}》归纳失败：${(err as Error).message}`);
+        break;
+      } finally {
+        setBatchProgress({ done: i + 1, total: targets.length });
+      }
+    }
+    setBusyDigestId(null);
+    setBatchProgress(null);
+    if (okCount > 0) {
+      onToast(`已完成本页 ${okCount} 条视频的 1234 要点归纳`);
     }
   };
 
@@ -381,6 +497,7 @@ export function CreatorsPage({
   const creators = feed?.creators || [];
   const items = feed?.items || [];
   const activeCreator = selectedCreatorId ? creators.find((c) => c.id === selectedCreatorId) || null : null;
+  const unsummarizedCount = items.filter((it) => !it.copy_digest).length;
 
   return (
     <div>
@@ -590,12 +707,27 @@ export function CreatorsPage({
               </div>
               <div style={{ fontSize: 12, color: 'var(--text-muted)', marginTop: 2 }}>
                 {activeCreator
-                  ? `上次追更：${fmtRelativeTime(activeCreator.last_checked_at)} · 有新更自动排最前面`
-                  : '默认只看近 7 天新更，不翻很久以前的老视频；点击任意视频直接拿完整口播文案'}
+                  ? `上次追更：${fmtRelativeTime(activeCreator.last_checked_at)} · 按平台原画幅展示，可一键归纳 1234 要点与行动建议`
+                  : '抖音等竖屏展示、B站等横屏展示；每条视频可直接归纳「大概讲什么 + 1234要点 + 1234能做什么」'}
               </div>
             </div>
 
             <div style={{ display: 'flex', alignItems: 'center', gap: 8, flexWrap: 'wrap' }}>
+              {(unsummarizedCount > 0 || batchProgress) && (
+                <button
+                  type="button"
+                  data-testid="btn-batch-digest"
+                  className="btn btn-primary btn-sm"
+                  disabled={Boolean(batchProgress) || busyDigestId !== null}
+                  onClick={() => void handleBatchDigest()}
+                >
+                  <ListChecks size={13} />
+                  {batchProgress
+                    ? `归纳中 ${batchProgress.done}/${batchProgress.total}...`
+                    : `归纳本页 (${Math.min(5, unsummarizedCount)})`}
+                </button>
+              )}
+
               <div className="pill-group">
                 {[
                   { d: 7, l: '近 7 天新更' },
@@ -651,7 +783,7 @@ export function CreatorsPage({
               还没有抓到作品，点上方「立即追更全部博主」拉取最新内容。
             </div>
           ) : (
-            <div style={{ display: 'flex', flexDirection: 'column', gap: 12 }}>
+            <div style={{ display: 'flex', flexDirection: 'column', gap: 14 }}>
               {items.map((item) => {
                 const hasTranscript = Boolean(item.transcript && item.transcript.trim().length >= 30);
                 const isTranscribing =
@@ -662,28 +794,118 @@ export function CreatorsPage({
                 const expandedMode = expandedCopyIds[item.id];
                 const captionText = (item.body || item.summary || '').trim();
                 const showUnreadBadge = item.is_read === 0 && !feed?.fallbackShown;
+                const orientation = getMediaOrientation(item);
+                const digest = item.copy_digest || null;
+                const isDigesting = busyDigestId === item.id;
+
+                const digestBlock = digest ? (
+                  <div className="digest-card-inline" data-testid={`digest-card-${item.id}`}>
+                    <div className="digest-overview-bar">
+                      <div className="digest-overview-main">
+                        <span className="digest-overview-pill">大概讲什么</span>
+                        <span className="digest-overview-text">{digest.overview}</span>
+                      </div>
+                      <div className="digest-overview-actions">
+                        <span className="digest-source-hint">
+                          {digest.usedTranscript ? '基于完整口播' : '基于简介'}
+                        </span>
+                        {hasTranscript && !digest.usedTranscript && (
+                          <button
+                            type="button"
+                            className="btn btn-sm"
+                            style={{ padding: '2px 8px', fontSize: 11.5 }}
+                            disabled={isDigesting}
+                            onClick={() => void handleGenerateDigest(item, true)}
+                          >
+                            用口播重归纳
+                          </button>
+                        )}
+                        <button
+                          type="button"
+                          data-testid={`btn-copy-digest-${item.id}`}
+                          className="icon-ghost-btn"
+                          title="复制 1234 归纳"
+                          onClick={() =>
+                            void handleCopyText(
+                              `digest-${item.id}`,
+                              formatDigestForCopy(item, digest),
+                              '已复制 1234 要点与行动建议'
+                            )
+                          }
+                        >
+                          {copiedKey === `digest-${item.id}` ? <Check size={13} color="#059669" /> : <Copy size={13} />}
+                        </button>
+                        <button
+                          type="button"
+                          data-testid={`btn-refresh-digest-${item.id}`}
+                          className="icon-ghost-btn"
+                          title="重新归纳"
+                          disabled={isDigesting}
+                          onClick={() => void handleGenerateDigest(item, true)}
+                        >
+                          <RotateCcw size={13} />
+                        </button>
+                      </div>
+                    </div>
+
+                    <div className="digest-grid-2">
+                      <div className="digest-col digest-col-points">
+                        <div className="digest-col-title">核心要点</div>
+                        <ol className="digest-num-list">
+                          {digest.keyPoints.map((pt, idx) => (
+                            <li key={idx}>
+                              <span className="digest-num-badge">{idx + 1}</span>
+                              <span>{pt}</span>
+                            </li>
+                          ))}
+                        </ol>
+                      </div>
+
+                      <div className="digest-col digest-col-actions">
+                        <div className="digest-col-title">对我有啥用 · 可以做什么</div>
+                        <ol className="digest-num-list">
+                          {digest.actionItems.map((act, idx) => (
+                            <li key={idx}>
+                              <span className="digest-num-badge">{idx + 1}</span>
+                              <span>{act}</span>
+                            </li>
+                          ))}
+                        </ol>
+                      </div>
+                    </div>
+                  </div>
+                ) : null;
 
                 return (
-                  <div key={item.id} className={`tracker-video-card ${showUnreadBadge ? 'is-new' : ''}`} data-testid={`tracker-item-${item.id}`}>
+                  <div
+                    key={item.id}
+                    className={`tracker-video-card ${showUnreadBadge ? 'is-new' : ''}`}
+                    data-testid={`tracker-item-${item.id}`}
+                    data-orientation={orientation}
+                  >
                     <div className="tracker-video-main">
-                      {/* 16:9 缩略图 */}
-                      <a
-                        href={item.canonical_url}
-                        target="_blank"
-                        rel="noreferrer"
-                        className="tracker-thumb"
-                        title="打开原视频"
-                      >
-                        {item.cover_url ? (
-                          <img src={item.cover_url} alt={item.title} referrerPolicy="no-referrer" loading="lazy" />
-                        ) : (
-                          <div className="vcard-fallback-text">{PLATFORM_LABELS[item.platform] || item.platform}</div>
-                        )}
-                      </a>
+                      {/* 按平台原生画幅展示封面：抖音等用 9:16 竖屏，B站等用 16:9 横屏，无封面图文源不占黑框 */}
+                      {orientation !== 'none' && (
+                        <a
+                          href={item.canonical_url}
+                          target="_blank"
+                          rel="noreferrer"
+                          className={orientation === 'vertical' ? 'tracker-thumb-vertical' : 'tracker-thumb-horizontal'}
+                          data-testid={`tracker-thumb-${item.id}`}
+                          title="打开原视频"
+                        >
+                          {item.cover_url ? (
+                            <img src={item.cover_url} alt={item.title} referrerPolicy="no-referrer" loading="lazy" />
+                          ) : (
+                            <div className="vcard-fallback-text">{PLATFORM_LABELS[item.platform] || item.platform}</div>
+                          )}
+                          <span className="tracker-ratio-tag">{orientation === 'vertical' ? '竖屏' : '横屏'}</span>
+                        </a>
+                      )}
 
-                      {/* 中右：更新信息 + 标题 + 直接拿文案按钮 */}
-                      <div style={{ minWidth: 0, flex: 1 }}>
-                        <div style={{ display: 'flex', alignItems: 'center', gap: 7, flexWrap: 'wrap', marginBottom: 5 }}>
+                      {/* 中右：更新信息 + 标题 + 一键归纳 / 拿文案操作 */}
+                      <div className="tracker-video-body">
+                        <div style={{ display: 'flex', alignItems: 'center', gap: 7, flexWrap: 'wrap', marginBottom: 6 }}>
                           {showUnreadBadge && (
                             <span className="badge badge-red" style={{ fontSize: 11 }}>
                               新更新
@@ -714,12 +936,25 @@ export function CreatorsPage({
                           )}
                         </div>
 
-                        <div style={{ fontSize: 15, fontWeight: 700, color: 'var(--text)', lineHeight: 1.45, marginBottom: 10 }}>
+                        <div className="tracker-video-title" title={item.title}>
                           {item.title}
                         </div>
 
-                        {/* 核心操作：只保留「拿文案 / 复制 / 去二创 / 收藏 / 原链」 */}
+                        {/* 核心操作：归纳 1234 要点 / 拿口播文案 / 复制 / 去二创 / 收藏 / 原链 */}
                         <div style={{ display: 'flex', gap: 7, flexWrap: 'wrap', alignItems: 'center' }}>
+                          {!digest && (
+                            <button
+                              type="button"
+                              data-testid={`btn-digest-${item.id}`}
+                              className="btn btn-primary btn-sm"
+                              disabled={isDigesting}
+                              onClick={() => void handleGenerateDigest(item, false)}
+                            >
+                              <ListChecks size={13} />
+                              {isDigesting ? '正在归纳 1234 要点...' : '归纳要点 (1234)'}
+                            </button>
+                          )}
+
                           {hasTranscript ? (
                             <>
                               <button
@@ -730,24 +965,24 @@ export function CreatorsPage({
                                 onClick={() => toggleExpand(item, 'transcript')}
                               >
                                 <FileText size={13} />
-                                {expandedMode === 'transcript' ? '收起口播文案' : `查看完整口播文案 (${item.transcript_chars}字)`}
+                                {expandedMode === 'transcript' ? '收起口播文案' : `查看口播 (${item.transcript_chars}字)`}
                                 {expandedMode === 'transcript' ? <ChevronUp size={13} /> : <ChevronDown size={13} />}
                               </button>
                               <button
                                 type="button"
                                 data-testid={`btn-copy-script-${item.id}`}
                                 className="btn btn-sm"
-                                onClick={() => void handleCopyText(item.id, item.transcript)}
+                                onClick={() => void handleCopyText(`script-${item.id}`, item.transcript, '已复制完整口播文案')}
                               >
-                                {copiedId === item.id ? <Check size={13} /> : <Copy size={13} />}
-                                {copiedId === item.id ? '已复制' : '复制文案'}
+                                {copiedKey === `script-${item.id}` ? <Check size={13} /> : <Copy size={13} />}
+                                {copiedKey === `script-${item.id}` ? '已复制' : '复制文案'}
                               </button>
                             </>
                           ) : (
                             <button
                               type="button"
                               data-testid={`btn-extract-script-${item.id}`}
-                              className="btn btn-primary btn-sm"
+                              className={`btn btn-sm ${digest ? 'btn-primary' : ''}`}
                               disabled={isTranscribing}
                               onClick={() => void handleExtractTranscript(item)}
                             >
@@ -756,7 +991,7 @@ export function CreatorsPage({
                                 ? item.asr_job_status === 'downloading'
                                   ? '第 1/2 步：提取音频中...'
                                   : '第 2/2 步：显卡转写文案中...'
-                                : '一键获取口播文案 (免费免登录)'}
+                                : '获取完整口播文案'}
                             </button>
                           )}
 
@@ -766,7 +1001,7 @@ export function CreatorsPage({
                               className="btn btn-sm"
                               onClick={() => toggleExpand(item, 'caption')}
                             >
-                              {expandedMode === 'caption' ? '收起原帖文字' : '看原帖文字'}
+                              {expandedMode === 'caption' ? '收起原帖文字' : '原帖文字'}
                             </button>
                           )}
 
@@ -775,7 +1010,7 @@ export function CreatorsPage({
                             className="btn btn-sm"
                             onClick={() => onOpenRemix(item.id)}
                           >
-                            <Wand2 size={13} /> AI 二创改写
+                            <Wand2 size={13} /> AI 二创
                           </button>
 
                           <button
@@ -797,8 +1032,21 @@ export function CreatorsPage({
                             <ExternalLink size={12} /> 原视频
                           </a>
                         </div>
+
+                        {/* 竖屏封面旁直接放 1234 归纳（高度与 9:16 竖图自然对齐，不留大片空白） */}
+                        {orientation === 'vertical' &&
+                          (digestBlock || (
+                            <div className="digest-empty-hint">
+                              {isDigesting
+                                ? '正在根据视频文案提炼「大概讲什么 + 1234 核心要点 + 1234 可以做什么」...'
+                                : '点上方「归纳要点 (1234)」，直接提炼大概讲什么、核心要点 1234 和对你有用的可执行动作。'}
+                            </div>
+                          ))}
                       </div>
                     </div>
+
+                    {/* 横屏封面与无封面文章源：1234 归纳铺满卡片下方，阅读最舒展 */}
+                    {orientation !== 'vertical' && digestBlock}
 
                     {/* 内联展开的博主完整文案区（无需跳页，直接读、直接复制） */}
                     {expandedMode && (
@@ -820,12 +1068,13 @@ export function CreatorsPage({
                                 className="btn btn-primary btn-sm"
                                 onClick={() =>
                                   void handleCopyText(
-                                    item.id,
-                                    expandedMode === 'transcript' ? item.transcript : captionText
+                                    `drawer-${item.id}`,
+                                    expandedMode === 'transcript' ? item.transcript : captionText,
+                                    '已复制全文'
                                   )
                                 }
                               >
-                                {copiedId === item.id ? <Check size={12} /> : <Copy size={12} />} 复制全文
+                                {copiedKey === `drawer-${item.id}` ? <Check size={12} /> : <Copy size={12} />} 复制全文
                               </button>
                             )}
                             <button type="button" className="btn btn-sm" onClick={() => onOpenRemix(item.id)}>
