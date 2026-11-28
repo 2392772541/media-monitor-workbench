@@ -3,6 +3,7 @@ import path from 'node:path';
 import { execFileSync, spawn } from 'node:child_process';
 import { PATHS } from '../config.js';
 import { getDb, upsertContentWithMetrics } from '../db/database.js';
+import { escapeLikeTerm } from '../utils/sqlValidation.js';
 import { withHeadlessContext } from '../browser/profileManager.js';
 import { extractUrlFromShareText, resolveShortSourceUrl } from '../adapters/urlRecognizer.js';
 import { callAiJsonWithCache } from './aiRadarService.js';
@@ -682,6 +683,18 @@ export function startStandaloneCommentCrawl(params: {
   maxComments?: number;
   showBrowser?: boolean;
 }): { started: boolean; job?: CommentCrawlJob; message: string } {
+  if (!['douyin', 'bilibili', 'xiaohongshu', 'kuaishou'].includes(String(params.platform || ''))) {
+    return { started: false, message: '不支持的评论采集平台，仅支持 douyin/bilibili/xiaohongshu/kuaishou' };
+  }
+  if (!['detail', 'search', 'creator'].includes(String(params.mode || ''))) {
+    return { started: false, message: '不支持的采集模式，仅支持 detail/search/creator' };
+  }
+  if (
+    params.maxComments !== undefined &&
+    (typeof params.maxComments !== 'number' || !Number.isInteger(params.maxComments) || params.maxComments <= 0)
+  ) {
+    return { started: false, message: 'maxComments 必须为有效正整数' };
+  }
   if (runningCrawler) {
     return { started: false, message: `当前已有评论采集任务在运行：${currentTaskDesc}` };
   }
@@ -726,8 +739,8 @@ export function startStandaloneCommentCrawl(params: {
         const urlCandidate = extractUrlFromShareText(cleanInput);
         const resolved = urlCandidate.startsWith('http') ? (await resolveShortSourceUrl(urlCandidate)).resolvedUrl : cleanInput;
         const matchedSource = db
-          .prepare("SELECT id, name FROM sources WHERE platform = ? AND (url = ? OR name LIKE ?) LIMIT 1")
-          .get(params.platform, resolved, `%${cleanInput}%`) as { id: number; name: string } | undefined;
+          .prepare("SELECT id, name FROM sources WHERE platform = ? AND (url = ? OR name LIKE ? ESCAPE '\\') LIMIT 1")
+          .get(params.platform, resolved, `%${escapeLikeTerm(cleanInput)}%`) as { id: number; name: string } | undefined;
 
         if (matchedSource) {
           pushLog(`命中已盯博主「${matchedSource.name}」，直采其最热 3 条作品评论`, job);

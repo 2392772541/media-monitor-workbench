@@ -78,6 +78,13 @@ import {
 } from '../services/aiRadarService.js';
 import { getTopicTrendSeries, scanTrackedTopic } from '../services/topicRadarService.js';
 import { findDuplicateTopics, TOPIC_BOARD_STATUSES } from '../services/topicBoardService.js';
+import {
+  escapeLikeTerm,
+  parsePositiveIntId,
+  parseQueryNumber,
+  parseQueryPositiveInt,
+  parseStrictNumber,
+} from '../utils/sqlValidation.js';
 
 function safeParseJson<T>(raw: unknown, fallback: T): T {
   if (typeof raw !== 'string' || !raw) return fallback;
@@ -168,9 +175,11 @@ function enrichCreatorFeedRow(row: Record<string, unknown>, digestMap: Record<st
 
 export function registerRadarRoutes(app: FastifyInstance): void {
   // ===== 1. 选题驾驶舱总览 =====
-  app.get<{ Querystring: { accountId?: string } }>('/api/radar/cockpit', async (req) => {
+  app.get<{ Querystring: { accountId?: string } }>('/api/radar/cockpit', async (req, reply) => {
     const db = getDb();
-    const accountId = req.query.accountId ? Number(req.query.accountId) : undefined;
+    const accountIdParsed = parseQueryPositiveInt(req.query.accountId);
+    if (!accountIdParsed.valid) return reply.code(400).send({ error: '无效的 accountId 参数' });
+    const accountId = accountIdParsed.present ? (accountIdParsed.value as number) : undefined;
     const activeAccount = getActiveAccount(accountId);
     const accounts = db.prepare('SELECT * FROM creator_accounts ORDER BY is_active DESC, id ASC').all();
 
@@ -448,6 +457,26 @@ export function registerRadarRoutes(app: FastifyInstance): void {
     const b = req.body || {};
     const name = (b.name || '').trim();
     if (!name) return reply.code(400).send({ error: '账号名称不能为空' });
+    const weightDefs: Array<[string, unknown, number]> = [
+      ['weight_match', b.weight_match, 25],
+      ['weight_heat', b.weight_heat, 25],
+      ['weight_diff', b.weight_diff, 20],
+      ['weight_experience', b.weight_experience, 15],
+      ['weight_timeliness', b.weight_timeliness, 10],
+      ['weight_feasibility', b.weight_feasibility, 5],
+    ];
+    const resolvedWeights: Record<string, number> = {};
+    for (const [k, raw, defVal] of weightDefs) {
+      if (raw === undefined || raw === null) {
+        resolvedWeights[k] = defVal;
+      } else {
+        const parsed = parseStrictNumber(raw);
+        if (parsed === null || parsed < 0) {
+          return reply.code(400).send({ error: `无效的权重参数: ${k}` });
+        }
+        resolvedWeights[k] = parsed;
+      }
+    }
     const db = getDb();
     const now = new Date().toISOString();
     if (b.is_active) {
@@ -470,12 +499,12 @@ export function registerRadarRoutes(app: FastifyInstance): void {
         (b.personal_expertise || '').trim(),
         (b.style_preferences || '').trim(),
         b.is_active ? 1 : 0,
-        Number(b.weight_match ?? 25),
-        Number(b.weight_heat ?? 25),
-        Number(b.weight_diff ?? 20),
-        Number(b.weight_experience ?? 15),
-        Number(b.weight_timeliness ?? 10),
-        Number(b.weight_feasibility ?? 5),
+        resolvedWeights.weight_match,
+        resolvedWeights.weight_heat,
+        resolvedWeights.weight_diff,
+        resolvedWeights.weight_experience,
+        resolvedWeights.weight_timeliness,
+        resolvedWeights.weight_feasibility,
         now,
         now
       );
@@ -484,7 +513,8 @@ export function registerRadarRoutes(app: FastifyInstance): void {
   });
 
   app.patch<{ Params: { id: string }; Body: Record<string, unknown> }>('/api/radar/accounts/:id', async (req, reply) => {
-    const id = Number(req.params.id);
+    const id = parsePositiveIntId(req.params.id);
+    if (!id) return reply.code(400).send({ error: '无效的账号 ID' });
     const db = getDb();
     const existing = db.prepare('SELECT * FROM creator_accounts WHERE id = ?').get(id);
     if (!existing) return reply.code(404).send({ error: '账号不存在' });
@@ -510,9 +540,18 @@ export function registerRadarRoutes(app: FastifyInstance): void {
     let weightChanged = false;
     for (const f of fields) {
       if (b[f] !== undefined) {
-        sets.push(`${f} = ?`);
-        params.push(f.startsWith('weight_') ? Number(b[f]) : String(b[f]).trim());
-        if (f.startsWith('weight_')) weightChanged = true;
+        if (f.startsWith('weight_')) {
+          const parsedWeight = parseStrictNumber(b[f]);
+          if (parsedWeight === null || parsedWeight < 0) {
+            return reply.code(400).send({ error: `无效的权重参数: ${f}` });
+          }
+          sets.push(`${f} = ?`);
+          params.push(parsedWeight);
+          weightChanged = true;
+        } else {
+          sets.push(`${f} = ?`);
+          params.push(String(b[f]).trim());
+        }
       }
     }
     if (sets.length > 0) {
@@ -526,7 +565,8 @@ export function registerRadarRoutes(app: FastifyInstance): void {
   });
 
   app.post<{ Params: { id: string } }>('/api/radar/accounts/:id/activate', async (req, reply) => {
-    const id = Number(req.params.id);
+    const id = parsePositiveIntId(req.params.id);
+    if (!id) return reply.code(400).send({ error: '无效的账号 ID' });
     const db = getDb();
     const existing = db.prepare('SELECT id FROM creator_accounts WHERE id = ?').get(id);
     if (!existing) return reply.code(404).send({ error: '账号不存在' });
@@ -536,7 +576,8 @@ export function registerRadarRoutes(app: FastifyInstance): void {
   });
 
   app.delete<{ Params: { id: string } }>('/api/radar/accounts/:id', async (req, reply) => {
-    const id = Number(req.params.id);
+    const id = parsePositiveIntId(req.params.id);
+    if (!id) return reply.code(400).send({ error: '无效的账号 ID' });
     const db = getDb();
     const count = (db.prepare('SELECT COUNT(*) AS c FROM creator_accounts').get() as { c: number }).c;
     if (count <= 1) return reply.code(400).send({ error: '至少需要保留一个自媒体账号定位配置' });
@@ -549,7 +590,7 @@ export function registerRadarRoutes(app: FastifyInstance): void {
   });
 
   // ===== 3. 博主监控与表现分析 =====
-  app.get<{ Querystring: { platform?: string; categoryId?: string; q?: string } }>('/api/radar/creators', async (req) => {
+  app.get<{ Querystring: { platform?: string; categoryId?: string; q?: string } }>('/api/radar/creators', async (req, reply) => {
     const db = getDb();
     const where: string[] = ["s.source_type != 'hot_board'"];
     const params: (string | number)[] = [];
@@ -557,13 +598,15 @@ export function registerRadarRoutes(app: FastifyInstance): void {
       where.push('s.platform = ?');
       params.push(req.query.platform);
     }
-    if (req.query.categoryId) {
+    const categoryIdParsed = parseQueryPositiveInt(req.query.categoryId);
+    if (!categoryIdParsed.valid) return reply.code(400).send({ error: '无效的 categoryId 参数' });
+    if (categoryIdParsed.present && categoryIdParsed.value !== null) {
       where.push('s.category_id = ?');
-      params.push(Number(req.query.categoryId));
+      params.push(categoryIdParsed.value);
     }
-    if (req.query.q) {
-      where.push('(s.name LIKE ? OR s.url LIKE ? OR s.notes LIKE ?)');
-      const like = `%${req.query.q.trim()}%`;
+    if (req.query.q && req.query.q.trim()) {
+      where.push("(s.name LIKE ? ESCAPE '\\' OR s.url LIKE ? ESCAPE '\\' OR s.notes LIKE ? ESCAPE '\\')");
+      const like = `%${escapeLikeTerm(req.query.q.trim())}%`;
       params.push(like, like, like);
     }
     const whereSql = where.length ? `WHERE ${where.join(' AND ')}` : '';
@@ -583,7 +626,8 @@ export function registerRadarRoutes(app: FastifyInstance): void {
   });
 
   app.get<{ Params: { id: string } }>('/api/radar/creators/:id/analytics', async (req, reply) => {
-    const id = Number(req.params.id);
+    const id = parsePositiveIntId(req.params.id);
+    if (!id) return reply.code(400).send({ error: '无效的博主 ID' });
     const db = getDb();
     const creator = db
       .prepare(`
@@ -687,9 +731,9 @@ export function registerRadarRoutes(app: FastifyInstance): void {
         baseWhere.push('h.board_name = ?');
         baseParams.push(req.query.boardName);
       }
-      if (req.query.q) {
-        baseWhere.push('(h.title LIKE ? OR h.summary LIKE ? OR h.category LIKE ? OR h.author LIKE ?)');
-        const like = `%${req.query.q.trim()}%`;
+      if (req.query.q && req.query.q.trim()) {
+        baseWhere.push("(h.title LIKE ? ESCAPE '\\' OR h.summary LIKE ? ESCAPE '\\' OR h.category LIKE ? ESCAPE '\\' OR h.author LIKE ? ESCAPE '\\')");
+        const like = `%${escapeLikeTerm(req.query.q.trim())}%`;
         baseParams.push(like, like, like, like);
       }
 
@@ -800,8 +844,10 @@ export function registerRadarRoutes(app: FastifyInstance): void {
   });
 
   app.post<{ Params: { id: string } }>('/api/radar/hot-board/:id/import', async (req, reply) => {
+    const id = parsePositiveIntId(req.params.id);
+    if (!id) return reply.code(400).send({ error: '无效的热榜条目 ID' });
     try {
-      const res = importHotItemToIntel(Number(req.params.id));
+      const res = importHotItemToIntel(id);
       return { ok: true, ...res };
     } catch (err) {
       return reply.code(400).send({ error: (err as Error).message });
@@ -839,6 +885,14 @@ export function registerRadarRoutes(app: FastifyInstance): void {
     const b = req.body || {};
     const name = (b.name || '').trim();
     if (!name) return reply.code(400).send({ error: '话题名称不能为空' });
+    const intervalMinutes = b.interval_minutes !== undefined ? parseStrictNumber(b.interval_minutes) : 120;
+    if (intervalMinutes === null || intervalMinutes <= 0) {
+      return reply.code(400).send({ error: 'interval_minutes 必须为有效正数' });
+    }
+    const alertThreshold = b.alert_threshold !== undefined ? parseStrictNumber(b.alert_threshold) : 3;
+    if (alertThreshold === null || alertThreshold < 1) {
+      return reply.code(400).send({ error: 'alert_threshold 必须为大于等于 1 的数字' });
+    }
     const db = getDb();
     const now = new Date().toISOString();
     const res = db
@@ -853,8 +907,8 @@ export function registerRadarRoutes(app: FastifyInstance): void {
         JSON.stringify(Array.isArray(b.related_terms) ? b.related_terms.filter(Boolean) : []),
         JSON.stringify(Array.isArray(b.exclude_terms) ? b.exclude_terms.filter(Boolean) : []),
         (b.description || '').trim(),
-        Number(b.interval_minutes || 120),
-        Number(b.alert_threshold || 3),
+        Math.round(intervalMinutes),
+        Math.round(alertThreshold),
         now,
         now
       );
@@ -866,7 +920,8 @@ export function registerRadarRoutes(app: FastifyInstance): void {
   });
 
   app.patch<{ Params: { id: string }; Body: Record<string, unknown> }>('/api/radar/topics/:id', async (req, reply) => {
-    const id = Number(req.params.id);
+    const id = parsePositiveIntId(req.params.id);
+    if (!id) return reply.code(400).send({ error: '无效的话题 ID' });
     const db = getDb();
     if (!db.prepare('SELECT id FROM tracked_topics WHERE id = ?').get(id)) {
       return reply.code(404).send({ error: '话题不存在' });
@@ -880,9 +935,24 @@ export function registerRadarRoutes(app: FastifyInstance): void {
     if (b.related_terms !== undefined) { sets.push('related_terms_json = ?'); params.push(JSON.stringify(b.related_terms)); }
     if (b.exclude_terms !== undefined) { sets.push('exclude_terms_json = ?'); params.push(JSON.stringify(b.exclude_terms)); }
     if (b.description !== undefined) { sets.push('description = ?'); params.push(String(b.description).trim()); }
-    if (b.interval_minutes !== undefined) { sets.push('interval_minutes = ?'); params.push(Number(b.interval_minutes)); }
-    if (b.alert_threshold !== undefined) { sets.push('alert_threshold = ?'); params.push(Number(b.alert_threshold)); }
-    if (b.status !== undefined) { sets.push('status = ?'); params.push(String(b.status)); }
+    if (b.interval_minutes !== undefined) {
+      const iv = parseStrictNumber(b.interval_minutes);
+      if (iv === null || iv <= 0) return reply.code(400).send({ error: 'interval_minutes 必须为有效正数' });
+      sets.push('interval_minutes = ?');
+      params.push(Math.round(iv));
+    }
+    if (b.alert_threshold !== undefined) {
+      const th = parseStrictNumber(b.alert_threshold);
+      if (th === null || th < 1) return reply.code(400).send({ error: 'alert_threshold 必须为大于等于 1 的数字' });
+      sets.push('alert_threshold = ?');
+      params.push(Math.round(th));
+    }
+    if (b.status !== undefined) {
+      const st = String(b.status).trim();
+      if (st !== 'active' && st !== 'paused') return reply.code(400).send({ error: '无效的话题状态' });
+      sets.push('status = ?');
+      params.push(st);
+    }
     if (sets.length > 0) {
       sets.push('updated_at = ?');
       params.push(new Date().toISOString(), id);
@@ -891,14 +961,17 @@ export function registerRadarRoutes(app: FastifyInstance): void {
     return { ok: true, topic: db.prepare('SELECT * FROM tracked_topics WHERE id = ?').get(id) };
   });
 
-  app.delete<{ Params: { id: string } }>('/api/radar/topics/:id', async (req) => {
+  app.delete<{ Params: { id: string } }>('/api/radar/topics/:id', async (req, reply) => {
+    const id = parsePositiveIntId(req.params.id);
+    if (!id) return reply.code(400).send({ error: '无效的话题 ID' });
     const db = getDb();
-    db.prepare('DELETE FROM tracked_topics WHERE id = ?').run(Number(req.params.id));
+    db.prepare('DELETE FROM tracked_topics WHERE id = ?').run(id);
     return { ok: true };
   });
 
   app.get<{ Params: { id: string } }>('/api/radar/topics/:id/detail', async (req, reply) => {
-    const id = Number(req.params.id);
+    const id = parsePositiveIntId(req.params.id);
+    if (!id) return reply.code(400).send({ error: '无效的话题 ID' });
     const db = getDb();
     const topic = db.prepare('SELECT * FROM tracked_topics WHERE id = ?').get(id);
     if (!topic) return reply.code(404).send({ error: '话题不存在' });
@@ -923,8 +996,10 @@ export function registerRadarRoutes(app: FastifyInstance): void {
   });
 
   app.post<{ Params: { id: string }; Body: { useSemanticAi?: boolean } }>('/api/radar/topics/:id/scan', async (req, reply) => {
+    const id = parsePositiveIntId(req.params.id);
+    if (!id) return reply.code(400).send({ error: '无效的话题 ID' });
     try {
-      const res = await scanTrackedTopic(Number(req.params.id), req.body?.useSemanticAi !== false);
+      const res = await scanTrackedTopic(id, req.body?.useSemanticAi !== false);
       return { ok: true, ...res };
     } catch (err) {
       return reply.code(500).send({ error: (err as Error).message });
@@ -943,25 +1018,35 @@ export function registerRadarRoutes(app: FastifyInstance): void {
       q?: string;
       limit?: string;
     };
-  }>('/api/radar/intel', async (req) => {
+  }>('/api/radar/intel', async (req, reply) => {
+    const accountIdParsed = parseQueryPositiveInt(req.query.accountId);
+    if (!accountIdParsed.valid) return reply.code(400).send({ error: '无效的 accountId 参数' });
+    const sourceIdParsed = parseQueryPositiveInt(req.query.sourceId);
+    if (!sourceIdParsed.valid) return reply.code(400).send({ error: '无效的 sourceId 参数' });
+    const limitParsed = parseQueryNumber(req.query.limit);
+    if (!limitParsed.valid) return reply.code(400).send({ error: '无效的 limit 参数' });
+
     const db = getDb();
-    const account = getActiveAccount(req.query.accountId ? Number(req.query.accountId) : undefined);
+    const account = getActiveAccount(accountIdParsed.present ? (accountIdParsed.value as number) : undefined);
     const where: string[] = [];
     const params: (string | number)[] = [];
 
     if (req.query.platform) { where.push('c.platform = ?'); params.push(req.query.platform); }
-    if (req.query.sourceId) { where.push('c.source_id = ?'); params.push(Number(req.query.sourceId)); }
+    if (sourceIdParsed.present && sourceIdParsed.value !== null) {
+      where.push('c.source_id = ?');
+      params.push(sourceIdParsed.value);
+    }
     if (req.query.contentType) { where.push('c.content_type = ?'); params.push(req.query.contentType); }
     if (req.query.onlyBreakout === 'true') { where.push('(c.breakout_ratio >= 1.6 OR c.breakout_score >= 68)'); }
     if (req.query.hasTranscript === 'true') { where.push("c.transcript_status = 'done'"); }
     if (req.query.q && req.query.q.trim()) {
-      const like = `%${req.query.q.trim()}%`;
-      where.push('(c.title LIKE ? OR c.summary LIKE ? OR c.body LIKE ? OR c.transcript LIKE ? OR a.summary_zh LIKE ?)');
+      const like = `%${escapeLikeTerm(req.query.q.trim())}%`;
+      where.push("(c.title LIKE ? ESCAPE '\\' OR c.summary LIKE ? ESCAPE '\\' OR c.body LIKE ? ESCAPE '\\' OR c.transcript LIKE ? ESCAPE '\\' OR a.summary_zh LIKE ? ESCAPE '\\')");
       params.push(like, like, like, like, like);
     }
 
     const whereSql = where.length ? `WHERE ${where.join(' AND ')}` : '';
-    const limit = Math.min(Math.max(Number(req.query.limit || 60), 10), 200);
+    const limit = Math.min(Math.max(Math.floor(limitParsed.present ? (limitParsed.value as number) : 60), 10), 200);
 
     const items = db
       .prepare(`
@@ -1013,9 +1098,12 @@ export function registerRadarRoutes(app: FastifyInstance): void {
   });
 
   app.get<{ Params: { id: string }; Querystring: { accountId?: string } }>('/api/radar/intel/:id/detail', async (req, reply) => {
-    const id = Number(req.params.id);
+    const id = parsePositiveIntId(req.params.id);
+    if (!id) return reply.code(400).send({ error: '无效的内容 ID' });
+    const accountIdParsed = parseQueryPositiveInt(req.query.accountId);
+    if (!accountIdParsed.valid) return reply.code(400).send({ error: '无效的 accountId 参数' });
     const db = getDb();
-    const account = getActiveAccount(req.query.accountId ? Number(req.query.accountId) : undefined);
+    const account = getActiveAccount(accountIdParsed.present ? (accountIdParsed.value as number) : undefined);
 
     const content = db
       .prepare(`
@@ -1058,8 +1146,10 @@ export function registerRadarRoutes(app: FastifyInstance): void {
   });
 
   app.post<{ Params: { id: string }; Body: { force?: boolean } }>('/api/radar/intel/:id/analyze', async (req, reply) => {
+    const id = parsePositiveIntId(req.params.id);
+    if (!id) return reply.code(400).send({ error: '无效的内容 ID' });
     try {
-      const res = await analyzeContentDeep(Number(req.params.id), Boolean(req.body?.force));
+      const res = await analyzeContentDeep(id, Boolean(req.body?.force));
       return { ok: true, ...res };
     } catch (err) {
       return reply.code(500).send({ error: (err as Error).message });
@@ -1069,10 +1159,18 @@ export function registerRadarRoutes(app: FastifyInstance): void {
   app.post<{ Params: { id: string }; Body: { accountId?: number; force?: boolean } }>(
     '/api/radar/intel/:id/recommend',
     async (req, reply) => {
+      const id = parsePositiveIntId(req.params.id);
+      if (!id) return reply.code(400).send({ error: '无效的内容 ID' });
+      let accountId: number | undefined;
+      if (req.body?.accountId !== undefined && req.body?.accountId !== null) {
+        const parsedAcc = parsePositiveIntId(req.body.accountId);
+        if (!parsedAcc) return reply.code(400).send({ error: '无效的 accountId' });
+        accountId = parsedAcc;
+      }
       try {
         const res = await generateRecommendationForContent(
-          Number(req.params.id),
-          req.body?.accountId,
+          id,
+          accountId,
           Boolean(req.body?.force)
         );
         return { ok: true, ...res };
@@ -1083,13 +1181,17 @@ export function registerRadarRoutes(app: FastifyInstance): void {
   );
 
   app.post<{ Params: { id: string } }>('/api/radar/intel/:id/comments', async (req, reply) => {
-    const res = await fetchCommentsWithMediaCrawler(Number(req.params.id));
+    const id = parsePositiveIntId(req.params.id);
+    if (!id) return reply.code(400).send({ error: '无效的内容 ID' });
+    const res = await fetchCommentsWithMediaCrawler(id);
     if (!res.ok) return reply.code(400).send(res);
     return res;
   });
 
   app.post<{ Params: { id: string } }>('/api/radar/intel/:id/transcribe', async (req, reply) => {
-    const res = startTingwuTranscription(Number(req.params.id));
+    const id = parsePositiveIntId(req.params.id);
+    if (!id) return reply.code(400).send({ error: '无效的内容 ID' });
+    const res = startTingwuTranscription(id);
     if (!res.started) return reply.code(400).send(res);
     return res;
   });
@@ -1122,7 +1224,8 @@ export function registerRadarRoutes(app: FastifyInstance): void {
   app.post<{ Params: { id: string }; Body: { status: string; note?: string } }>(
     '/api/radar/recommendations/:id/feedback',
     async (req, reply) => {
-      const id = Number(req.params.id);
+      const id = parsePositiveIntId(req.params.id);
+      if (!id) return reply.code(400).send({ error: '无效的推荐 ID' });
       const allowed = new Set(['none', 'interested', 'not_interested', 'covered', 'watch_long', 'not_suitable']);
       const status = String(req.body?.status || '').trim();
       if (!allowed.has(status)) return reply.code(400).send({ error: '无效的反馈类型' });
@@ -1147,8 +1250,8 @@ export function registerRadarRoutes(app: FastifyInstance): void {
     if (req.query.status) { where.push('b.status = ?'); params.push(req.query.status); }
     if (req.query.priority) { where.push('b.priority = ?'); params.push(req.query.priority); }
     if (req.query.q && req.query.q.trim()) {
-      const like = `%${req.query.q.trim()}%`;
-      where.push('(b.title LIKE ? OR b.core_angle LIKE ? OR b.notes LIKE ? OR b.tags_json LIKE ?)');
+      const like = `%${escapeLikeTerm(req.query.q.trim())}%`;
+      where.push("(b.title LIKE ? ESCAPE '\\' OR b.core_angle LIKE ? ESCAPE '\\' OR b.notes LIKE ? ESCAPE '\\' OR b.tags_json LIKE ? ESCAPE '\\')");
       params.push(like, like, like, like);
     }
     const whereSql = where.length ? `WHERE ${where.join(' AND ')}` : '';
@@ -1204,8 +1307,50 @@ export function registerRadarRoutes(app: FastifyInstance): void {
     const title = (b.title || '').trim();
     if (!title) return reply.code(400).send({ error: '选题标题不能为空' });
 
-    const duplicates = findDuplicateTopics(title);
     const db = getDb();
+    let accountId: number;
+    if (b.account_id === undefined || b.account_id === null) {
+      accountId = getActiveAccount().id;
+    } else {
+      const parsedAcc = parsePositiveIntId(b.account_id);
+      if (!parsedAcc) return reply.code(400).send({ error: '无效的 account_id' });
+      if (!db.prepare('SELECT id FROM creator_accounts WHERE id = ?').get(parsedAcc)) {
+        return reply.code(404).send({ error: '指定的自媒体账号不存在' });
+      }
+      accountId = parsedAcc;
+    }
+
+    let sourceContentId: number | null = null;
+    if (b.source_content_id !== undefined && b.source_content_id !== null) {
+      const parsedContent = parsePositiveIntId(b.source_content_id);
+      if (!parsedContent) return reply.code(400).send({ error: '无效的 source_content_id' });
+      if (!db.prepare('SELECT id FROM contents WHERE id = ?').get(parsedContent)) {
+        return reply.code(404).send({ error: '关联内容不存在' });
+      }
+      sourceContentId = parsedContent;
+    }
+
+    let recommendationId: number | null = null;
+    if (b.recommendation_id !== undefined && b.recommendation_id !== null) {
+      const parsedRec = parsePositiveIntId(b.recommendation_id);
+      if (!parsedRec) return reply.code(400).send({ error: '无效的 recommendation_id' });
+      if (!db.prepare('SELECT id FROM topic_recommendations WHERE id = ?').get(parsedRec)) {
+        return reply.code(404).send({ error: '关联选题推荐不存在' });
+      }
+      recommendationId = parsedRec;
+    }
+
+    let clusterId: number | null = null;
+    if (b.cluster_id !== undefined && b.cluster_id !== null) {
+      const parsedCluster = parsePositiveIntId(b.cluster_id);
+      if (!parsedCluster) return reply.code(400).send({ error: '无效的 cluster_id' });
+      if (!db.prepare('SELECT id FROM topic_clusters WHERE id = ?').get(parsedCluster)) {
+        return reply.code(404).send({ error: '关联话题聚簇不存在' });
+      }
+      clusterId = parsedCluster;
+    }
+
+    const duplicates = findDuplicateTopics(title);
     const now = new Date().toISOString();
     const status = TOPIC_BOARD_STATUSES.includes(b.status as (typeof TOPIC_BOARD_STATUSES)[number])
       ? b.status!
@@ -1220,10 +1365,10 @@ export function registerRadarRoutes(app: FastifyInstance): void {
         ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
       `)
       .run(
-        b.account_id ?? getActiveAccount().id,
-        b.source_content_id ?? null,
-        b.recommendation_id ?? null,
-        b.cluster_id ?? null,
+        accountId,
+        sourceContentId,
+        recommendationId,
+        clusterId,
         title.slice(0, 160),
         String(b.core_angle || '').trim().slice(0, 600),
         JSON.stringify(Array.isArray(b.tags) ? b.tags.filter(Boolean) : []),
@@ -1240,12 +1385,25 @@ export function registerRadarRoutes(app: FastifyInstance): void {
   });
 
   app.patch<{ Params: { id: string }; Body: Record<string, unknown> }>('/api/radar/board/:id', async (req, reply) => {
-    const id = Number(req.params.id);
+    const id = parsePositiveIntId(req.params.id);
+    if (!id) return reply.code(400).send({ error: '无效的选题 ID' });
     const db = getDb();
     if (!db.prepare('SELECT id FROM topic_board WHERE id = ?').get(id)) {
       return reply.code(404).send({ error: '选题不存在' });
     }
     const b = req.body || {};
+    if (b.status !== undefined) {
+      const st = String(b.status).trim();
+      if (!TOPIC_BOARD_STATUSES.includes(st as (typeof TOPIC_BOARD_STATUSES)[number])) {
+        return reply.code(400).send({ error: '无效的选题状态' });
+      }
+    }
+    if (b.priority !== undefined) {
+      const prio = String(b.priority).trim();
+      if (!['high', 'medium', 'low'].includes(prio)) {
+        return reply.code(400).send({ error: '无效的优先级' });
+      }
+    }
     const sets: string[] = [];
     const params: unknown[] = [];
     const strFields = ['title', 'core_angle', 'notes', 'priority', 'status', 'source_url', 'published_url', 'review_notes'];
@@ -1262,8 +1420,17 @@ export function registerRadarRoutes(app: FastifyInstance): void {
     const numFields = ['review_views', 'review_likes', 'review_favorites', 'review_comments'];
     for (const f of numFields) {
       if (b[f] !== undefined) {
-        sets.push(`${f} = ?`);
-        params.push(b[f] === null || b[f] === '' ? null : Number(b[f]));
+        if (b[f] === null || b[f] === '') {
+          sets.push(`${f} = ?`);
+          params.push(null);
+        } else {
+          const numVal = parseStrictNumber(b[f]);
+          if (numVal === null || numVal < 0) {
+            return reply.code(400).send({ error: `无效的复盘数值: ${f}` });
+          }
+          sets.push(`${f} = ?`);
+          params.push(numVal);
+        }
       }
     }
     if (sets.length > 0) {
@@ -1274,9 +1441,11 @@ export function registerRadarRoutes(app: FastifyInstance): void {
     return { ok: true, item: db.prepare('SELECT * FROM topic_board WHERE id = ?').get(id) };
   });
 
-  app.delete<{ Params: { id: string } }>('/api/radar/board/:id', async (req) => {
+  app.delete<{ Params: { id: string } }>('/api/radar/board/:id', async (req, reply) => {
+    const id = parsePositiveIntId(req.params.id);
+    if (!id) return reply.code(400).send({ error: '无效的选题 ID' });
     const db = getDb();
-    db.prepare('DELETE FROM topic_board WHERE id = ?').run(Number(req.params.id));
+    db.prepare('DELETE FROM topic_board WHERE id = ?').run(id);
     return { ok: true };
   });
 
@@ -1423,19 +1592,42 @@ ${script.slice(0, 4500)}
 
   app.post<{
     Body: {
-      platform: 'douyin' | 'bilibili' | 'xiaohongshu' | 'kuaishou';
-      mode: 'detail' | 'search' | 'creator';
-      input: string;
-      maxComments?: number;
+      platform?: string;
+      mode?: string;
+      input?: string;
+      maxComments?: unknown;
       showBrowser?: boolean;
     };
   }>('/api/comments/crawl', async (req, reply) => {
     const b = req.body || ({} as Record<string, unknown>);
+    const allowedPlatforms = new Set(['douyin', 'bilibili', 'xiaohongshu', 'kuaishou']);
+    const allowedModes = new Set(['detail', 'search', 'creator']);
+
+    const rawPlatform = b.platform === undefined ? 'douyin' : b.platform;
+    if (typeof rawPlatform !== 'string' || !allowedPlatforms.has(rawPlatform.trim())) {
+      return reply.code(400).send({ started: false, error: '不支持的评论采集平台，仅支持 douyin/bilibili/xiaohongshu/kuaishou' });
+    }
+    const rawMode = b.mode === undefined ? 'detail' : b.mode;
+    if (typeof rawMode !== 'string' || !allowedModes.has(rawMode.trim())) {
+      return reply.code(400).send({ started: false, error: '不支持的采集模式，仅支持 detail/search/creator' });
+    }
+    let maxComments = 30;
+    if (b.maxComments !== undefined && b.maxComments !== null) {
+      const parsedMax = parsePositiveIntId(b.maxComments);
+      if (!parsedMax) {
+        return reply.code(400).send({ started: false, error: 'maxComments 必须为有效正整数' });
+      }
+      maxComments = parsedMax;
+    }
+    if (typeof b.input !== 'string' || !b.input.trim()) {
+      return reply.code(400).send({ started: false, error: '请输入视频链接、关键词或博主主页链接' });
+    }
+
     const res = startStandaloneCommentCrawl({
-      platform: b.platform || 'douyin',
-      mode: b.mode || 'detail',
-      input: String(b.input || ''),
-      maxComments: b.maxComments ? Number(b.maxComments) : 30,
+      platform: rawPlatform.trim() as 'douyin' | 'bilibili' | 'xiaohongshu' | 'kuaishou',
+      mode: rawMode.trim() as 'detail' | 'search' | 'creator',
+      input: b.input,
+      maxComments,
       showBrowser: Boolean(b.showBrowser),
     });
     if (!res.started) return reply.code(400).send(res);
@@ -1518,20 +1710,32 @@ ${script.slice(0, 4500)}
       onlyBreakout?: string;
       limit?: string;
     };
-  }>('/api/radar/creators/leaderboard', async (req) => {
+  }>('/api/radar/creators/leaderboard', async (req, reply) => {
+    const creatorIdParsed = parseQueryPositiveInt(req.query.creatorId);
+    if (!creatorIdParsed.valid) return reply.code(400).send({ error: '无效的 creatorId 参数' });
+    const daysParsed = parseQueryNumber(req.query.days);
+    if (!daysParsed.valid || (daysParsed.present && (daysParsed.value ?? 0) < 0)) {
+      return reply.code(400).send({ error: '无效的 days 参数' });
+    }
+    const limitParsed = parseQueryNumber(req.query.limit);
+    if (!limitParsed.valid) {
+      return reply.code(400).send({ error: '无效的 limit 参数' });
+    }
     const items = getCreatorLeaderboard({
       platform: req.query.platform || undefined,
-      creatorId: req.query.creatorId ? Number(req.query.creatorId) : undefined,
+      creatorId: creatorIdParsed.present ? (creatorIdParsed.value as number) : undefined,
       sort: req.query.sort || 'ratio',
-      days: req.query.days ? Number(req.query.days) : undefined,
+      days: daysParsed.present ? (daysParsed.value as number) : undefined,
       onlyBreakout: req.query.onlyBreakout === 'true',
-      limit: req.query.limit ? Number(req.query.limit) : 40,
+      limit: limitParsed.present ? Math.min(200, Math.max(1, Math.floor(limitParsed.value as number))) : 40,
     });
     return { items };
   });
 
-  app.get<{ Params: { id: string } }>('/api/radar/intel/:id/remix', async (req) => {
-    return { record: getContentRemixRecord(Number(req.params.id)) };
+  app.get<{ Params: { id: string } }>('/api/radar/intel/:id/remix', async (req, reply) => {
+    const contentId = parsePositiveIntId(req.params.id);
+    if (!contentId) return reply.code(400).send({ error: '无效的内容 ID' });
+    return { record: getContentRemixRecord(contentId) };
   });
 
   app.post<{
@@ -1545,8 +1749,12 @@ ${script.slice(0, 4500)}
       forceRefresh?: boolean;
     };
   }>('/api/radar/intel/:id/remix', async (req, reply) => {
-    const contentId = Number(req.params.id);
+    const contentId = parsePositiveIntId(req.params.id);
+    if (!contentId) return reply.code(400).send({ error: '无效的内容 ID' });
     const mode = req.body?.mode || 'breakdown';
+    if (mode !== 'breakdown' && mode !== 'rewrite') {
+      return reply.code(400).send({ error: '无效的拆解模式 mode' });
+    }
     try {
       if (mode === 'breakdown') {
         const breakdown = await generateViralBreakdown(contentId, Boolean(req.body?.forceRefresh));
@@ -1577,15 +1785,25 @@ ${script.slice(0, 4500)}
       includeRss?: string;
       search?: string;
     };
-  }>('/api/radar/creators/feed', async (req) => {
+  }>('/api/radar/creators/feed', async (req, reply) => {
+    const creatorIdParsed = parseQueryPositiveInt(req.query.creatorId);
+    if (!creatorIdParsed.valid) return reply.code(400).send({ error: '无效的 creatorId 参数' });
+    const daysParsed = parseQueryNumber(req.query.days);
+    if (!daysParsed.valid || (daysParsed.present && (daysParsed.value ?? 0) < 0)) {
+      return reply.code(400).send({ error: '无效的 days 参数' });
+    }
+    const offsetParsed = parseQueryNumber(req.query.offset);
+    if (!offsetParsed.valid) return reply.code(400).send({ error: '无效的 offset 参数' });
+    const limitParsed = parseQueryNumber(req.query.limit);
+    if (!limitParsed.valid) return reply.code(400).send({ error: '无效的 limit 参数' });
+
     const db = getDb();
     const runningSet = new Set([...getRunningSourceIds(), ...historyFetchLocks]);
-    const creatorId = req.query.creatorId ? Number(req.query.creatorId) : null;
-    const rawDays = req.query.days !== undefined && req.query.days !== '' ? Number(req.query.days) : 7;
-    const days = Number.isFinite(rawDays) ? rawDays : 7;
+    const creatorId = creatorIdParsed.present ? creatorIdParsed.value : null;
+    const days = daysParsed.present ? (daysParsed.value as number) : 7;
     const onlyUnread = req.query.onlyUnread === 'true';
-    const offset = Math.max(0, Math.floor(Number(req.query.offset || 0) || 0));
-    const limit = Math.min(Math.max(Math.floor(Number(req.query.limit || 30) || 30), 1), 200);
+    const offset = Math.max(0, Math.floor(offsetParsed.present ? (offsetParsed.value as number) : 0));
+    const limit = Math.min(Math.max(Math.floor(limitParsed.present ? (limitParsed.value as number) : 30), 1), 200);
     const includeRss = req.query.includeRss === '1' || req.query.includeRss === 'true';
     const search = String(req.query.search || '').trim();
 
@@ -1790,8 +2008,8 @@ ${script.slice(0, 4500)}
       where.push('c.is_read = 0');
     }
     if (search) {
-      const like = `%${search}%`;
-      where.push('(c.title LIKE ? OR c.summary LIKE ? OR c.transcript LIKE ? OR s.name LIKE ?)');
+      const like = `%${escapeLikeTerm(search)}%`;
+      where.push("(c.title LIKE ? ESCAPE '\\' OR c.summary LIKE ? ESCAPE '\\' OR c.transcript LIKE ? ESCAPE '\\' OR s.name LIKE ? ESCAPE '\\')");
       args.push(like, like, like, like);
     }
 
@@ -1876,12 +2094,35 @@ ${script.slice(0, 4500)}
   );
 
   // R2：多视频横向对比，选出最适合二次创作的视频
-  app.post<{ Body: { contentIds?: number[]; creatorId?: number } }>(
+  app.post<{ Body: { contentIds?: unknown; creatorId?: unknown } }>(
     '/api/radar/creators/compare-remix',
-    async (req) => {
+    async (req, reply) => {
+      let creatorId: number | undefined;
+      if (req.body?.creatorId !== undefined && req.body?.creatorId !== null) {
+        const parsedCreator = parsePositiveIntId(req.body.creatorId);
+        if (!parsedCreator) {
+          return reply.code(400).send({ error: '无效的 creatorId' });
+        }
+        creatorId = parsedCreator;
+      }
+      let contentIds: number[] | undefined;
+      if (req.body?.contentIds !== undefined && req.body?.contentIds !== null) {
+        if (!Array.isArray(req.body.contentIds) || req.body.contentIds.length === 0) {
+          return reply.code(400).send({ error: 'contentIds 必须为非空正整数数组' });
+        }
+        const validatedIds: number[] = [];
+        for (const item of req.body.contentIds) {
+          const parsedCid = parsePositiveIntId(item);
+          if (!parsedCid) {
+            return reply.code(400).send({ error: 'contentIds 包含无效的内容 ID' });
+          }
+          validatedIds.push(parsedCid);
+        }
+        contentIds = validatedIds;
+      }
       return await compareContentRemixSuitability({
-        contentIds: Array.isArray(req.body?.contentIds) ? req.body.contentIds : undefined,
-        creatorId: req.body?.creatorId ? Number(req.body.creatorId) : undefined,
+        contentIds,
+        creatorId,
       });
     }
   );
@@ -1906,7 +2147,11 @@ ${script.slice(0, 4500)}
         return reply.code(409).send({ ok: false, error: '该博主正在采集或拉取历史作品中，请稍候完成' });
       }
 
-      const maxPages = Math.min(Math.max(Math.round(Number(req.body?.maxPages || 3)), 1), 5);
+      const rawMaxPages = req.body?.maxPages !== undefined ? parseStrictNumber(req.body.maxPages) : 3;
+      if (rawMaxPages === null || rawMaxPages < 1) {
+        return reply.code(400).send({ error: 'maxPages 必须为有效正数' });
+      }
+      const maxPages = Math.min(Math.max(Math.round(rawMaxPages), 1), 5);
       const modeRow = db.prepare("SELECT value FROM app_settings WHERE key = 'browser_mode'").get() as
         | { value?: string }
         | undefined;
@@ -2069,14 +2314,18 @@ ${script.slice(0, 4500)}
     };
   });
 
-  app.post<{ Body: { creatorId?: number; contentId?: number } }>('/api/radar/creators/mark-read', async (req) => {
+  app.post<{ Body: { creatorId?: number; contentId?: number } }>('/api/radar/creators/mark-read', async (req, reply) => {
     const db = getDb();
     const { creatorId, contentId } = req.body || {};
     let changes = 0;
-    if (contentId) {
-      changes = Number(db.prepare('UPDATE contents SET is_read = 1 WHERE id = ?').run(Number(contentId)).changes);
-    } else if (creatorId) {
-      changes = Number(db.prepare('UPDATE contents SET is_read = 1 WHERE source_id = ? AND is_read = 0').run(Number(creatorId)).changes);
+    if (contentId !== undefined && contentId !== null) {
+      const cid = parsePositiveIntId(contentId);
+      if (!cid) return reply.code(400).send({ error: '无效的 contentId' });
+      changes = Number(db.prepare('UPDATE contents SET is_read = 1 WHERE id = ?').run(cid).changes);
+    } else if (creatorId !== undefined && creatorId !== null) {
+      const sid = parsePositiveIntId(creatorId);
+      if (!sid) return reply.code(400).send({ error: '无效的 creatorId' });
+      changes = Number(db.prepare('UPDATE contents SET is_read = 1 WHERE source_id = ? AND is_read = 0').run(sid).changes);
     } else {
       changes = Number(
         db
@@ -2087,8 +2336,12 @@ ${script.slice(0, 4500)}
     return { ok: true, updated: changes };
   });
 
-  app.put<{ Body: { intervalMinutes: number } }>('/api/radar/creators/interval', async (req) => {
-    const mins = Math.min(240, Math.max(5, Number(req.body?.intervalMinutes || 30)));
+  app.put<{ Body: { intervalMinutes: number } }>('/api/radar/creators/interval', async (req, reply) => {
+    const rawInterval = parseStrictNumber(req.body?.intervalMinutes);
+    if (rawInterval === null || rawInterval <= 0) {
+      return reply.code(400).send({ error: 'intervalMinutes 必须为有效正数' });
+    }
+    const mins = Math.min(240, Math.max(5, Math.round(rawInterval)));
     const db = getDb();
     const now = new Date().toISOString();
     db.prepare(`

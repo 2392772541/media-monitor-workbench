@@ -191,10 +191,33 @@ export function CreatorsPage({
   const itemsLenRef = useRef<number>(0);
   const loadingMoreRef = useRef<boolean>(false);
   const filterKeyRef = useRef<string>('');
+  const requestSeqRef = useRef<number>(0);
+  const feedAbortRef = useRef<AbortController | null>(null);
+  const loadMoreAbortRef = useRef<AbortController | null>(null);
+  const nonSilentInFlightRef = useRef<boolean>(false);
+  const activeFilterRef = useRef({
+    creatorId: selectedCreatorId,
+    days,
+    includeRss,
+    searchQuery,
+  });
+  activeFilterRef.current = {
+    creatorId: selectedCreatorId,
+    days,
+    includeRss,
+    searchQuery,
+  };
 
   useEffect(() => {
     itemsLenRef.current = feed?.items.length || 0;
   }, [feed?.items.length]);
+
+  useEffect(() => {
+    return () => {
+      feedAbortRef.current?.abort();
+      loadMoreAbortRef.current?.abort();
+    };
+  }, []);
 
   // 搜索框防抖同步
   useEffect(() => {
@@ -205,19 +228,40 @@ export function CreatorsPage({
   }, [searchInput]);
 
   const loadFeed = async (silent = false, preserveLoadedCount = false) => {
-    if (silent && loadingMoreRef.current) return;
-    if (!silent) setLoading(true);
+    if (silent && (loadingMoreRef.current || nonSilentInFlightRef.current)) return;
+    const seq = ++requestSeqRef.current;
+    feedAbortRef.current?.abort();
+    const controller = new AbortController();
+    feedAbortRef.current = controller;
+    if (!silent) {
+      loadMoreAbortRef.current?.abort();
+      loadMoreAbortRef.current = null;
+      loadingMoreRef.current = false;
+      setLoadingMore(false);
+      nonSilentInFlightRef.current = true;
+      setLoading(true);
+    }
     try {
       const targetLimit =
         silent || preserveLoadedCount ? Math.min(200, Math.max(30, itemsLenRef.current)) : 30;
-      const res = await fetchCreatorsFeed({
-        creatorId: selectedCreatorId,
-        days,
-        offset: 0,
-        limit: targetLimit,
-        includeRss,
-        search: searchQuery,
-      });
+      const {
+        creatorId: activeCreatorId,
+        days: activeDays,
+        includeRss: activeIncludeRss,
+        searchQuery: activeSearchQuery,
+      } = activeFilterRef.current;
+      const res = await fetchCreatorsFeed(
+        {
+          creatorId: activeCreatorId,
+          days: activeDays,
+          offset: 0,
+          limit: targetLimit,
+          includeRss: activeIncludeRss,
+          search: activeSearchQuery,
+        },
+        { signal: controller.signal }
+      );
+      if (seq !== requestSeqRef.current || controller.signal.aborted) return;
 
       const curIds = new Set(res.items.map((x) => x.id));
       if (silent && prevTopItemIdsRef.current) {
@@ -234,9 +278,18 @@ export function CreatorsPage({
       prevTopItemIdsRef.current = curIds;
       setFeed(res);
     } catch (err) {
+      if (controller.signal.aborted || (err as Error)?.name === 'AbortError' || seq !== requestSeqRef.current) {
+        return;
+      }
       if (!silent) onToast((err as Error).message);
     } finally {
-      if (!silent) setLoading(false);
+      if (feedAbortRef.current === controller) {
+        feedAbortRef.current = null;
+      }
+      if (!silent && seq === requestSeqRef.current) {
+        nonSilentInFlightRef.current = false;
+        setLoading(false);
+      }
     }
   };
 
@@ -285,17 +338,31 @@ export function CreatorsPage({
   // R3：加载更多历史作品（offset/limit 分页去重追加）
   const handleLoadMore = async () => {
     if (!feed?.hasMore || loadingMoreRef.current) return;
+    const seq = requestSeqRef.current;
+    loadMoreAbortRef.current?.abort();
+    const controller = new AbortController();
+    loadMoreAbortRef.current = controller;
     loadingMoreRef.current = true;
     setLoadingMore(true);
     try {
-      const res = await fetchCreatorsFeed({
-        creatorId: selectedCreatorId,
-        days,
-        offset: feed.items.length,
-        limit: 30,
-        includeRss,
-        search: searchQuery,
-      });
+      const {
+        creatorId: activeCreatorId,
+        days: activeDays,
+        includeRss: activeIncludeRss,
+        searchQuery: activeSearchQuery,
+      } = activeFilterRef.current;
+      const res = await fetchCreatorsFeed(
+        {
+          creatorId: activeCreatorId,
+          days: activeDays,
+          offset: feed.items.length,
+          limit: 30,
+          includeRss: activeIncludeRss,
+          search: activeSearchQuery,
+        },
+        { signal: controller.signal }
+      );
+      if (seq !== requestSeqRef.current || controller.signal.aborted) return;
       setFeed((prev) => {
         if (!prev) return res;
         const existing = new Set(prev.items.map((x) => x.id));
@@ -306,10 +373,16 @@ export function CreatorsPage({
         };
       });
     } catch (err) {
+      if (controller.signal.aborted || (err as Error)?.name === 'AbortError' || seq !== requestSeqRef.current) {
+        return;
+      }
       onToast((err as Error).message);
     } finally {
-      loadingMoreRef.current = false;
-      setLoadingMore(false);
+      if (loadMoreAbortRef.current === controller) {
+        loadMoreAbortRef.current = null;
+        loadingMoreRef.current = false;
+        setLoadingMore(false);
+      }
     }
   };
 
@@ -321,7 +394,7 @@ export function CreatorsPage({
       onToast(
         `已拉取「${creator.name}」历史作品：获取 ${res.fetchedCount} 条（新增 ${res.insertedCount} 条，库内共 ${res.totalStored} 条）`
       );
-      if (days !== 0) {
+      if (activeFilterRef.current.days !== 0) {
         setDays(0);
       } else {
         await loadFeed(true, true);
@@ -813,10 +886,10 @@ export function CreatorsPage({
             onClick={() => handleSelectCreator(null)}
           >
             <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', gap: 6 }}>
-              <span style={{ fontWeight: 700, fontSize: 13.5, display: 'inline-flex', alignItems: 'center', gap: 6 }}>
-                <Sparkles size={14} color="#4f46e5" /> 全部对标博主
+              <span style={{ fontWeight: 700, fontSize: 13.5, display: 'inline-flex', alignItems: 'center', gap: 6, whiteSpace: 'nowrap', flexShrink: 0 }}>
+                <Sparkles size={14} color="#4f46e5" /> 全部博主
               </span>
-              <div style={{ display: 'flex', alignItems: 'center', gap: 4 }}>
+              <div style={{ display: 'flex', alignItems: 'center', gap: 4, flexShrink: 0 }}>
                 {totalTodayNew > 0 && (
                   <span className="badge badge-blue" style={{ fontSize: 11 }}>
                     今日 +{totalTodayNew}
@@ -962,7 +1035,7 @@ export function CreatorsPage({
                             {fmtRelativeTime(it.published_at || it.discovered_at)}
                           </span>
                         </div>
-                        <div style={{ fontSize: 13.5, fontWeight: 600, color: 'var(--text)', lineHeight: 1.45, marginBottom: 5 }}>
+                        <div className="r1-today-title" title={it.title}>
                           {it.title}
                         </div>
                         <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', gap: 8, flexWrap: 'wrap', fontSize: 11.5, color: 'var(--text-muted)' }}>

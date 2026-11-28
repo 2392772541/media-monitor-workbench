@@ -56,13 +56,20 @@ function makeToolError(message, extra = undefined) {
   };
 }
 
-// 清洗并去重标签列表，去除前导 # 与空白
+// 清洗并去重标签列表，支持数组元素内逗号/空白二次拆分，去除前导 # 与空白
 function normalizeTags(rawTags) {
-  const list = Array.isArray(rawTags)
-    ? rawTags
-    : typeof rawTags === 'string'
-      ? rawTags.split(/[,，\s]+/)
-      : [];
+  const list = [];
+  if (Array.isArray(rawTags)) {
+    for (const elem of rawTags) {
+      if (typeof elem === 'string') {
+        list.push(...elem.split(/[,，\s]+/));
+      } else if (elem !== undefined && elem !== null) {
+        list.push(elem);
+      }
+    }
+  } else if (typeof rawTags === 'string') {
+    list.push(...rawTags.split(/[,，\s]+/));
+  }
   const cleaned = [];
   const seen = new Set();
   for (const item of list) {
@@ -74,11 +81,12 @@ function normalizeTags(rawTags) {
   return cleaned;
 }
 
-// 从原始文案中提取 #话题 标签并分离正文
+// 从原始文案中提取 #话题 标签并分离正文，同时清除孤立 # 号
 function extractTagsFromCopy(rawCopy) {
+  const text = String(rawCopy || '');
   const extracted = [];
   const seen = new Set();
-  const matches = String(rawCopy || '').match(/#([^\s#,，。！？；：、]+)/g) || [];
+  const matches = text.match(/#([^\s#,，。！？；：、]+)/g) || [];
   for (const m of matches) {
     const tag = m.replace(/^#+/, '').trim();
     if (tag && !seen.has(tag)) {
@@ -86,9 +94,13 @@ function extractTagsFromCopy(rawCopy) {
       extracted.push(tag);
     }
   }
-  const cleanText = String(rawCopy || '')
+  const cleanText = text
     .replace(/#([^\s#,，。！？；：、]+)/g, ' ')
+    .replace(/#+(?=[\s,，。！？；：、]|$)/g, ' ')
     .replace(/[ \t]+/g, ' ')
+    .split(/\r?\n/)
+    .map((line) => line.trim())
+    .join('\n')
     .replace(/\n{3,}/g, '\n\n')
     .trim();
   return { extracted, cleanText };
@@ -131,13 +143,32 @@ function buildTencentShortTitle(titleText, fallbackText, warnings) {
 // 按单平台规则裁剪标题、正文简介与标签，并生成校验告警
 function formatCopyForPlatform(platformType, candidateTitle, candidateDesc, candidateTags, rawCopy) {
   const warnings = [];
-  let title = String(candidateTitle || '').trim();
-  let description = String(candidateDesc || '').trim();
+  const tExtracted = extractTagsFromCopy(candidateTitle);
+  const dExtracted = extractTagsFromCopy(candidateDesc);
   let tags = normalizeTags(candidateTags);
+  if (tags.length === 0 && (tExtracted.extracted.length > 0 || dExtracted.extracted.length > 0)) {
+    tags = normalizeTags([...tExtracted.extracted, ...dExtracted.extracted]);
+  }
+  let title = tExtracted.cleanText || (tExtracted.extracted.length > 0 ? tExtracted.extracted.join(' ').slice(0, 20) : '');
+  let description =
+    dExtracted.cleanText || (dExtracted.extracted.length > 0 ? dExtracted.extracted.join(' ').slice(0, 100) : '');
 
   if (!title) {
-    title = String(rawCopy || '').trim().split(/\r?\n/)[0]?.slice(0, 20) || '精彩视频分享';
-    warnings.push('未提取到明确标题，已自动截取文案首句作为标题');
+    const rawClean = extractTagsFromCopy(rawCopy).cleanText;
+    const cleanLines = rawClean
+      .split(/\r?\n+/)
+      .map((l) => l.trim())
+      .filter(Boolean);
+    if (cleanLines.length > 0) {
+      title = cleanLines[0].slice(0, 20);
+      warnings.push('未提取到明确标题，已自动截取文案首句作为标题');
+    } else if (tags.length > 0) {
+      title = tags.join(' ').slice(0, 20) || '精彩视频分享';
+      warnings.push('原始文案仅包含话题标签（无正文），已用清洗后的标签词生成兜底标题与简介');
+    } else {
+      title = '精彩视频分享';
+      warnings.push('未提取到明确标题与有效标签，已使用默认兜底标题');
+    }
   }
   if (!description) {
     description = title;
@@ -188,6 +219,10 @@ function formatCopyForPlatform(platformType, candidateTitle, candidateDesc, cand
         warnings.push(`快手标签超过 3 个（原 ${tags.length} 个），已保留前 3 个`);
         tags = tags.slice(0, 3);
       }
+      // 快手网页端无独立标题框，须将标题与话题前简介合并进 description
+      if (description && description !== title && !description.startsWith(title)) {
+        description = `${title}\n${description}`;
+      }
       break;
     default:
       warnings.push(`未知平台类型 ${platformType}`);
@@ -207,14 +242,21 @@ function formatCopyForPlatform(platformType, candidateTitle, candidateDesc, cand
 
 function splitRawCopyByRules(rawCopy, titleHint, explicitTags) {
   const { extracted, cleanText } = extractTagsFromCopy(rawCopy);
-  const mergedTags = normalizeTags([...(Array.isArray(explicitTags) ? explicitTags : []), ...extracted]);
+  const hintExtracted = extractTagsFromCopy(titleHint);
+  const mergedTags = normalizeTags([
+    ...(Array.isArray(explicitTags) ? explicitTags : normalizeTags(explicitTags)),
+    ...extracted,
+    ...hintExtracted.extracted,
+  ]);
 
   const lines = cleanText
     .split(/\r?\n+/)
     .map((l) => l.trim())
     .filter(Boolean);
 
-  let baseTitle = typeof titleHint === 'string' && titleHint.trim() ? titleHint.trim() : '';
+  let baseTitle =
+    hintExtracted.cleanText ||
+    (hintExtracted.extracted.length > 0 ? hintExtracted.extracted.join(' ').slice(0, 20) : '');
   let bodyLines = lines;
 
   if (!baseTitle && lines.length > 0) {
@@ -234,6 +276,102 @@ function splitRawCopyByRules(rawCopy, titleHint, explicitTags) {
     baseDesc = cleanText || baseTitle;
   }
   return { baseTitle, baseDesc, mergedTags };
+}
+
+// 与 workbench_fallback.py 对齐：前置校验定时发布参数与 2 小时最小提前量
+function validateTimerSchedule({
+  enableTimer,
+  videosPerDay,
+  rawDailyTimes,
+  startDays,
+  totalVideos = 1,
+  nowDate = new Date(),
+}) {
+  let dailyTimes;
+  if (rawDailyTimes === undefined || rawDailyTimes === null) {
+    dailyTimes = ['10:00', '18:00'];
+  } else if (Array.isArray(rawDailyTimes)) {
+    dailyTimes = rawDailyTimes.map((t) => String(t || '').trim()).filter(Boolean);
+  } else if (typeof rawDailyTimes === 'string') {
+    dailyTimes = rawDailyTimes.split(/[,，\s]+/).map((t) => t.trim()).filter(Boolean);
+  } else {
+    dailyTimes = [];
+  }
+
+  if (!enableTimer) {
+    return {
+      dailyTimes: dailyTimes.length > 0 ? dailyTimes : ['10:00', '18:00'],
+      videosPerDay: Number.isInteger(videosPerDay) && videosPerDay >= 1 ? videosPerDay : 1,
+      startDays: Number.isInteger(startDays) && startDays >= 0 ? startDays : 0,
+      earliestSchedule: null,
+    };
+  }
+
+  if (dailyTimes.length === 0) {
+    throw new Error('启用定时发布时，dailyTimes 不能为空，必须提供至少一个 HH:MM 时间点');
+  }
+  if (!Number.isInteger(videosPerDay) || videosPerDay < 1) {
+    throw new Error('启用定时发布时，videosPerDay 必须为大于等于 1 的整数');
+  }
+  if (videosPerDay > dailyTimes.length) {
+    throw new Error(`启用定时发布时，videosPerDay (${videosPerDay}) 不能大于 dailyTimes 数量 (${dailyTimes.length})`);
+  }
+  if (!Number.isInteger(startDays) || startDays < 0) {
+    throw new Error('启用定时发布时，startDays 不能为负数（0 表示明天，1 表示后天）');
+  }
+
+  const parsedTimes = [];
+  const normalizedTimes = [];
+  for (const entry of dailyTimes) {
+    const match = entry.match(/^(\d{1,2}):(\d{2})$/);
+    if (!match) {
+      throw new Error(`定时时间点格式错误: ${entry}，必须为 HH:MM（例如 10:00 或 18:30）`);
+    }
+    const hour = Number(match[1]);
+    const minute = Number(match[2]);
+    if (hour < 0 || hour > 23 || minute < 0 || minute > 59) {
+      throw new Error(`定时时间点超出有效范围: ${entry}（小时 0~23，分钟 0~59）`);
+    }
+    parsedTimes.push([hour, minute]);
+    normalizedTimes.push(`${String(hour).padStart(2, '0')}:${String(minute).padStart(2, '0')}`);
+  }
+
+  const videoCount = Math.max(1, totalVideos);
+  let earliestDate = null;
+  for (let videoIdx = 0; videoIdx < videoCount; videoIdx++) {
+    const day = Math.floor(videoIdx / videosPerDay) + startDays + 1;
+    const dailyVideoIndex = videoIdx % videosPerDay;
+    const [hour, minute] = parsedTimes[dailyVideoIndex];
+    const scheduled = new Date(
+      nowDate.getFullYear(),
+      nowDate.getMonth(),
+      nowDate.getDate() + day,
+      hour,
+      minute,
+      0,
+      0
+    );
+    if (!earliestDate || scheduled.getTime() < earliestDate.getTime()) {
+      earliestDate = scheduled;
+    }
+  }
+
+  const pad2 = (n) => String(n).padStart(2, '0');
+  const earliestText = earliestDate
+    ? `${earliestDate.getFullYear()}-${pad2(earliestDate.getMonth() + 1)}-${pad2(earliestDate.getDate())} ${pad2(
+        earliestDate.getHours()
+      )}:${pad2(earliestDate.getMinutes())}`
+    : '';
+  if (!earliestDate || earliestDate.getTime() <= nowDate.getTime() + 2 * 3600 * 1000) {
+    throw new Error(`最早定时时间（${earliestText}）必须晚于当前时间至少 2 小时以上`);
+  }
+
+  return {
+    dailyTimes: normalizedTimes,
+    videosPerDay,
+    startDays,
+    earliestSchedule: earliestText,
+  };
 }
 
 function normalizePlatformList(rawPlatforms) {
@@ -377,9 +515,20 @@ async function handlePreparePublishCopy(args) {
 
   let ruleParts;
   if (rawCopy.trim()) {
-    ruleParts = splitRawCopyByRules(rawCopy, explicitTitle || titleHint, explicitTags);
-    if (explicitDescription) {
-      ruleParts.baseDesc = explicitDescription;
+    const tExtracted = extractTagsFromCopy(explicitTitle);
+    const dExtracted = extractTagsFromCopy(explicitDescription);
+    const cleanExplicitTitle =
+      tExtracted.cleanText || (tExtracted.extracted.length > 0 ? tExtracted.extracted.join(' ').slice(0, 20) : '');
+    const cleanExplicitDesc =
+      dExtracted.cleanText || (dExtracted.extracted.length > 0 ? dExtracted.extracted.join(' ').slice(0, 100) : '');
+    ruleParts = splitRawCopyByRules(rawCopy, cleanExplicitTitle || titleHint, explicitTags);
+    ruleParts.mergedTags = normalizeTags([
+      ...ruleParts.mergedTags,
+      ...tExtracted.extracted,
+      ...dExtracted.extracted,
+    ]);
+    if (cleanExplicitDesc) {
+      ruleParts.baseDesc = cleanExplicitDesc;
     }
   } else if (explicitTitle) {
     const titleExtracted = extractTagsFromCopy(explicitTitle);
@@ -389,8 +538,10 @@ async function handlePreparePublishCopy(args) {
       ...titleExtracted.extracted,
       ...descExtracted.extracted,
     ]);
-    const baseTitle = titleExtracted.cleanText || explicitTitle;
-    const baseDesc = descExtracted.cleanText || explicitDescription || baseTitle;
+    const baseTitle =
+      titleExtracted.cleanText || (titleExtracted.extracted.length > 0 ? titleExtracted.extracted.join(' ').slice(0, 20) : explicitTitle);
+    const baseDesc =
+      descExtracted.cleanText || (descExtracted.extracted.length > 0 ? descExtracted.extracted.join(' ').slice(0, 100) : '') || baseTitle;
     ruleParts = { baseTitle, baseDesc, mergedTags };
   } else {
     ruleParts = splitRawCopyByRules(explicitDescription, titleHint, explicitTags);
@@ -484,9 +635,23 @@ async function handlePublishVideoToPlatforms(args) {
 
   const isDraft = Boolean(args?.isDraft);
   const dryRun = Boolean(args?.dryRun);
-  const accountIds = Array.isArray(args?.accountIds)
-    ? args.accountIds.map((id) => Number(id)).filter((id) => Number.isFinite(id))
-    : [];
+  const accountIds = [];
+  if (args?.accountIds !== undefined) {
+    if (!Array.isArray(args.accountIds) || args.accountIds.length === 0) {
+      return makeToolError('accountIds 必须为非空正整数数组');
+    }
+    for (const rawId of args.accountIds) {
+      if (rawId === null || rawId === undefined || typeof rawId === 'boolean' || typeof rawId === 'object') {
+        return makeToolError(`accountIds 包含无效账号 ID: ${String(rawId)}`);
+      }
+      const trimmed = String(rawId).trim();
+      const num = Number(trimmed);
+      if (!trimmed || !Number.isInteger(num) || num <= 0) {
+        return makeToolError(`accountIds 包含无效账号 ID: ${String(rawId)}`);
+      }
+      accountIds.push(num);
+    }
+  }
   const copies = args?.copies && typeof args.copies === 'object' ? args.copies : {};
   const defaultTitle = typeof args?.title === 'string' ? args.title.trim() : '';
   const defaultDescription = typeof args?.description === 'string' ? args.description : '';
@@ -500,6 +665,27 @@ async function handlePublishVideoToPlatforms(args) {
     if (!platTitle) {
       return makeToolError(`平台 ${PLATFORM_NAMES[p]} 缺少发布标题 title`);
     }
+  }
+
+  // 定时发布参数前置校验（必须在 dryRun 返回与 /api/sau/import-local-file 之前拦截非法参数）
+  const enableTimer = Boolean(args?.enableTimer);
+  const rawVideosPerDay =
+    args?.videosPerDay !== undefined && args?.videosPerDay !== null ? Number(args.videosPerDay) : 1;
+  const rawStartDays =
+    args?.startDays !== undefined && args?.startDays !== null ? Number(args.startDays) : 0;
+  let timerConfig;
+  try {
+    timerConfig = validateTimerSchedule({
+      enableTimer,
+      videosPerDay: rawVideosPerDay,
+      rawDailyTimes: args?.dailyTimes,
+      startDays: rawStartDays,
+      totalVideos: inputFileList.length > 0 ? inputFileList.length : 1,
+    });
+  } catch (err) {
+    return makeToolError(err?.message || '定时发布参数校验失败', {
+      timerValidation: { ok: false, enableTimer },
+    });
   }
 
   // 防误发硬守卫：非 dryRun 实际导入/发布前必须显式传入 confirmed: true
@@ -591,10 +777,17 @@ async function handlePublishVideoToPlatforms(args) {
 
     const platCopy = copies[String(p)] || copies[p] || {};
     const platTitle = String(platCopy.title || defaultTitle).trim();
-    const platDesc =
+    let platDesc =
       typeof platCopy.description === 'string' ? platCopy.description : defaultDescription;
+    // 快手网页端无独立标题框，有简介时须将标题与简介合并进 description
+    if (p === 4 && platDesc && platDesc !== platTitle && !platDesc.startsWith(platTitle)) {
+      platDesc = `${platTitle}\n${platDesc}`;
+    }
+    const rawPlatTags = platCopy.tags;
     const platTags =
-      Array.isArray(platCopy.tags) ? normalizeTags(platCopy.tags) : defaultTags;
+      Array.isArray(rawPlatTags) || (typeof rawPlatTags === 'string' && rawPlatTags.trim())
+        ? normalizeTags(rawPlatTags)
+        : defaultTags;
 
     platformPlans.push({
       type: p,
@@ -606,13 +799,10 @@ async function handlePublishVideoToPlatforms(args) {
         title: platTitle,
         description: platDesc,
         tags: platTags,
-        enableTimer: args?.enableTimer ? 1 : 0,
-        videosPerDay: Number(args?.videosPerDay || 1) || 1,
-        dailyTimes:
-          Array.isArray(args?.dailyTimes) && args.dailyTimes.length > 0
-            ? args.dailyTimes
-            : ['10:00', '18:00'],
-        startDays: Number.isFinite(Number(args?.startDays)) ? Number(args.startDays) : 0,
+        enableTimer: enableTimer ? 1 : 0,
+        videosPerDay: timerConfig.videosPerDay,
+        dailyTimes: timerConfig.dailyTimes,
+        startDays: timerConfig.startDays,
         category: Number(args?.category || 0) || 0,
         isDraft: p === 2 ? isDraft : false,
         productLink: p === 3 ? String(args?.productLink || '') : '',

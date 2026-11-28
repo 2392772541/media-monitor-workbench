@@ -26,6 +26,13 @@ import {
   stopSauBackend,
 } from '../services/sauBridge.js';
 import { registerRadarRoutes } from './radarRoutes.js';
+import {
+  escapeLikeTerm,
+  parsePositiveIntId,
+  parseQueryNumber,
+  parseQueryPositiveInt,
+  parseStrictNumber,
+} from '../utils/sqlValidation.js';
 
 export function registerRoutes(app: FastifyInstance, shutdownHandler: () => Promise<void>) {
   app.get('/api/health', async () => {
@@ -160,6 +167,19 @@ export function registerRoutes(app: FastifyInstance, shutdownHandler: () => Prom
     const rawUrl = (req.body?.url || '').trim();
     if (!rawUrl) return reply.code(400).send({ error: '主页链接不能为空' });
 
+    const db = getDb();
+    let categoryId: number | null = null;
+    if (req.body?.category_id !== undefined && req.body?.category_id !== null) {
+      const parsedCat = parsePositiveIntId(req.body.category_id);
+      if (!parsedCat) {
+        return reply.code(400).send({ error: '无效的 category_id' });
+      }
+      if (!db.prepare('SELECT id FROM categories WHERE id = ?').get(parsedCat)) {
+        return reply.code(404).send({ error: '指定的分类不存在' });
+      }
+      categoryId = parsedCat;
+    }
+
     const initial = recognizeSourceUrl(rawUrl);
     if (!initial.valid) {
       return reply.code(400).send({ error: '未识别到有效网址，请粘贴完整的博主主页链接或抖音分享口令' });
@@ -171,7 +191,6 @@ export function registerRoutes(app: FastifyInstance, shutdownHandler: () => Prom
     const adapter = getAdapter(platform);
     const probe = await adapter.checkAvailability(recognized.normalizedUrl);
 
-    const db = getDb();
     // 若已存在同规范 URL 的对标博主，直接触发一次最新抓取而不重复建多条
     const existing = db
       .prepare("SELECT * FROM sources WHERE url = ? AND source_type != 'hot_board' LIMIT 1")
@@ -201,8 +220,17 @@ export function registerRoutes(app: FastifyInstance, shutdownHandler: () => Prom
     const settingRow = db.prepare('SELECT value FROM app_settings WHERE key = ?').get(settingKey) as { value?: string } | undefined;
     const fallbackInterval = platform === 'website' || platform === 'rss' ? 60 : 30;
     const defaultInterval = Number(settingRow?.value) > 0 ? Number(settingRow?.value) : fallbackInterval;
-    const interval = Math.max(5, Number(req.body.interval_minutes || defaultInterval));
-    const priority = Number(req.body.priority || 2);
+    const interval = req.body.interval_minutes !== undefined
+      ? parseStrictNumber(req.body.interval_minutes)
+      : defaultInterval;
+    if (interval === null || interval <= 0) {
+      return reply.code(400).send({ error: 'interval_minutes 必须为有效正数' });
+    }
+    const safeInterval = Math.max(5, Math.round(interval));
+    const priority = req.body.priority !== undefined ? parseStrictNumber(req.body.priority) : 2;
+    if (priority === null) {
+      return reply.code(400).send({ error: 'priority 必须为有效数字' });
+    }
 
     const res = db
       .prepare(`
@@ -216,9 +244,9 @@ export function registerRoutes(app: FastifyInstance, shutdownHandler: () => Prom
         platform,
         recognized.normalizedUrl,
         sourceType,
-        req.body.category_id || null,
-        priority,
-        interval,
+        categoryId,
+        Math.round(priority),
+        safeInterval,
         probe.capabilityStatus,
         (req.body.notes || '').trim(),
         now,
@@ -307,12 +335,43 @@ export function registerRoutes(app: FastifyInstance, shutdownHandler: () => Prom
       notes?: string;
     };
   }>('/api/sources/:id', async (req, reply) => {
-    const id = Number(req.params.id);
+    const id = parsePositiveIntId(req.params.id);
+    if (!id) return reply.code(400).send({ error: '无效的监控对象 ID' });
     const db = getDb();
     const existing = db.prepare('SELECT * FROM sources WHERE id = ?').get(id);
     if (!existing) return reply.code(404).send({ error: '监控对象不存在' });
 
     const b = req.body || {};
+    let priorityVal: number | null = null;
+    if (b.priority !== undefined) {
+      const p = parseStrictNumber(b.priority);
+      if (p === null) return reply.code(400).send({ error: 'priority 必须为有效数字' });
+      priorityVal = Math.round(p);
+    }
+    let intervalVal: number | null = null;
+    if (b.interval_minutes !== undefined) {
+      const iv = parseStrictNumber(b.interval_minutes);
+      if (iv === null || iv <= 0) return reply.code(400).send({ error: 'interval_minutes 必须为有效正数' });
+      intervalVal = Math.max(5, Math.round(iv));
+    }
+    if (b.status !== undefined && b.status !== 'active' && b.status !== 'paused') {
+      return reply.code(400).send({ error: '无效的监控状态' });
+    }
+    let nextCategoryId = (existing as { category_id: number | null }).category_id;
+    if (b.category_id !== undefined) {
+      if (b.category_id === null) {
+        nextCategoryId = null;
+      } else {
+        const parsedCat = parsePositiveIntId(b.category_id);
+        if (!parsedCat) {
+          return reply.code(400).send({ error: '无效的 category_id' });
+        }
+        if (!db.prepare('SELECT id FROM categories WHERE id = ?').get(parsedCat)) {
+          return reply.code(404).send({ error: '指定的分类不存在' });
+        }
+        nextCategoryId = parsedCat;
+      }
+    }
     db.prepare(`
       UPDATE sources SET
         name = COALESCE(?, name),
@@ -329,9 +388,9 @@ export function registerRoutes(app: FastifyInstance, shutdownHandler: () => Prom
       b.name ?? null,
       b.url ?? null,
       b.platform ?? null,
-      b.category_id !== undefined ? b.category_id : (existing as { category_id: number | null }).category_id,
-      b.priority ?? null,
-      b.interval_minutes ? Math.max(5, Number(b.interval_minutes)) : null,
+      nextCategoryId,
+      priorityVal,
+      intervalVal,
       b.status ?? null,
       b.notes ?? null,
       new Date().toISOString(),
@@ -340,15 +399,17 @@ export function registerRoutes(app: FastifyInstance, shutdownHandler: () => Prom
     return db.prepare('SELECT * FROM sources WHERE id = ?').get(id);
   });
 
-  app.delete<{ Params: { id: string } }>('/api/sources/:id', async (req) => {
-    const id = Number(req.params.id);
+  app.delete<{ Params: { id: string } }>('/api/sources/:id', async (req, reply) => {
+    const id = parsePositiveIntId(req.params.id);
+    if (!id) return reply.code(400).send({ error: '无效的监控对象 ID' });
     const db = getDb();
     const res = db.prepare('DELETE FROM sources WHERE id = ?').run(id);
     return { deleted: res.changes > 0 };
   });
 
-  app.post<{ Params: { id: string } }>('/api/sources/:id/check', async (req) => {
-    const id = Number(req.params.id);
+  app.post<{ Params: { id: string } }>('/api/sources/:id/check', async (req, reply) => {
+    const id = parsePositiveIntId(req.params.id);
+    if (!id) return reply.code(400).send({ error: '无效的监控对象 ID' });
     return enqueueCollection(id, 'manual');
   });
 
@@ -365,23 +426,36 @@ export function registerRoutes(app: FastifyInstance, shutdownHandler: () => Prom
       limit?: string;
       offset?: string;
     };
-  }>('/api/contents', async (req) => {
+  }>('/api/contents', async (req, reply) => {
     const db = getDb();
     const q = req.query;
     const conditions: string[] = [];
     const params: Array<string | number> = [];
 
+    const sourceIdParsed = parseQueryPositiveInt(q.sourceId);
+    if (!sourceIdParsed.valid) return reply.code(400).send({ error: '无效的 sourceId 参数' });
+    const categoryIdParsed = parseQueryPositiveInt(q.categoryId);
+    if (!categoryIdParsed.valid) return reply.code(400).send({ error: '无效的 categoryId 参数' });
+    const daysParsed = parseQueryNumber(q.days);
+    if (!daysParsed.valid || (daysParsed.present && (daysParsed.value ?? 0) < 0)) {
+      return reply.code(400).send({ error: '无效的 days 参数' });
+    }
+    const limitParsed = parseQueryNumber(q.limit);
+    if (!limitParsed.valid) return reply.code(400).send({ error: '无效的 limit 参数' });
+    const offsetParsed = parseQueryNumber(q.offset);
+    if (!offsetParsed.valid) return reply.code(400).send({ error: '无效的 offset 参数' });
+
     if (q.platform && q.platform !== 'all') {
       conditions.push('c.platform = ?');
       params.push(q.platform);
     }
-    if (q.sourceId) {
+    if (sourceIdParsed.present && sourceIdParsed.value !== null) {
       conditions.push('c.source_id = ?');
-      params.push(Number(q.sourceId));
+      params.push(sourceIdParsed.value);
     }
-    if (q.categoryId) {
+    if (categoryIdParsed.present && categoryIdParsed.value !== null) {
       conditions.push('s.category_id = ?');
-      params.push(Number(q.categoryId));
+      params.push(categoryIdParsed.value);
     }
     if (q.isFavorite === '1' || q.isFavorite === 'true') {
       conditions.push('c.is_favorite = 1');
@@ -391,21 +465,21 @@ export function registerRoutes(app: FastifyInstance, shutdownHandler: () => Prom
     } else if (q.isRead === '1' || q.isRead === 'true') {
       conditions.push('c.is_read = 1');
     }
-    if (q.days && Number(q.days) > 0) {
-      const cutoff = new Date(Date.now() - Number(q.days) * 86400 * 1000).toISOString();
+    if (daysParsed.present && (daysParsed.value ?? 0) > 0) {
+      const cutoff = new Date(Date.now() - (daysParsed.value as number) * 86400 * 1000).toISOString();
       conditions.push('c.discovered_at >= ?');
       params.push(cutoff);
     }
     if (q.q && q.q.trim()) {
-      const term = q.q.trim();
+      const term = escapeLikeTerm(q.q.trim());
       const likePattern = `%${term}%`;
-      conditions.push('(c.title LIKE ? OR c.summary LIKE ? OR c.body LIKE ? OR c.author LIKE ?)');
+      conditions.push("(c.title LIKE ? ESCAPE '\\' OR c.summary LIKE ? ESCAPE '\\' OR c.body LIKE ? ESCAPE '\\' OR c.author LIKE ? ESCAPE '\\')");
       params.push(likePattern, likePattern, likePattern, likePattern);
     }
 
     const whereSql = conditions.length > 0 ? `WHERE ${conditions.join(' AND ')}` : '';
-    const limit = Math.min(100, Math.max(1, Number(q.limit || 30)));
-    const offset = Math.max(0, Number(q.offset || 0));
+    const limit = Math.min(100, Math.max(1, Math.floor(limitParsed.present ? (limitParsed.value as number) : 30)));
+    const offset = Math.max(0, Math.floor(offsetParsed.present ? (offsetParsed.value as number) : 0));
     // 支持按互动指标排序筛选对标爆款
     const orderBySql =
       q.sort === 'likes'
@@ -446,7 +520,8 @@ export function registerRoutes(app: FastifyInstance, shutdownHandler: () => Prom
   });
 
   app.get<{ Params: { id: string } }>('/api/contents/:id', async (req, reply) => {
-    const id = Number(req.params.id);
+    const id = parsePositiveIntId(req.params.id);
+    if (!id) return reply.code(400).send({ error: '无效的内容 ID' });
     const db = getDb();
     const item = db
       .prepare(`
@@ -468,7 +543,8 @@ export function registerRoutes(app: FastifyInstance, shutdownHandler: () => Prom
   app.patch<{ Params: { id: string }; Body: { is_read?: boolean; is_favorite?: boolean } }>(
     '/api/contents/:id',
     async (req, reply) => {
-      const id = Number(req.params.id);
+      const id = parsePositiveIntId(req.params.id);
+      if (!id) return reply.code(400).send({ error: '无效的内容 ID' });
       const db = getDb();
       const existing = db.prepare('SELECT id, is_read, is_favorite FROM contents WHERE id = ?').get(id) as
         | { id: number; is_read: number; is_favorite: number }
@@ -483,7 +559,7 @@ export function registerRoutes(app: FastifyInstance, shutdownHandler: () => Prom
   );
 
   // 一键批量标为已读，降低海量资讯积压带来的未读焦虑
-  app.post<{ Body: { platform?: string; sourceId?: number } }>('/api/contents/mark-all-read', async (req) => {
+  app.post<{ Body: { platform?: string; sourceId?: number } }>('/api/contents/mark-all-read', async (req, reply) => {
     const db = getDb();
     const conds = ['is_read = 0'];
     const vals: Array<string | number> = [];
@@ -491,9 +567,11 @@ export function registerRoutes(app: FastifyInstance, shutdownHandler: () => Prom
       conds.push('platform = ?');
       vals.push(req.body.platform);
     }
-    if (req.body?.sourceId) {
+    if (req.body?.sourceId !== undefined && req.body.sourceId !== null) {
+      const sid = parsePositiveIntId(req.body.sourceId);
+      if (!sid) return reply.code(400).send({ error: '无效的 sourceId' });
       conds.push('source_id = ?');
-      vals.push(Number(req.body.sourceId));
+      vals.push(sid);
     }
     const res = db.prepare(`UPDATE contents SET is_read = 1 WHERE ${conds.join(' AND ')}`).run(...vals);
     return { ok: true, updated: res.changes };
@@ -558,18 +636,22 @@ export function registerRoutes(app: FastifyInstance, shutdownHandler: () => Prom
     return tasks;
   });
 
-  app.get<{ Params: { id: string } }>('/api/tasks/:id/logs', async (req) => {
-    const id = Number(req.params.id);
+  app.get<{ Params: { id: string } }>('/api/tasks/:id/logs', async (req, reply) => {
+    const id = parsePositiveIntId(req.params.id);
+    if (!id) return reply.code(400).send({ error: '无效的任务 ID' });
     const db = getDb();
     return db.prepare('SELECT * FROM collection_logs WHERE collection_id = ? ORDER BY id ASC').all(id);
   });
 
-  app.post<{ Params: { id: string } }>('/api/tasks/:id/cancel', async (req) => {
-    return cancelCollection(Number(req.params.id));
+  app.post<{ Params: { id: string } }>('/api/tasks/:id/cancel', async (req, reply) => {
+    const id = parsePositiveIntId(req.params.id);
+    if (!id) return reply.code(400).send({ error: '无效的任务 ID' });
+    return cancelCollection(id);
   });
 
   app.post<{ Params: { id: string } }>('/api/tasks/:id/retry', async (req, reply) => {
-    const id = Number(req.params.id);
+    const id = parsePositiveIntId(req.params.id);
+    if (!id) return reply.code(400).send({ error: '无效的任务 ID' });
     const db = getDb();
     const row = db.prepare('SELECT source_id FROM collections WHERE id = ?').get(id) as { source_id: number } | undefined;
     if (!row) return reply.code(404).send({ error: '任务记录不存在' });
@@ -727,7 +809,11 @@ export function registerRoutes(app: FastifyInstance, shutdownHandler: () => Prom
   });
 
   app.get('/api/sau/publish-history', async (req, reply) => {
-    const limit = Number((req.query as { limit?: string })?.limit || 50) || 50;
+    const limitParsed = parseQueryNumber((req.query as { limit?: string })?.limit);
+    if (!limitParsed.valid) {
+      return reply.code(400).send({ code: 400, msg: '非法的 limit 参数', data: null });
+    }
+    const limit = Math.min(200, Math.max(1, Math.floor(limitParsed.present ? (limitParsed.value as number) : 50)));
     const res = await proxySauJson('GET', `/getPublishHistory?limit=${limit}`);
     return reply.code(res.status).send(res.payload);
   });

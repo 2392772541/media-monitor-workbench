@@ -135,6 +135,8 @@ def test_post_video_scheduled_passes_single_datetime_and_strategy(tmp_path, monk
 def test_publish_history_record_and_delete(tmp_path, monkeypatch):
     monkeypatch.setattr(sau_backend, "BASE_DIR", tmp_path)
     sau_backend.ensure_runtime_ready()
+    (tmp_path / "videoFile" / "demo.mp4").write_bytes(b"video")
+    (tmp_path / "cookiesFile" / "acc.json").write_text("{}", encoding="utf-8")
     client = sau_backend.app.test_client()
 
     with patch.object(sau_backend, "post_video_DouYin", return_value=None):

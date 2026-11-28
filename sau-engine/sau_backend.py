@@ -1,11 +1,13 @@
 import asyncio
 import json
 import os
+import re
 import shutil
 import sqlite3
 import threading
 import time
 import uuid
+from datetime import datetime, timedelta
 from queue import Empty, Queue
 from pathlib import Path
 from flask_cors import CORS
@@ -247,7 +249,10 @@ def upload_save():
     if custom_filename:
         safe_custom = Path(custom_filename).name
         ext = original_name.rsplit('.', 1)[-1] if '.' in original_name else ''
-        filename = f"{safe_custom}.{ext}" if ext else safe_custom
+        if ext and not safe_custom.lower().endswith(f".{ext.lower()}"):
+            filename = f"{safe_custom}.{ext}"
+        else:
+            filename = safe_custom
     else:
         filename = original_name
 
@@ -314,13 +319,22 @@ def import_local_file():
         }), 400
 
     src_path = Path(raw_path)
-    if not src_path.exists():
+    try:
+        exists = src_path.exists()
+        is_file = exists and src_path.is_file()
+    except (OSError, ValueError) as e:
+        return jsonify({
+            "code": 400,
+            "msg": f"Invalid filePath: {e}",
+            "data": None
+        }), 400
+    if not exists:
         return jsonify({
             "code": 404,
             "msg": f"Local file not found: {src_path}",
             "data": None
         }), 404
-    if not src_path.is_file():
+    if not is_file:
         return jsonify({
             "code": 400,
             "msg": f"Path is not a regular file: {src_path}",
@@ -674,45 +688,193 @@ def login():
     response.headers['Connection'] = 'keep-alive'
     return response
 
-@app.route('/postVideo', methods=['POST'])
-def postVideo():
-    # 获取JSON数据
-    data = request.get_json()
+def _escape_like(term: str) -> str:
+    """转义 SQLite LIKE 通配符（\\, %, _）。"""
+    return str(term or "").replace("\\", "\\\\").replace("%", "\\%").replace("_", "\\_")
 
-    if not data:
-        return jsonify({"code": 400, "msg": "请求数据不能为空", "data": None}), 400
 
-    # 从JSON数据中提取fileList和accountList
-    file_list = data.get('fileList', [])
-    account_list = data.get('accountList', [])
-    type = data.get('type')
-    title = data.get('title')
-    description = data.get('description', '') or ''
-    tags = data.get('tags')
-    category = data.get('category')
-    enableTimer = data.get('enableTimer')
+def _validate_confined_entries(entries, base_subdir: str, label: str, require_exists: bool = True):
+    if not isinstance(entries, list) or len(entries) == 0:
+        return None, f"{label}必须为非空字符串数组"
+    root = (Path(BASE_DIR) / base_subdir).resolve()
+    cleaned = []
+    for item in entries:
+        if not isinstance(item, str) or not item.strip():
+            return None, f"{label}包含无效文件名"
+        raw = item.strip()
+        candidate = Path(raw)
+        if candidate.is_absolute():
+            return None, f"{label}不允许包含绝对路径"
+        resolved = (root / candidate).resolve()
+        if not resolved.is_relative_to(root) or resolved == root:
+            return None, f"{label}包含非法越界路径"
+        if require_exists and not resolved.is_file():
+            return None, f"{label}中存在不存在的文件: {raw}"
+        cleaned.append(raw)
+    return cleaned, None
+
+
+def _normalize_post_tags(raw_tags):
+    if raw_tags is None:
+        return [], None
+    items = []
+    if isinstance(raw_tags, list):
+        for elem in raw_tags:
+            if isinstance(elem, bool) or not isinstance(elem, (str, int, float)):
+                return None, "tags 数组元素必须为字符串"
+            if isinstance(elem, str):
+                items.extend(re.split(r"[,，\s]+", elem))
+            else:
+                items.append(str(elem))
+    elif isinstance(raw_tags, str):
+        items = re.split(r"[,，\s]+", raw_tags)
+    else:
+        return None, "tags 必须为字符串数组或逗号分隔字符串"
+    cleaned = []
+    seen = set()
+    for item in items:
+        tag = str(item or "").strip().lstrip("#").strip()
+        if not tag or tag in seen:
+            continue
+        seen.add(tag)
+        cleaned.append(tag)
+    return cleaned, None
+
+
+def _validate_post_payload(data):
+    if not isinstance(data, dict):
+        return None, "请求体必须为 JSON 对象"
+    platform_type = data.get("type")
+    if isinstance(platform_type, bool) or not isinstance(platform_type, int) or platform_type not in (1, 2, 3, 4):
+        return None, f"不支持的平台类型: {platform_type}"
+    raw_title = data.get("title")
+    if not isinstance(raw_title, str) or not raw_title.strip():
+        return None, "标题不能为空"
+    title = raw_title.strip()
+    file_list, file_err = _validate_confined_entries(data.get("fileList"), "videoFile", "文件列表", require_exists=True)
+    if file_err:
+        return None, file_err
+    account_list, acc_err = _validate_confined_entries(data.get("accountList"), "cookiesFile", "账号列表", require_exists=True)
+    if acc_err:
+        return None, acc_err
+    tags, tag_err = _normalize_post_tags(data.get("tags"))
+    if tag_err:
+        return None, tag_err
+    raw_desc = data.get("description", "")
+    if raw_desc is None:
+        description = ""
+    elif isinstance(raw_desc, str):
+        description = raw_desc
+    else:
+        return None, "description 必须为字符串"
+
+    raw_enable_timer = data.get("enableTimer", 0)
+    if isinstance(raw_enable_timer, bool):
+        enable_timer = 1 if raw_enable_timer else 0
+    elif isinstance(raw_enable_timer, int) and raw_enable_timer in (0, 1):
+        enable_timer = raw_enable_timer
+    elif raw_enable_timer is None:
+        enable_timer = 0
+    else:
+        return None, "enableTimer 必须为布尔值或 0/1"
+
+    videos_per_day = data.get("videosPerDay")
+    daily_times = data.get("dailyTimes")
+    start_days = data.get("startDays", 0)
+
+    if enable_timer == 1:
+        if isinstance(videos_per_day, bool) or not isinstance(videos_per_day, int) or videos_per_day < 1:
+            return None, "启用定时发布时，videosPerDay 必须为大于等于 1 的整数"
+        if not isinstance(daily_times, list) or len(daily_times) == 0:
+            return None, "启用定时发布时，dailyTimes 必须为非空 HH:MM 字符串数组"
+        parsed_times = []
+        normalized_times = []
+        for entry in daily_times:
+            if not isinstance(entry, str):
+                return None, f"定时时间点必须为 HH:MM 字符串: {entry!r}"
+            match = re.fullmatch(r"(\d{1,2}):(\d{2})", entry.strip())
+            if not match:
+                return None, f"定时时间点格式错误: {entry!r}，必须为 HH:MM"
+            hour, minute = int(match.group(1)), int(match.group(2))
+            if not (0 <= hour <= 23 and 0 <= minute <= 59):
+                return None, f"定时时间点超出有效范围: {entry!r}（小时 0~23，分钟 0~59）"
+            parsed_times.append((hour, minute))
+            normalized_times.append(f"{hour:02d}:{minute:02d}")
+        if videos_per_day > len(normalized_times):
+            return None, f"启用定时发布时，videosPerDay ({videos_per_day}) 不能大于 dailyTimes 数量 ({len(normalized_times)})"
+        if start_days is None:
+            start_days = 0
+        if isinstance(start_days, bool) or not isinstance(start_days, int) or start_days < 0:
+            return None, "启用定时发布时，startDays 必须为大于等于 0 的整数"
+
+        current_time = datetime.now()
+        schedule = []
+        for video_idx in range(len(file_list)):
+            day = video_idx // videos_per_day + start_days + 1
+            daily_video_index = video_idx % videos_per_day
+            hour, minute = parsed_times[daily_video_index]
+            scheduled_dt = current_time + timedelta(
+                days=day,
+                hours=hour - current_time.hour,
+                minutes=minute - current_time.minute,
+                seconds=-current_time.second,
+                microseconds=-current_time.microsecond,
+            )
+            schedule.append(scheduled_dt)
+        earliest = min(schedule)
+        if earliest <= current_time + timedelta(hours=2):
+            return None, f"最早定时时间（{earliest.strftime('%Y-%m-%d %H:%M')}）必须晚于当前时间至少 2 小时以上"
+        daily_times = normalized_times
+
+    category = data.get("category")
     if category == 0:
         category = None
-    productLink = data.get('productLink', '')
-    productTitle = data.get('productTitle', '')
-    thumbnail_path = data.get('thumbnail', '')
-    is_draft = data.get('isDraft', False)  # 新增参数：是否保存为草稿
+    product_link = data.get("productLink", "")
+    product_title = data.get("productTitle", "")
+    thumbnail_path = data.get("thumbnail", "")
+    return {
+        "type": platform_type,
+        "title": title,
+        "description": description,
+        "file_list": file_list,
+        "account_list": account_list,
+        "tags": tags,
+        "category": category,
+        "enable_timer": enable_timer,
+        "videos_per_day": videos_per_day,
+        "daily_times": daily_times,
+        "start_days": start_days,
+        "product_link": product_link if isinstance(product_link, str) else "",
+        "product_title": product_title if isinstance(product_title, str) else "",
+        "thumbnail_path": thumbnail_path if isinstance(thumbnail_path, str) else "",
+        "is_draft": bool(data.get("isDraft", False)),
+    }, None
 
-    videos_per_day = data.get('videosPerDay')
-    daily_times = data.get('dailyTimes')
-    start_days = data.get('startDays')
 
-    # 参数校验
-    if not file_list:
-        return jsonify({"code": 400, "msg": "文件列表不能为空", "data": None}), 400
-    if not account_list:
-        return jsonify({"code": 400, "msg": "账号列表不能为空", "data": None}), 400
-    if not type:
-        return jsonify({"code": 400, "msg": "平台类型不能为空", "data": None}), 400
-    if not title:
-        return jsonify({"code": 400, "msg": "标题不能为空", "data": None}), 400
+@app.route('/postVideo', methods=['POST'])
+def postVideo():
+    # 获取并严格校验 JSON 请求体
+    raw_data = request.get_json(silent=True)
+    parsed, err = _validate_post_payload(raw_data)
+    if err:
+        return jsonify({"code": 400, "msg": err, "data": None}), 400
 
-    # 打印获取到的数据（仅作为示例）
+    file_list = parsed["file_list"]
+    account_list = parsed["account_list"]
+    type = parsed["type"]
+    title = parsed["title"]
+    description = parsed["description"]
+    tags = parsed["tags"]
+    category = parsed["category"]
+    enableTimer = parsed["enable_timer"]
+    productLink = parsed["product_link"]
+    productTitle = parsed["product_title"]
+    thumbnail_path = parsed["thumbnail_path"]
+    is_draft = parsed["is_draft"]
+    videos_per_day = parsed["videos_per_day"]
+    daily_times = parsed["daily_times"]
+    start_days = parsed["start_days"]
+
     print("File List:", file_list)
     print("Account List:", account_list)
 
@@ -720,13 +882,13 @@ def postVideo():
         match type:
             case 1:
                 post_video_xhs(title, file_list, tags, account_list, category, enableTimer, videos_per_day, daily_times,
-                                   start_days, description)
+                                   start_days, desc=description)
             case 2:
                 post_video_tencent(title, file_list, tags, account_list, category, enableTimer, videos_per_day, daily_times,
                                    start_days, is_draft, desc=description)
             case 3:
                 post_video_DouYin(title, file_list, tags, account_list, category, enableTimer, videos_per_day, daily_times,
-                          start_days, thumbnail_path, productLink, productTitle, description)
+                          start_days, thumbnail_path, productLink, productTitle, desc=description)
             case 4:
                 post_video_ks(title, file_list, tags, account_list, category, enableTimer, videos_per_day, daily_times,
                           start_days, desc=description)
@@ -765,12 +927,24 @@ def postVideo():
 @app.route('/updateUserinfo', methods=['POST'])
 def updateUserinfo():
     # 获取JSON数据
-    data = request.get_json()
+    data = request.get_json(silent=True)
+    if not isinstance(data, dict):
+        return jsonify({"code": 400, "msg": "请求体必须为 JSON 对象", "data": None}), 400
 
-    # 从JSON数据中提取 type 和 userName
+    # 从JSON数据中提取并严格校验 id、type 和 userName
     user_id = data.get('id')
-    type = data.get('type')
-    userName = data.get('userName')
+    if isinstance(user_id, bool) or not isinstance(user_id, int) or user_id <= 0:
+        return jsonify({"code": 400, "msg": "非法账号 ID", "data": None}), 400
+
+    platform_type = data.get('type')
+    if isinstance(platform_type, bool) or not isinstance(platform_type, int) or platform_type not in (1, 2, 3, 4):
+        return jsonify({"code": 400, "msg": f"不支持的平台类型: {platform_type}", "data": None}), 400
+
+    raw_user_name = data.get('userName')
+    if not isinstance(raw_user_name, str) or not raw_user_name.strip():
+        return jsonify({"code": 400, "msg": "账号名称不能为空", "data": None}), 400
+    userName = raw_user_name.strip()
+
     try:
         # 获取数据库连接
         with sqlite3.connect(Path(BASE_DIR / "db" / "database.db")) as conn:
@@ -783,8 +957,16 @@ def updateUserinfo():
                            SET type     = ?,
                                userName = ?
                            WHERE id = ?;
-                           ''', (type, userName, user_id))
+                           ''', (platform_type, userName, user_id))
+            updated_rows = cursor.rowcount
             conn.commit()
+
+        if updated_rows == 0:
+            return jsonify({
+                "code": 404,
+                "msg": "账号不存在",
+                "data": None
+            }), 404
 
         return jsonify({
             "code": 200,
@@ -792,46 +974,42 @@ def updateUserinfo():
             "data": None
         }), 200
 
-    except Exception as e:
+    except Exception:
         return jsonify({
             "code": 500,
-            "msg": str("update failed!"),
+            "msg": "update failed!",
             "data": None
         }), 500
 
 @app.route('/postVideoBatch', methods=['POST'])
 def postVideoBatch():
-    data_list = request.get_json()
+    data_list = request.get_json(silent=True)
 
-    if not isinstance(data_list, list):
-        return jsonify({"code": 400, "msg": "Expected a JSON array", "data": None}), 400
+    if not isinstance(data_list, list) or len(data_list) == 0:
+        return jsonify({"code": 400, "msg": "Expected a non-empty JSON array", "data": None}), 400
+    validated_items = []
     for data in data_list:
-        if not isinstance(data, dict):
-            return jsonify({"code": 400, "msg": "Each batch item must be a JSON object", "data": None}), 400
-        platform_type = data.get('type')
-        if not isinstance(platform_type, int) or isinstance(platform_type, bool) or platform_type not in (1, 2, 3, 4):
-            return jsonify({"code": 400, "msg": f"Unsupported platform type: {platform_type}", "data": None}), 400
-    for data in data_list:
-        # 从JSON数据中提取fileList和accountList
-        file_list = data.get('fileList', [])
-        account_list = data.get('accountList', [])
-        type = data.get('type')
-        title = data.get('title')
-        description = data.get('description', '') or ''
-        tags = data.get('tags')
-        category = data.get('category')
-        enableTimer = data.get('enableTimer')
-        if category == 0:
-            category = None
-        productLink = data.get('productLink', '')
-        productTitle = data.get('productTitle', '')
-        thumbnail_path = data.get('thumbnail', '')
-        is_draft = data.get('isDraft', False)
+        parsed, err = _validate_post_payload(data)
+        if err:
+            return jsonify({"code": 400, "msg": err, "data": None}), 400
+        validated_items.append(parsed)
 
-        videos_per_day = data.get('videosPerDay')
-        daily_times = data.get('dailyTimes')
-        start_days = data.get('startDays')
-        # 打印获取到的数据（仅作为示例）
+    for parsed in validated_items:
+        file_list = parsed["file_list"]
+        account_list = parsed["account_list"]
+        type = parsed["type"]
+        title = parsed["title"]
+        description = parsed["description"]
+        tags = parsed["tags"]
+        category = parsed["category"]
+        enableTimer = parsed["enable_timer"]
+        productLink = parsed["product_link"]
+        productTitle = parsed["product_title"]
+        thumbnail_path = parsed["thumbnail_path"]
+        is_draft = parsed["is_draft"]
+        videos_per_day = parsed["videos_per_day"]
+        daily_times = parsed["daily_times"]
+        start_days = parsed["start_days"]
         print("File List:", file_list)
         print("Account List:", account_list)
         try:
@@ -856,12 +1034,19 @@ def postVideoBatch():
                 is_draft, 'success', '批量发布任务已提交'
             )
         except Exception as e:
-            record_publish_history(
-                type, title, file_list, account_list, tags,
-                enableTimer, videos_per_day, daily_times, start_days,
-                is_draft, 'error', str(e)
-            )
-            raise
+            try:
+                record_publish_history(
+                    type, title, file_list, account_list, tags,
+                    enableTimer, videos_per_day, daily_times, start_days,
+                    is_draft, 'error', str(e)
+                )
+            except Exception:
+                pass
+            return jsonify({
+                "code": 500,
+                "msg": f"批量发布失败: {str(e)}",
+                "data": None
+            }), 500
     # 返回响应给客户端
     return jsonify(
         {
@@ -910,14 +1095,17 @@ def get_publish_history():
 @app.route('/deletePublishRecord', methods=['GET'])
 def delete_publish_record():
     ensure_runtime_ready()
-    record_id = request.args.get('id')
-    if not record_id:
-        return jsonify({"code": 400, "msg": "缺少记录 ID", "data": None}), 400
+    record_id = (request.args.get('id') or '').strip()
+    if not record_id or not record_id.isdigit() or int(record_id) <= 0:
+        return jsonify({"code": 400, "msg": "非法记录 ID", "data": None}), 400
     db_path = Path(BASE_DIR / "db" / "database.db")
     with sqlite3.connect(db_path) as conn:
         cursor = conn.cursor()
-        cursor.execute("DELETE FROM publish_records WHERE id = ?", (record_id,))
+        cursor.execute("DELETE FROM publish_records WHERE id = ?", (int(record_id),))
+        deleted = cursor.rowcount
         conn.commit()
+    if deleted == 0:
+        return jsonify({"code": 404, "msg": "记录不存在", "data": None}), 404
     return jsonify({"code": 200, "msg": "删除成功", "data": None}), 200
 
 
@@ -936,8 +1124,8 @@ def get_title_templates():
             sql += " AND category = ?"
             params.append(category)
         if keyword:
-            sql += " AND (title LIKE ? OR note LIKE ? OR tags LIKE ?)"
-            like = f"%{keyword}%"
+            sql += " AND (title LIKE ? ESCAPE '\\' OR note LIKE ? ESCAPE '\\' OR tags LIKE ? ESCAPE '\\')"
+            like = f"%{_escape_like(keyword)}%"
             params.extend([like, like, like])
         sql += " ORDER BY id DESC"
         rows = cursor.execute(sql, params).fetchall()
@@ -955,11 +1143,26 @@ def get_title_templates():
 @app.route('/saveTitleTemplate', methods=['POST'])
 def save_title_template():
     ensure_runtime_ready()
-    data = request.get_json(silent=True) or {}
-    tpl_id = data.get('id')
-    category = str(data.get('category') or '通用').strip() or '通用'
-    title = str(data.get('title') or '').strip()
-    note = str(data.get('note') or '').strip()
+    data = request.get_json(silent=True)
+    if not isinstance(data, dict):
+        return jsonify({"code": 400, "msg": "请求体必须为 JSON 对象", "data": None}), 400
+
+    raw_tpl_id = data.get('id')
+    tpl_id = None
+    if raw_tpl_id is not None and raw_tpl_id != '':
+        if isinstance(raw_tpl_id, bool) or not isinstance(raw_tpl_id, int) or raw_tpl_id <= 0:
+            return jsonify({"code": 400, "msg": "非法模板 ID", "data": None}), 400
+        tpl_id = raw_tpl_id
+
+    raw_category = data.get('category')
+    category = raw_category.strip() if isinstance(raw_category, str) and raw_category.strip() else '通用'
+    raw_title = data.get('title')
+    if not isinstance(raw_title, str) or not raw_title.strip():
+        return jsonify({"code": 400, "msg": "标题内容不能为空", "data": None}), 400
+    title = raw_title.strip()
+    raw_note = data.get('note')
+    note = raw_note.strip() if isinstance(raw_note, str) else ''
+
     raw_tags = data.get('tags') or []
     if isinstance(raw_tags, str):
         tags = [t.strip().lstrip('#') for t in raw_tags.replace('，', ',').split(',') if t.strip()]
@@ -968,17 +1171,16 @@ def save_title_template():
     else:
         tags = []
 
-    if not title:
-        return jsonify({"code": 400, "msg": "标题内容不能为空", "data": None}), 400
-
     db_path = Path(BASE_DIR / "db" / "database.db")
     with sqlite3.connect(db_path) as conn:
         cursor = conn.cursor()
-        if tpl_id:
+        if tpl_id is not None:
             cursor.execute(
                 "UPDATE title_templates SET category = ?, title = ?, tags = ?, note = ? WHERE id = ?",
                 (category, title, json.dumps(tags, ensure_ascii=False), note, tpl_id),
             )
+            if cursor.rowcount == 0:
+                return jsonify({"code": 404, "msg": "模板不存在", "data": None}), 404
         else:
             cursor.execute(
                 "INSERT INTO title_templates (category, title, tags, note) VALUES (?, ?, ?, ?)",
@@ -992,14 +1194,17 @@ def save_title_template():
 @app.route('/deleteTitleTemplate', methods=['GET'])
 def delete_title_template():
     ensure_runtime_ready()
-    tpl_id = request.args.get('id')
-    if not tpl_id:
-        return jsonify({"code": 400, "msg": "缺少模板 ID", "data": None}), 400
+    tpl_id = (request.args.get('id') or '').strip()
+    if not tpl_id or not tpl_id.isdigit() or int(tpl_id) <= 0:
+        return jsonify({"code": 400, "msg": "非法模板 ID", "data": None}), 400
     db_path = Path(BASE_DIR / "db" / "database.db")
     with sqlite3.connect(db_path) as conn:
         cursor = conn.cursor()
-        cursor.execute("DELETE FROM title_templates WHERE id = ?", (tpl_id,))
+        cursor.execute("DELETE FROM title_templates WHERE id = ?", (int(tpl_id),))
+        deleted = cursor.rowcount
         conn.commit()
+    if deleted == 0:
+        return jsonify({"code": 404, "msg": "模板不存在", "data": None}), 404
     return jsonify({"code": 200, "msg": "删除成功", "data": None}), 200
 
 # Cookie文件上传API

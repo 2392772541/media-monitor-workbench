@@ -629,6 +629,8 @@ with tempfile.TemporaryDirectory(ignore_cleanup_errors=True) as td:
     assert pv_captured[1][1]["desc"] == "k_desc"
 
     # 2. /postVideo 与 /postVideoBatch 透传 description 给 4 个平台
+    (tmp / "videoFile" / "a.mp4").write_bytes(b"video")
+    (tmp / "cookiesFile" / "c.json").write_text("{}", encoding="utf-8")
     calls = []
     def mk_stub(name):
         def _fn(*args, **kwargs):

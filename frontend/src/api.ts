@@ -88,14 +88,17 @@ export function safeJsonArray<T = string>(raw?: string | null): T[] {
   }
 }
 
-export async function fetchCreatorsFeed(params: {
-  creatorId?: number | null;
-  days: number;
-  offset?: number;
-  limit?: number;
-  includeRss?: boolean;
-  search?: string;
-}): Promise<CreatorsFeedResp> {
+export async function fetchCreatorsFeed(
+  params: {
+    creatorId?: number | null;
+    days: number;
+    offset?: number;
+    limit?: number;
+    includeRss?: boolean;
+    search?: string;
+  },
+  init?: RequestInit
+): Promise<CreatorsFeedResp> {
   const qs = new URLSearchParams();
   if (params.creatorId) qs.set('creatorId', String(params.creatorId));
   qs.set('days', String(params.days));
@@ -105,7 +108,7 @@ export async function fetchCreatorsFeed(params: {
   if (params.search && params.search.trim()) {
     qs.set('search', params.search.trim());
   }
-  return apiRequest<CreatorsFeedResp>(`/api/radar/creators/feed?${qs.toString()}`);
+  return apiRequest<CreatorsFeedResp>(`/api/radar/creators/feed?${qs.toString()}`, init);
 }
 
 export async function analyzeContentR2(

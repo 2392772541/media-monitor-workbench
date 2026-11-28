@@ -1,4 +1,4 @@
-import { useEffect, useState } from 'react';
+import { useEffect, useRef, useState } from 'react';
 import {
   X,
   Star,
@@ -74,29 +74,57 @@ export function ContentDrawer({
   const [savedBoardId, setSavedBoardId] = useState<number | null>(null);
   const [copied, setCopied] = useState(false);
   const [topicsNotice, setTopicsNotice] = useState<string | null>(null);
+  const drawerSeqRef = useRef<number>(0);
+  const drawerAbortRef = useRef<AbortController | null>(null);
+
+  useEffect(() => {
+    return () => {
+      drawerAbortRef.current?.abort();
+    };
+  }, []);
 
   // 加载内容详情与收藏状态
   const loadDetail = async (contentId: number) => {
+    const seq = ++drawerSeqRef.current;
+    drawerAbortRef.current?.abort();
+    const controller = new AbortController();
+    drawerAbortRef.current = controller;
     setLoading(true);
     try {
       const [d, boardRes] = await Promise.all([
-        apiRequest<ContentDetailResp>(`/api/radar/intel/${contentId}/detail`),
-        apiRequest<{ items: Array<{ id: number; source_content_id: number | null; source_url: string }> }>('/api/radar/board'),
+        apiRequest<ContentDetailResp>(`/api/radar/intel/${contentId}/detail`, { signal: controller.signal }),
+        apiRequest<{ items: Array<{ id: number; source_content_id: number | null; source_url: string }> }>(
+          '/api/radar/board',
+          { signal: controller.signal }
+        ),
       ]);
+      if (seq !== drawerSeqRef.current || controller.signal.aborted) return;
       setDetail(d);
       const hit = boardRes.items.find(
         (b) => b.source_content_id === contentId || (d.content.canonical_url && b.source_url === d.content.canonical_url)
       );
       setSavedBoardId(hit ? hit.id : null);
     } catch (err) {
+      if (controller.signal.aborted || (err as Error)?.name === 'AbortError' || seq !== drawerSeqRef.current) {
+        return;
+      }
       onToast((err as Error).message);
     } finally {
-      setLoading(false);
+      if (drawerAbortRef.current === controller) {
+        drawerAbortRef.current = null;
+      }
+      if (seq === drawerSeqRef.current) {
+        setLoading(false);
+      }
     }
   };
 
   useEffect(() => {
     if (!target) {
+      drawerSeqRef.current += 1;
+      drawerAbortRef.current?.abort();
+      drawerAbortRef.current = null;
+      setLoading(false);
       setDetail(null);
       setTopicsNotice(null);
       return;
@@ -114,9 +142,13 @@ export function ContentDrawer({
     const jobSt = detail.tingwuJobs[0]?.status;
     const inFlight = st === 'transcribing' || jobSt === 'downloading' || jobSt === 'uploading';
     if (!inFlight) return;
+    const seqAtStart = drawerSeqRef.current;
+    const contentId = target.contentId;
+    const controller = new AbortController();
     const timer = setInterval(() => {
-      void apiRequest<ContentDetailResp>(`/api/radar/intel/${target.contentId}/detail`)
+      void apiRequest<ContentDetailResp>(`/api/radar/intel/${contentId}/detail`, { signal: controller.signal })
         .then((d) => {
+          if (seqAtStart !== drawerSeqRef.current || controller.signal.aborted) return;
           setDetail(d);
           if (d.content.transcript_status === 'done') {
             onToast('本机显卡口播逐字稿已转写完成！');
@@ -125,7 +157,10 @@ export function ContentDrawer({
         })
         .catch(() => {});
     }, 2500);
-    return () => clearInterval(timer);
+    return () => {
+      clearInterval(timer);
+      controller.abort();
+    };
   }, [target?.contentId, detail?.content.transcript_status, detail?.tingwuJobs?.[0]?.status]);
 
   // 支持按 Esc 快捷关闭抽屉

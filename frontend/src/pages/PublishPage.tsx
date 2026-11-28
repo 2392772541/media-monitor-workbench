@@ -452,7 +452,8 @@ export function PublishPage({
     setValidating(true);
     try {
       const res = await apiRequest<{ code: number; data: Array<[number, number, string, string, number]> }>(
-        '/api/sau/accounts/validate'
+        '/api/sau/accounts/validate',
+        { method: 'POST' }
       );
       const mappedAccounts: SauAccount[] = (res.data || []).map((row) => ({
         id: row[0],
@@ -781,6 +782,62 @@ export function PublishPage({
       return;
     }
 
+    let normalizedDailyTimes = parsedDailyTimes;
+    if (enableTimer) {
+      const rawTimes = dailyTimesText
+        .split(/[,，\s]+/)
+        .map((s) => s.trim())
+        .filter(Boolean);
+      if (rawTimes.length === 0) {
+        onToast('启用定时发布时，请填写至少一个 HH:MM 时间点（例如 10:00, 18:00）');
+        return;
+      }
+      if (!Number.isInteger(videosPerDay) || videosPerDay < 1) {
+        onToast('启用定时发布时，每天发布条数必须为大于等于 1 的整数');
+        return;
+      }
+      if (videosPerDay > rawTimes.length) {
+        onToast(`每天发布条数（${videosPerDay}）不能大于每天时间点数量（${rawTimes.length}）`);
+        return;
+      }
+      if (!Number.isInteger(startDays) || startDays < 0) {
+        onToast('启用定时发布时，起始天数不能为负数');
+        return;
+      }
+
+      const parsedPairs: Array<[number, number]> = [];
+      const formattedTimes: string[] = [];
+      for (const entry of rawTimes) {
+        const match = /^(\d{1,2}):(\d{2})$/.exec(entry);
+        if (!match) {
+          onToast(`定时时间点格式错误「${entry}」，请填写 HH:MM（例如 10:00）`);
+          return;
+        }
+        const hour = Number(match[1]);
+        const minute = Number(match[2]);
+        if (hour < 0 || hour > 23 || minute < 0 || minute > 59) {
+          onToast(`定时时间点超出有效范围「${entry}」（小时 0~23，分钟 0~59）`);
+          return;
+        }
+        parsedPairs.push([hour, minute]);
+        formattedTimes.push(`${String(hour).padStart(2, '0')}:${String(minute).padStart(2, '0')}`);
+      }
+
+      const now = new Date();
+      let earliestMs = Infinity;
+      for (let idx = 0; idx < videoDrafts.length; idx++) {
+        const day = Math.floor(idx / videosPerDay) + startDays + 1;
+        const [hour, minute] = parsedPairs[idx % videosPerDay];
+        const dt = new Date(now.getFullYear(), now.getMonth(), now.getDate() + day, hour, minute, 0, 0);
+        if (dt.getTime() < earliestMs) earliestMs = dt.getTime();
+      }
+      if (!Number.isFinite(earliestMs) || earliestMs <= now.getTime() + 2 * 3600 * 1000) {
+        onToast('最早定时发布时间必须晚于当前时间至少 2 小时');
+        return;
+      }
+      normalizedDailyTimes = formattedTimes;
+    }
+
     const tasks: Array<{ platformType: number; platformLabel: string; accountList: string[]; video: VideoDraftItem }> = [];
     for (const [pType, accPaths] of groupedSelectedAccounts) {
       const pLabel = getPlatformMeta(pType).label;
@@ -810,7 +867,12 @@ export function PublishPage({
 
       const aiCopy = usePlatformAiCopy ? aiPlatformCopies?.[t.platformType] : undefined;
       const finalTitle = (aiCopy?.title?.trim() || t.video.title.trim());
-      const finalDescription = aiCopy?.description?.trim() || '';
+      const rawDescription = aiCopy?.description?.trim() || '';
+      // 快手网页端无独立标题框，有简介时需将标题与简介合并透传，避免标题丢失
+      const finalDescription =
+        t.platformType === 4 && rawDescription && rawDescription !== finalTitle && !rawDescription.startsWith(finalTitle)
+          ? `${finalTitle}\n${rawDescription}`
+          : rawDescription;
       const rawTags = aiCopy?.tags && aiCopy.tags.length > 0
         ? aiCopy.tags
         : t.video.tagsText
@@ -830,7 +892,7 @@ export function PublishPage({
             accountList: t.accountList,
             enableTimer: enableTimer ? 1 : 0,
             videosPerDay,
-            dailyTimes: parsedDailyTimes,
+            dailyTimes: normalizedDailyTimes,
             startDays,
             category: isOriginal ? 1 : 0,
             isDraft,
