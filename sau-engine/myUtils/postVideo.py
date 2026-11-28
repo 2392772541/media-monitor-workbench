@@ -4,6 +4,11 @@ import re
 import struct
 
 from conf import BASE_DIR
+from uploader.bilibili_uploader.main import (
+    BILIBILI_PUBLISH_STRATEGY_IMMEDIATE,
+    BILIBILI_PUBLISH_STRATEGY_SCHEDULED,
+    BiliBiliVideo,
+)
 from uploader.douyin_uploader.main import (
     DOUYIN_PUBLISH_STRATEGY_IMMEDIATE,
     DOUYIN_PUBLISH_STRATEGY_SCHEDULED,
@@ -259,6 +264,41 @@ def post_video_xhs(title,files,tags,account_file,category=TencentZoneTypes.LIFES
                 cookie,
                 thumbnail_path=thumbnail_path or None,
                 desc=desc or "",
+                publish_strategy=publish_strategy,
+            )
+            asyncio.run(app.main(), debug=False)
+
+
+def post_video_bilibili(title, files, tags, account_file, category=None, enableTimer=False, videos_per_day=1, daily_times=None, start_days=0, desc='', thumbnail_path='', schedule_datetimes=None):
+    # 生成受限目录内的完整路径
+    account_file = [_resolve_confined_path("cookiesFile", file) for file in account_file]
+    files = [_resolve_confined_path("videoFile", file) for file in files]
+    tags = _normalize_tags(tags)
+    if enableTimer:
+        if schedule_datetimes:
+            publish_datetimes = list(schedule_datetimes)
+        else:
+            publish_datetimes = generate_schedule_time_next_day(
+                len(files), videos_per_day or 1, daily_times or None, start_days=start_days or 0
+            )
+        publish_strategy = BILIBILI_PUBLISH_STRATEGY_SCHEDULED
+    else:
+        publish_datetimes = [0 for _ in range(len(files))]
+        publish_strategy = BILIBILI_PUBLISH_STRATEGY_IMMEDIATE
+    for index, file in enumerate(files):
+        for cookie in account_file:
+            print(f"视频文件名：{file}")
+            print(f"标题：{title}")
+            print(f"Hashtag：{tags}")
+            app = BiliBiliVideo(
+                title,
+                str(file),
+                tags,
+                publish_datetimes[index],
+                cookie,
+                thumbnail_path=thumbnail_path or None,
+                desc=desc or "",
+                category=category,
                 publish_strategy=publish_strategy,
             )
             asyncio.run(app.main(), debug=False)

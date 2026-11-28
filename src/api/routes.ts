@@ -751,7 +751,7 @@ export function registerRoutes(app: FastifyInstance, shutdownHandler: () => Prom
   app.get<{ Querystring: { type?: string; id?: string } }>('/api/sau/login', async (req, reply) => {
     const type = String(req.query?.type || '');
     const id = String(req.query?.id || '');
-    if (!['1', '2', '3', '4'].includes(type) || !id) {
+    if (!['1', '2', '3', '4', '5'].includes(type) || !id) {
       return reply.code(400).send({ code: 400, msg: '缺少或非法的平台类型/账号名称', data: null });
     }
     const qs = new URLSearchParams({ type, id }).toString();

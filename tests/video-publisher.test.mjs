@@ -174,6 +174,7 @@ test('mcp/video-publisher-mcp.mjs stdio JSON-RPC 2.0 握手与全部 5 个工具
             [2, 2, 'secret_tencent_cookie_path.json', '视频号B', 1],
             [3, 3, 'secret_douyin_cookie_path.json', '抖音号C', 1],
             [4, 4, 'secret_ks_cookie_path.json', '快手号D', 0],
+            [5, 5, 'secret_bili_cookie_path.json', 'B站号E', 1],
           ],
         })
       );
@@ -367,9 +368,10 @@ test('mcp/video-publisher-mcp.mjs stdio JSON-RPC 2.0 握手与全部 5 个工具
     });
     const accText = accRes.result.content[0].text;
     assert.ok(!accText.includes('secret_'), '不能泄露任何 Cookie 文件路径');
-    assert.equal(accRes.result.structuredContent.count, 4);
+    assert.equal(accRes.result.structuredContent.count, 5);
     assert.equal(accRes.result.structuredContent.accounts[0].platformName, '小红书');
     assert.equal(accRes.result.structuredContent.accounts[3].valid, false);
+    assert.equal(accRes.result.structuredContent.accounts[4].platformName, 'B站');
     assert.equal('filePath' in accRes.result.structuredContent.accounts[0], false);
 
     // 5. prepare_publish_copy（AI 失败回退 + 各平台字数与标签上限校验）
@@ -390,6 +392,9 @@ test('mcp/video-publisher-mcp.mjs stdio JSON-RPC 2.0 握手与全部 5 个工具
     assert.ok(copyData.platforms['2'].shortTitle.length >= 6 && copyData.platforms['2'].shortTitle.length <= 16);
     assert.ok(copyData.platforms['2'].tags.length <= 5);
     assert.ok(copyData.platforms['4'].tags.length <= 3);
+    assert.equal(copyData.platforms['5'].platformName, 'B站');
+    assert.ok(copyData.platforms['5'].title.length <= 80);
+    assert.ok(copyData.platforms['5'].tags.length <= 10);
     assert.ok(copyData.platforms['1'].warnings.length > 0);
     assert.ok(copyData.platforms['4'].warnings.length > 0);
 
@@ -489,13 +494,13 @@ test('mcp/video-publisher-mcp.mjs stdio JSON-RPC 2.0 握手与全部 5 个工具
     assert.equal(workbenchCalls.some((c) => c.pathname === '/api/sau/import-local-file'), false);
     assert.equal(workbenchCalls.some((c) => c.pathname === '/api/sau/post-video'), false);
 
-    // 7. publish_video_to_platforms: confirmed=true + isDraft=true 安全拦截非视频号平台（1/3/4），仅提交平台 2
+    // 7. publish_video_to_platforms: confirmed=true + isDraft=true 安全拦截非视频号平台（1/3/4/5），仅提交平台 2
     workbenchCalls.length = 0;
     const draftRes = await rpc('tools/call', {
       name: 'publish_video_to_platforms',
       arguments: {
         filePath: sampleVideoPath,
-        platforms: [1, 2, 3, 4],
+        platforms: [1, 2, 3, 4, 5],
         title: '草稿安全测试',
         description: '视频号草稿简介',
         tags: ['干货'],
@@ -508,6 +513,7 @@ test('mcp/video-publisher-mcp.mjs stdio JSON-RPC 2.0 握手与全部 5 个工具
     assert.equal(byType[1].status, 'blocked_draft_unsupported');
     assert.equal(byType[3].status, 'blocked_draft_unsupported');
     assert.equal(byType[4].status, 'blocked_draft_unsupported');
+    assert.equal(byType[5].status, 'blocked_draft_unsupported');
     assert.equal(byType[2].status, 'submitted');
     assert.equal(byType[2].isDraft, true);
     assert.ok(!draftRes.result.content[0].text.includes('secret_'));

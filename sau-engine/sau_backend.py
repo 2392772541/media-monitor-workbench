@@ -14,8 +14,8 @@ from flask_cors import CORS
 from myUtils.auth import check_cookie
 from flask import Flask, request, jsonify, Response, render_template, send_from_directory
 from conf import BASE_DIR
-from myUtils.login import get_tencent_cookie, douyin_cookie_gen, get_ks_cookie, xiaohongshu_cookie_gen
-from myUtils.postVideo import post_video_tencent, post_video_DouYin, post_video_ks, post_video_xhs
+from myUtils.login import get_tencent_cookie, douyin_cookie_gen, get_ks_cookie, xiaohongshu_cookie_gen, bilibili_cookie_gen
+from myUtils.postVideo import post_video_tencent, post_video_DouYin, post_video_ks, post_video_xhs, post_video_bilibili
 from uploader.base_video import BaseVideoUploader
 from utils.files_times import parse_schedule_at_list
 
@@ -670,12 +670,12 @@ def delete_account():
 # SSE 登录接口
 @app.route('/login')
 def login():
-    # 1 小红书 2 视频号 3 抖音 4 快手
+    # 1 小红书 2 视频号 3 抖音 4 快手 5 B站
     login_type = request.args.get('type')
     # 账号名
     account_id = request.args.get('id')
 
-    if login_type not in {'1', '2', '3', '4'} or not account_id:
+    if login_type not in {'1', '2', '3', '4', '5'} or not account_id:
         return jsonify({"code": 400, "msg": "缺少或非法的平台类型/账号名称", "data": None}), 400
 
     # 模拟一个用于异步通信的队列
@@ -751,7 +751,7 @@ def _validate_post_payload(data):
     if not isinstance(data, dict):
         return None, "请求体必须为 JSON 对象"
     platform_type = data.get("type")
-    if isinstance(platform_type, bool) or not isinstance(platform_type, int) or platform_type not in (1, 2, 3, 4):
+    if isinstance(platform_type, bool) or not isinstance(platform_type, int) or platform_type not in (1, 2, 3, 4, 5):
         return None, f"不支持的平台类型: {platform_type}"
     raw_title = data.get("title")
     if not isinstance(raw_title, str) or not raw_title.strip():
@@ -932,6 +932,11 @@ def postVideo():
                     title, file_list, tags, account_list, category, enableTimer, videos_per_day, daily_times,
                     start_days, desc=description, thumbnail_path=thumbnail_path, schedule_datetimes=schedule_datetimes,
                 )
+            case 5:
+                post_video_bilibili(
+                    title, file_list, tags, account_list, category, enableTimer, videos_per_day, daily_times,
+                    start_days, desc=description, thumbnail_path=thumbnail_path, schedule_datetimes=schedule_datetimes,
+                )
             case _:
                 return jsonify({"code": 400, "msg": f"不支持的平台类型: {type}", "data": None}), 400
 
@@ -977,7 +982,7 @@ def updateUserinfo():
         return jsonify({"code": 400, "msg": "非法账号 ID", "data": None}), 400
 
     platform_type = data.get('type')
-    if isinstance(platform_type, bool) or not isinstance(platform_type, int) or platform_type not in (1, 2, 3, 4):
+    if isinstance(platform_type, bool) or not isinstance(platform_type, int) or platform_type not in (1, 2, 3, 4, 5):
         return jsonify({"code": 400, "msg": f"不支持的平台类型: {platform_type}", "data": None}), 400
 
     raw_user_name = data.get('userName')
@@ -1075,6 +1080,11 @@ def postVideoBatch():
                         title, file_list, tags, account_list, category, enableTimer, videos_per_day, daily_times,
                         start_days, desc=description, thumbnail_path=thumbnail_path, schedule_datetimes=schedule_datetimes,
                     )
+                case 5:
+                    post_video_bilibili(
+                        title, file_list, tags, account_list, category, enableTimer, videos_per_day, daily_times,
+                        start_days, desc=description, thumbnail_path=thumbnail_path, schedule_datetimes=schedule_datetimes,
+                    )
                 case _:
                     return jsonify({"code": 400, "msg": f"Unsupported platform type: {type}", "data": None}), 400
             record_publish_history(
@@ -1113,7 +1123,7 @@ def get_publish_history():
     except (TypeError, ValueError):
         raw_limit = 50
     limit = min(max(raw_limit, 1), 200)
-    platform_map = {1: '小红书', 2: '视频号', 3: '抖音', 4: '快手'}
+    platform_map = {1: '小红书', 2: '视频号', 3: '抖音', 4: '快手', 5: 'B站'}
     db_path = Path(BASE_DIR / "db" / "database.db")
     with sqlite3.connect(db_path) as conn:
         conn.row_factory = sqlite3.Row
@@ -1391,6 +1401,8 @@ def run_async_function(type,id,status_queue):
                 loop.run_until_complete(douyin_cookie_gen(id, status_queue))
             case '4':
                 loop.run_until_complete(get_ks_cookie(id, status_queue))
+            case '5':
+                loop.run_until_complete(bilibili_cookie_gen(id, status_queue))
             case _:
                 status_queue.put("500")
     except Exception as e:

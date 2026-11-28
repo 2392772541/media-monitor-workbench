@@ -8,6 +8,7 @@ from playwright.async_api import async_playwright
 
 from conf import BASE_DIR, LOCAL_CHROME_HEADLESS, LOCAL_CHROME_PATH
 from myUtils.auth import check_cookie
+from uploader.bilibili_uploader.main import bilibili_cookie_gen as uploader_bilibili_cookie_gen
 from uploader.douyin_uploader.main import douyin_cookie_gen as uploader_douyin_cookie_gen
 from uploader.ks_uploader.main import get_ks_cookie as uploader_get_ks_cookie
 from uploader.xiaohongshu_uploader.main import xiaohongshu_cookie_gen as uploader_xiaohongshu_cookie_gen
@@ -226,6 +227,11 @@ async def get_ks_cookie(id, status_queue):
 # 小红书登录
 async def xiaohongshu_cookie_gen(id, status_queue):
     return await _run_uploader_login(1, id, status_queue, uploader_xiaohongshu_cookie_gen)
+
+
+# B站登录
+async def bilibili_cookie_gen(id, status_queue):
+    return await _run_uploader_login(5, id, status_queue, uploader_bilibili_cookie_gen)
 
 # a = asyncio.run(xiaohongshu_cookie_gen(4,None))
 # print(a)

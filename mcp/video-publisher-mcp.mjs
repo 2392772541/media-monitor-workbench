@@ -1,6 +1,6 @@
 #!/usr/bin/env node
 /**
- * 视频四平台自动发布 MCP 服务（零外部依赖 stdio JSON-RPC 2.0）
+ * 视频五平台自动发布 MCP 服务（零外部依赖 stdio JSON-RPC 2.0）
  *
  * 协议：换行分隔 JSON-RPC 2.0（stdin / stdout），诊断日志仅输出到 stderr。
  * 后端：转发至本机媒体工作台 HTTP 接口（默认 http://127.0.0.1:18910）。
@@ -25,8 +25,9 @@ const PLATFORM_NAMES = {
   2: '微信视频号',
   3: '抖音',
   4: '快手',
+  5: 'B站',
 };
-const DEFAULT_PLATFORMS = [3, 1, 2, 4];
+const DEFAULT_PLATFORMS = [3, 1, 2, 4, 5];
 
 const send = (message) => process.stdout.write(`${JSON.stringify(message)}\n`);
 const sendResult = (id, result) => send({ jsonrpc: '2.0', id, result });
@@ -223,6 +224,16 @@ function formatCopyForPlatform(platformType, candidateTitle, candidateDesc, cand
       // 快手网页端无独立标题框，须将标题与话题前简介合并进 description
       if (description && description !== title && !description.startsWith(title)) {
         description = `${title}\n${description}`;
+      }
+      break;
+    case 5: // B站
+      if (title.length > 80) {
+        warnings.push(`B站标题超过 80 字（原 ${title.length} 字），已自动截断至 80 字`);
+        title = title.slice(0, 80);
+      }
+      if (tags.length > 10) {
+        warnings.push(`B站标签超过 10 个（原 ${tags.length} 个），已保留前 10 个`);
+        tags = tags.slice(0, 10);
       }
       break;
     default:
@@ -431,7 +442,7 @@ function normalizePlatformList(rawPlatforms) {
   const seen = new Set();
   for (const item of rawPlatforms) {
     const num = Number(item);
-    if ([1, 2, 3, 4].includes(num) && !seen.has(num)) {
+    if ([1, 2, 3, 4, 5].includes(num) && !seen.has(num)) {
       seen.add(num);
       result.push(num);
     }
@@ -511,8 +522,8 @@ async function handleCheckWorkbenchStatus() {
 async function handleListPublishAccounts(args) {
   const validate = Boolean(args?.validate);
   const platformType = args?.platformType !== undefined && args?.platformType !== null ? Number(args.platformType) : null;
-  if (platformType !== null && ![1, 2, 3, 4].includes(platformType)) {
-    return makeToolError('platformType 必须是 1（小红书）、2（微信视频号）、3（抖音）或 4（快手）');
+  if (platformType !== null && ![1, 2, 3, 4, 5].includes(platformType)) {
+    return makeToolError('platformType 必须是 1（小红书）、2（微信视频号）、3（抖音）、4（快手）或 5（B站）');
   }
 
   try {
@@ -667,14 +678,14 @@ async function handlePublishVideoToPlatforms(args) {
   }
 
   if (!Array.isArray(args?.platforms) || args.platforms.length === 0) {
-    return makeToolError('必须指定目标平台列表 platforms（如 [3, 1, 2, 4]）');
+    return makeToolError('必须指定目标平台列表 platforms（如 [3, 1, 2, 4, 5]）');
   }
   const targetPlatforms = [];
   const seenPlat = new Set();
   for (const p of args.platforms) {
     const num = Number(p);
-    if (![1, 2, 3, 4].includes(num)) {
-      return makeToolError(`不支持的平台编号: ${p}，仅支持 1/2/3/4`);
+    if (![1, 2, 3, 4, 5].includes(num)) {
+      return makeToolError(`不支持的平台编号: ${p}，仅支持 1/2/3/4/5`);
     }
     if (!seenPlat.has(num)) {
       seenPlat.add(num);
@@ -1055,18 +1066,18 @@ const TOOLS = [
   },
   {
     name: 'list_publish_accounts',
-    description: '查询四平台（1小红书/2微信视频号/3抖音/4快手）已登录账号状态，不返回任何 Cookie 文件路径或密钥。',
+    description: '查询五平台（1小红书/2微信视频号/3抖音/4快手/5B站）已登录账号状态，不返回任何 Cookie 文件路径或密钥。',
     inputSchema: {
       type: 'object',
       properties: {
         validate: {
           type: 'boolean',
-          description: '是否触发真浏览器实时校验账号登录态（耗时较长）',
+          description: '是否触发真浏览器/官方接口实时校验账号登录态',
         },
         platformType: {
           type: 'integer',
-          enum: [1, 2, 3, 4],
-          description: '按平台过滤：1小红书，2微信视频号，3抖音，4快手',
+          enum: [1, 2, 3, 4, 5],
+          description: '按平台过滤：1小红书，2微信视频号，3抖音，4快手，5B站',
         },
       },
       additionalProperties: false,
@@ -1075,7 +1086,7 @@ const TOOLS = [
   {
     name: 'prepare_publish_copy',
     description:
-      '按抖音/小红书/微信视频号/快手各平台字数与标签上限，将原始文案（rawCopy/script）或结构化标题简介（title/description/tags）拆分为标题、话题前简介与标签，并输出规范校验告警。',
+      '按抖音/小红书/微信视频号/快手/B站各平台字数与标签上限，将原始文案（rawCopy/script）或结构化标题简介（title/description/tags）拆分为标题、话题前简介与标签，并输出规范校验告警。',
     inputSchema: {
       type: 'object',
       properties: {
@@ -1097,8 +1108,8 @@ const TOOLS = [
         },
         platforms: {
           type: 'array',
-          items: { type: 'integer', enum: [1, 2, 3, 4] },
-          description: '目标平台编号列表，默认 [3, 1, 2, 4]',
+          items: { type: 'integer', enum: [1, 2, 3, 4, 5] },
+          description: '目标平台编号列表，默认 [3, 1, 2, 4, 5]',
         },
         titleHint: {
           type: 'string',
@@ -1115,7 +1126,7 @@ const TOOLS = [
         },
         useAi: {
           type: 'boolean',
-          description: '是否优先调用工作台 AI 生成四平台差异化文案（失败自动回退规则拆分）',
+          description: '是否优先调用工作台 AI 生成五平台差异化文案（失败自动回退规则拆分）',
         },
       },
       required: [],
@@ -1140,8 +1151,8 @@ const TOOLS = [
         },
         platforms: {
           type: 'array',
-          items: { type: 'integer', enum: [1, 2, 3, 4] },
-          description: '目标平台编号列表（1小红书/2微信视频号/3抖音/4快手）',
+          items: { type: 'integer', enum: [1, 2, 3, 4, 5] },
+          description: '目标平台编号列表（1小红书/2微信视频号/3抖音/4快手/5B站）',
         },
         accountIds: {
           type: 'array',
@@ -1163,7 +1174,7 @@ const TOOLS = [
         },
         copies: {
           type: 'object',
-          description: '按平台编号（"1"/"2"/"3"/"4"）覆盖 { title, description, tags }',
+          description: '按平台编号（"1"/"2"/"3"/"4"/"5"）覆盖 { title, description, tags }',
         },
         isDraft: {
           type: 'boolean',
@@ -1192,7 +1203,7 @@ const TOOLS = [
         },
         coverPath: {
           type: 'string',
-          description: '可选本机自定义封面图片绝对路径（.png/.jpg/.jpeg/.webp/.bmp，抖音/快手/小红书支持）',
+          description: '可选本机自定义封面图片绝对路径（.png/.jpg/.jpeg/.webp/.bmp，抖音/快手/小红书/B站支持）',
         },
         category: {
           type: 'integer',

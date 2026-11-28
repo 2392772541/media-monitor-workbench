@@ -339,6 +339,7 @@ body {
 .badge-amber { background: var(--warn-soft); color: var(--warn); }
 .badge-red { background: var(--danger-soft); color: var(--danger); }
 .badge-blue { background: var(--primary-soft); color: var(--primary); }
+.badge-pink { background: #fdf2f8; color: #db2777; }
 .badge-gray { background: #f1f5f9; color: #475569; }
 
 .table-wrap {

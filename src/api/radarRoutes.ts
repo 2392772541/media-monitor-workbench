@@ -1526,16 +1526,18 @@ export function registerRadarRoutes(app: FastifyInstance): void {
         xiaohongshu?: { title?: string; description?: string; tags?: string[]; tip?: string };
         channels?: { title?: string; description?: string; tags?: string[]; tip?: string };
         kuaishou?: { title?: string; description?: string; tags?: string[]; tip?: string };
+        bilibili?: { title?: string; description?: string; tags?: string[]; tip?: string };
       }>({
-        purpose: 'publish_platform_copy',
-        system: `你是精通抖音、小红书、微信视频号、快手四大短视频平台算法的爆款标题与标签策划总监。
-请根据用户提供的视频文案/口播稿，为 4 个平台分别量身定制最容易起量的标题、简短正文和话题标签。
+        purpose: 'publish_platform_copy_v2',
+        system: `你是精通抖音、小红书、微信视频号、快手、B站五大视频平台算法的爆款标题与标签策划总监。
+请根据用户提供的视频文案/口播稿，为 5 个平台分别量身定制最容易起量的标题、简短正文和话题标签。
 严格要求：
 1. 抖音（douyin）：抓眼球强钩子/反常识短标题（15~28字，不要堆emoji），简短引导互动正文（30~60字），4~5个精准搜索+热门标签。
 2. 小红书（xiaohongshu）：种草感/痛点直击标题（12~20字，自然带1~2个emoji），分段干货正文+收藏引导（60~120字），5~6个高搜索标签。
 3. 微信视频号（channels）：克制、有信息量、适合转发朋友圈/微信群的稳重干货标题（15~28字），简洁要点正文（40~80字），3~5个标签。
 4. 快手（kuaishou）：大白话、接地气、直接给结果的老铁风格标题（15~28字），简短正文（30~60字），4~5个标签。
-5. 所有 tags 数组元素只写纯词（不要带 # 号和空格）。只输出严格 JSON，不要额外解释。`,
+5. B站（bilibili）：有信息密度、带干货看点或实测结论的标题（18~45字，最长不超过80字），结构化简介（60~160字，可列要点并带三连引导），5~8个精准搜索+分区标签。
+6. 所有 tags 数组元素只写纯词（不要带 # 号和空格）。只输出严格 JSON，不要额外解释。`,
         user: `${styleHint ? `额外风格要求：${styleHint}\n\n` : ''}视频文案 / 口播稿内容：
 ${script.slice(0, 4500)}
 
@@ -1544,10 +1546,11 @@ ${script.slice(0, 4500)}
   "douyin": { "title": "", "description": "", "tags": [""], "tip": "一句起量原因" },
   "xiaohongshu": { "title": "", "description": "", "tags": [""], "tip": "一句起量原因" },
   "channels": { "title": "", "description": "", "tags": [""], "tip": "一句起量原因" },
-  "kuaishou": { "title": "", "description": "", "tags": [""], "tip": "一句起量原因" }
+  "kuaishou": { "title": "", "description": "", "tags": [""], "tip": "一句起量原因" },
+  "bilibili": { "title": "", "description": "", "tags": [""], "tip": "一句起量原因" }
 }`,
         temperature: 0.45,
-        maxTokens: 1600,
+        maxTokens: 2000,
         forceRefresh: Boolean(req.body?.forceRefresh),
       });
 
@@ -1555,7 +1558,7 @@ ${script.slice(0, 4500)}
         title: String(obj?.title || '').trim(),
         description: String(obj?.description || '').trim(),
         tags: Array.isArray(obj?.tags)
-          ? obj!.tags.map((t) => String(t).replace(/^#+/, '').trim()).filter(Boolean).slice(0, 8)
+          ? obj!.tags.map((t) => String(t).replace(/^#+/, '').trim()).filter(Boolean).slice(0, 10)
           : [],
         tip: String(obj?.tip || '').trim(),
       });
@@ -1569,6 +1572,7 @@ ${script.slice(0, 4500)}
           1: norm(data.xiaohongshu), // 小红书
           2: norm(data.channels), // 微信视频号
           4: norm(data.kuaishou), // 快手
+          5: norm(data.bilibili), // B站
         },
       };
     } catch (err) {

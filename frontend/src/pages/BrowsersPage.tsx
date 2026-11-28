@@ -16,7 +16,7 @@ function loginStatusLabel(s: string) {
 }
 
 const PRIORITY_PLATFORMS = ['douyin', 'bilibili', 'xiaohongshu', 'kuaishou', 'youtube', 'x', 'rss'];
-const PUBLISH_SYNC_PLATFORMS = new Set(['douyin', 'kuaishou', 'wechat-channels']);
+const PUBLISH_SYNC_PLATFORMS = new Set(['douyin', 'kuaishou', 'wechat-channels', 'bilibili']);
 
 export function BrowsersPage({
   onToast,
@@ -118,10 +118,9 @@ export function BrowsersPage({
           <div style={{ display: 'flex', alignItems: 'flex-start', gap: 10, flex: '1 1 440px' }}>
             <ShieldCheck size={20} color="#0284c7" style={{ marginTop: 2, flexShrink: 0 }} />
             <div>
-              <div style={{ fontWeight: 700, color: '#0369a1' }}>已打通登录态自动复用：在「视频发布」登过的抖音/快手会自动同步保存到这里</div>
+              <div style={{ fontWeight: 700, color: '#0369a1' }}>已打通登录态自动复用：在「视频发布」登过的抖音 / 快手 / B站会自动同步保存到这里</div>
               <div style={{ fontSize: 13, color: '#0c4a6e', marginTop: 3 }}>
-                抖音未登录时平台会隐藏最近 7 天新视频；只要你在「视频发布」里扫过码，后台抓对标博主时会自动复用并保存登录态（无需重复扫码）。
-                B站扫一次码可避免限流漏抓，全程与你日常 Chrome 完全隔离。
+                抖音未登录时平台会隐藏最近 7 天新视频，B站未登录也容易触发限流；只要你在「视频发布」里扫过码，后台抓对标博主时会自动复用并保存登录态（无需重复扫码），全程与你日常 Chrome 完全隔离。
               </div>
             </div>
           </div>

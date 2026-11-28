@@ -93,6 +93,7 @@ const PLATFORM_OPTIONS = [
   { type: 4, label: '快手', badge: 'badge-amber' },
   { type: 1, label: '小红书', badge: 'badge-blue' },
   { type: 2, label: '微信视频号', badge: 'badge-green' },
+  { type: 5, label: 'B站', badge: 'badge-pink' },
 ] as const;
 
 const TEMPLATE_CATEGORIES = ['全部', '通用', '干货拆解', '好物测评', '教程实操', '日常Vlog', '科技'] as const;
@@ -325,7 +326,7 @@ export function PublishPage({
           }))
         );
       }
-      onToast(res.cached ? '已载入四平台定制文案（可直接微调）' : 'AI 已为抖音 / 小红书 / 视频号 / 快手分别生成标题、正文与标签！');
+      onToast(res.cached ? '已载入五平台定制文案（可直接微调）' : 'AI 已为抖音 / 小红书 / 视频号 / 快手 / B站分别生成标题、正文与标签！');
     } catch (err) {
       onToast((err as Error).message);
     } finally {
@@ -1311,7 +1312,7 @@ export function PublishPage({
             <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: 12, flexWrap: 'wrap', gap: 8 }}>
               <div>
                 <div style={{ fontWeight: 700, fontSize: 15 }}>3. AI 自动按平台写标题、正文与标签（也可手动微调）</div>
-                <div style={{ fontSize: 12, color: 'var(--text-muted)' }}>把视频口播稿或大纲丢进来，AI 自动按抖音 / 小红书 / 视频号 / 快手 4 个平台风格分别填好</div>
+                <div style={{ fontSize: 12, color: 'var(--text-muted)' }}>把视频口播稿或大纲丢进来，AI 自动按抖音 / 小红书 / 视频号 / 快手 / B站 5 个平台风格分别填好</div>
               </div>
               <div style={{ display: 'flex', gap: 6, flexWrap: 'wrap' }}>
                 <button className="btn btn-sm" onClick={() => setSubTab('titles')}>
@@ -1333,7 +1334,7 @@ export function PublishPage({
             <div className="publish-ai-box">
               <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', gap: 10, flexWrap: 'wrap', marginBottom: 10 }}>
                 <div style={{ display: 'flex', alignItems: 'center', gap: 6, fontWeight: 700, fontSize: 14, color: '#3730a3' }}>
-                  <Sparkles size={15} /> AI 丢文案自动写四平台标题 + 正文 + 标签
+                  <Sparkles size={15} /> AI 丢文案自动写五平台标题 + 正文 + 标签
                 </div>
                 <div style={{ display: 'flex', alignItems: 'center', gap: 8, flexWrap: 'wrap' }}>
                   <select
@@ -1393,7 +1394,7 @@ export function PublishPage({
                   disabled={aiGenerating}
                   onClick={() => void handleGenerateAiCopy(false)}
                 >
-                  <Sparkles size={13} /> {aiGenerating ? 'AI 正在按四平台定制...' : 'AI 一键生成各平台标题和标签'}
+                  <Sparkles size={13} /> {aiGenerating ? 'AI 正在按五平台定制...' : 'AI 一键生成各平台标题和标签'}
                 </button>
                 {aiPlatformCopies && (
                   <button
@@ -1457,7 +1458,7 @@ export function PublishPage({
 
                         <div>
                           <div style={{ display: 'flex', justifyContent: 'space-between', fontSize: 12, fontWeight: 600, marginBottom: 4 }}>
-                            <span>{getPlatformMeta(aiPreviewPlatform).label}正文简介（抖音 / 小红书发布时会自动填入）</span>
+                            <span>{getPlatformMeta(aiPreviewPlatform).label}正文简介（各平台发布时会自动填入）</span>
                             <span style={{ color: 'var(--text-muted)', fontWeight: 400 }}>{cur.description.length} 字</span>
                           </div>
                           <textarea
@@ -2093,16 +2094,28 @@ export function PublishPage({
                   value={newAccountName}
                   disabled={sseState === 'connecting' || sseState === 'qr'}
                   onChange={(e) => setNewAccountName(e.target.value)}
-                  placeholder="例如：公司抖音主号"
+                  placeholder="例如：我的主号（B站 / 抖音 / 小红书）"
                 />
               </div>
+
+              {newPlatform === 1 && (
+                <div style={{ fontSize: 12, color: '#0369a1', background: '#f0f9ff', border: '1px solid #bae6fd', borderRadius: 8, padding: '8px 10px', lineHeight: 1.55 }}>
+                  <strong>小红书防风控登录：</strong>点击下方会弹出纯净真实 Chrome 窗口（已直连关闭代理、去掉脚本注入）。建议直接在窗口用<strong>「手机号 + 短信验证码」</strong>登录最稳，也可以手动点登录框右上角二维码图标扫码。
+                </div>
+              )}
+
+              {newPlatform === 5 && (
+                <div style={{ fontSize: 12, color: '#9d174d', background: '#fdf2f8', border: '1px solid #fbcfe8', borderRadius: 8, padding: '8px 10px', lineHeight: 1.55 }}>
+                  <strong>B站官方扫码：</strong>点下方秒出 B站官方二维码，扫完自动保存，并且可同步给对标博主采集复用。
+                </div>
+              )}
 
               {sseState !== 'idle' && (
                 <div style={{ textAlign: 'center', padding: 14, background: '#f8fafc', borderRadius: 10 }}>
                   {qrSrc && sseState === 'qr' && (
                     <img src={qrSrc} alt="登录二维码" style={{ width: 185, height: 185, objectFit: 'contain', margin: '0 auto 8px', background: '#fff', padding: 8, borderRadius: 10, border: '1px solid #e2e8f0' }} />
                   )}
-                  <div style={{ fontSize: 13, color: sseState === 'error' ? '#dc2626' : sseState === 'success' ? '#16a34a' : '#334155' }}>
+                  <div style={{ fontSize: 13, color: sseState === 'error' ? '#dc2626' : sseState === 'success' ? '#16a34a' : '#334155', lineHeight: 1.55 }}>
                     {sseMsg}
                   </div>
                 </div>
@@ -2115,7 +2128,11 @@ export function PublishPage({
                 disabled={sseState === 'connecting' || sseState === 'qr' || sseState === 'success'}
                 onClick={startQrLogin}
               >
-                {sseState === 'connecting' ? '获取二维码中...' : sseState === 'qr' ? '等待扫码...' : '获取二维码'}
+                {sseState === 'connecting'
+                  ? newPlatform === 1 ? '正在启动纯净 Chrome...' : '获取二维码中...'
+                  : sseState === 'qr'
+                    ? newPlatform === 1 ? '等待登录完成...' : '等待扫码...'
+                    : newPlatform === 1 ? '打开纯净登录窗口' : '获取二维码'}
               </button>
             </div>
           </div>
