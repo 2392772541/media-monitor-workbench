@@ -5,6 +5,7 @@ import {
   Flame,
   Star,
   MessageSquareText,
+  MessageCircleReply,
   Send,
   Monitor,
   ListChecks,
@@ -18,6 +19,7 @@ import { CreatorsPage } from './pages/CreatorsPage';
 import { HotBoardPage } from './pages/HotBoardPage';
 import { TopicBoardPage } from './pages/TopicBoardPage';
 import { CommentsPage } from './pages/CommentsPage';
+import { CommentGuardPage } from './pages/CommentGuardPage';
 import { PublishPage } from './pages/PublishPage';
 import { BrowsersPage } from './pages/BrowsersPage';
 import { TasksPage } from './pages/TasksPage';
@@ -36,6 +38,7 @@ const CORE_NAV_ITEMS = [
 // 创作分发与运维入口保留在底部
 const OPS_NAV_ITEMS = [
   { id: 'publish', label: '视频发布', sub: 'AI 自动按平台写标题标签 · 多平台分发', icon: Send },
+  { id: 'comment-guard', label: '评论托管', sub: '发完自动留 2~3 条暖评 · 定时巡检自动回粉丝', icon: MessageCircleReply },
   { id: 'browsers', label: '浏览器与登录', sub: '管理后台抓取登录态（本机显卡转写已免登录）', icon: Monitor },
   { id: 'tasks', label: '任务中心', sub: '监控抓取记录、一键重试与失败清理', icon: ListChecks },
   { id: 'settings', label: '系统设置', sub: '本机大模型与抓取基础配置', icon: Settings },
@@ -312,12 +315,14 @@ export function App() {
           {activeTab === 'publish' && (
             <PublishPage
               onToast={showToast}
+              onNavigate={handleNavigate}
               activeSubTab={publishSubTab}
               onSubTabChange={handlePublishSubTabChange}
               inspirationDraft={publishDraft}
               onClearInspiration={() => setPublishDraft(null)}
             />
           )}
+          {activeTab === 'comment-guard' && <CommentGuardPage onToast={showToast} onNavigate={handleNavigate} />}
           {activeTab === 'browsers' && <BrowsersPage onToast={showToast} onNavigate={handleNavigate} />}
           {activeTab === 'tasks' && <TasksPage onToast={showToast} onNavigate={handleNavigate} />}
           {activeTab === 'settings' && <SettingsPage onToast={showToast} />}

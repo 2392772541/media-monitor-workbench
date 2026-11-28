@@ -26,6 +26,8 @@ import {
   stopSauBackend,
 } from '../services/sauBridge.js';
 import { registerRadarRoutes } from './radarRoutes.js';
+import { registerCommentGuardRoutes } from './commentGuardRoutes.js';
+import { hookPostPublishWarmup } from '../services/commentGuardService.js';
 import {
   escapeLikeTerm,
   parsePositiveIntId,
@@ -800,11 +802,21 @@ export function registerRoutes(app: FastifyInstance, shutdownHandler: () => Prom
 
   app.post('/api/sau/post-video', async (req, reply) => {
     const res = await proxySauJson('POST', '/postVideo', req.body, 600000);
+    if (res.status === 200 && req.body && typeof req.body === 'object') {
+      void hookPostPublishWarmup(req.body as Record<string, unknown>).catch(() => {});
+    }
     return reply.code(res.status).send(res.payload);
   });
 
   app.post('/api/sau/post-video-batch', async (req, reply) => {
     const res = await proxySauJson('POST', '/postVideoBatch', req.body, 600000);
+    if (res.status === 200 && Array.isArray(req.body)) {
+      for (const item of req.body) {
+        if (item && typeof item === 'object') {
+          void hookPostPublishWarmup(item as Record<string, unknown>).catch(() => {});
+        }
+      }
+    }
     return reply.code(res.status).send(res.payload);
   });
 
@@ -860,4 +872,7 @@ export function registerRoutes(app: FastifyInstance, shutdownHandler: () => Prom
 
   // 注册「选题监控中心」全部业务接口（驾驶舱、博主分析、热榜、话题雷达、情报库、选题库、AI/MediaCrawler/听悟）
   registerRadarRoutes(app);
+
+  // 注册「创作者评论托管」全部业务接口（发后暖评队列、定时巡检自动回复、规则与日志）
+  registerCommentGuardRoutes(app);
 }

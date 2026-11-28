@@ -110,12 +110,14 @@ type PublishSubTab = 'publish' | 'titles' | 'accounts' | 'materials' | 'history'
 
 export function PublishPage({
   onToast,
+  onNavigate,
   activeSubTab,
   onSubTabChange,
   inspirationDraft,
   onClearInspiration,
 }: {
   onToast: (msg: string) => void;
+  onNavigate?: (tab: string) => void;
   activeSubTab?: PublishSubTab;
   onSubTabChange?: (sub: PublishSubTab) => void;
   inspirationDraft?: PublishInspirationDraft | null;
@@ -149,6 +151,7 @@ export function PublishPage({
   const [startDays, setStartDays] = useState(0);
   const [isOriginal, setIsOriginal] = useState(false);
   const [isDraft, setIsDraft] = useState(false);
+  const [autoWarmup, setAutoWarmup] = useState(true);
   const [productLink, setProductLink] = useState('');
   const [productTitle, setProductTitle] = useState('');
 
@@ -897,6 +900,7 @@ export function PublishPage({
             startDays,
             category: isOriginal ? 1 : 0,
             isDraft,
+            autoWarmup,
             productLink: t.platformType === 3 ? productLink.trim() : '',
             productTitle: t.platformType === 3 ? productTitle.trim() : '',
           }),
@@ -1642,6 +1646,20 @@ export function PublishPage({
                 <input type="checkbox" checked={isOriginal} onChange={(e) => setIsOriginal(e.target.checked)} />
                 声明原创
               </label>
+              <label style={{ display: 'flex', alignItems: 'center', gap: 6, fontSize: 13, fontWeight: 600, color: '#4f46e5' }}>
+                <input type="checkbox" checked={autoWarmup} onChange={(e) => setAutoWarmup(e.target.checked)} />
+                发完自动在评论区留 2～3 条暖场讨论评
+              </label>
+              {onNavigate && (
+                <button
+                  type="button"
+                  className="btn btn-sm"
+                  style={{ fontSize: 12 }}
+                  onClick={() => onNavigate('comment-guard')}
+                >
+                  管理暖评与自动回复 →
+                </button>
+              )}
               {hasChannelsSelected && (
                 <label style={{ display: 'flex', alignItems: 'center', gap: 6, fontSize: 13 }}>
                   <input type="checkbox" checked={isDraft} onChange={(e) => setIsDraft(e.target.checked)} />

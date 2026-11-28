@@ -853,3 +853,142 @@ export interface ContentDetailResp {
     updated_at: string;
   }>;
 }
+
+// ===== 创作者评论托管（发片暖评 + 定时巡检自动回复）=====
+
+export interface CommentGuardSettings {
+  enabled: boolean;
+  mode: 'auto' | 'draft';
+  enabledPlatforms: number[];
+  warmupEnabled: boolean;
+  warmupCount: number;
+  warmupDelayMinutes: number;
+  warmupSpacingMinSec: number;
+  warmupSpacingMaxSec: number;
+  warmupStyle: 'debate' | 'insight' | 'poll';
+  patrolIntervalMinutes: number;
+  maxVideosPerPatrol: number;
+  maxRepliesPerPatrol: number;
+  dailyReplyCapPerPlatform: number;
+  replySpacingMinSec: number;
+  replySpacingMaxSec: number;
+  activeHourStart: number;
+  activeHourEnd: number;
+  persona: string;
+  toneStyle: 'friendly' | 'sharp' | 'expert';
+  spamKeywords: string[];
+  forbiddenReplyWords: string[];
+}
+
+export interface CommentPlatformCapability {
+  platformType: number;
+  key: string;
+  name: string;
+  supported: boolean;
+  reserved: boolean;
+  note: string;
+  accounts: Array<{ id: number; accountName: string; valid: boolean }>;
+  hasAccount: boolean;
+  hasValidAccount: boolean;
+}
+
+export interface CommentGuardOverview {
+  settings: CommentGuardSettings;
+  capabilities: CommentPlatformCapability[];
+  runtime: {
+    patrolRunning: boolean;
+    warmupRunning: boolean;
+    lastPatrolAt: string | null;
+    nextPatrolAt: string | null;
+  };
+  stats: {
+    todayReplied: number;
+    totalReplied: number;
+    pendingCount: number;
+    spamBlockedCount: number;
+    failedCount: number;
+    todayWarmupSent: number;
+    activeWarmupJobs: number;
+    syncedVideoCount: number;
+  };
+}
+
+export interface CreatorPublishedVideo {
+  id: number;
+  platform_type: number;
+  account_name: string;
+  platform_video_id: string;
+  title: string;
+  cover_url: string;
+  video_url: string;
+  published_at: string | null;
+  comment_count: number;
+  like_count: number;
+  play_count: number;
+  warmup_status: string;
+  last_synced_at: string;
+  synced_fan_comments?: number;
+  replied_fan_comments?: number;
+}
+
+export interface CreatorVideoComment {
+  id: number;
+  platform_type: number;
+  account_name: string;
+  platform_video_id: string;
+  video_title: string;
+  platform_comment_id: string;
+  parent_comment_id: string;
+  author_name: string;
+  comment_text: string;
+  like_count: number;
+  comment_created_at: string | null;
+  is_author_comment: number;
+  has_author_reply: number;
+  reply_status: string;
+  skip_reason: string;
+  ai_reply_text: string;
+  sent_reply_text: string;
+  replied_at: string | null;
+  last_error: string | null;
+  discovered_at: string;
+}
+
+export interface WarmupCommentItem {
+  text: string;
+  angle: string;
+  status: 'pending' | 'sent' | 'failed' | 'skipped';
+  sentAt?: string;
+  error?: string;
+  postedCommentId?: string;
+}
+
+export interface WarmupJobItem {
+  id: number;
+  platform_type: number;
+  account_name: string;
+  platform_video_id: string;
+  video_title: string;
+  video_script: string;
+  tags: string[];
+  comments: WarmupCommentItem[];
+  target_count: number;
+  sent_count: number;
+  mode: string;
+  status: string;
+  scheduled_for: string;
+  retry_count: number;
+  last_error: string | null;
+  created_at: string;
+  updated_at: string;
+}
+
+export interface CommentGuardLogItem {
+  id: number;
+  action_type: string;
+  platform_type: number | null;
+  level: string;
+  summary: string;
+  detail_json: string;
+  created_at: string;
+}

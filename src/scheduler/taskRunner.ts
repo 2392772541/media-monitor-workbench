@@ -4,6 +4,7 @@ import type { SourceRecord } from '../adapters/types.js';
 import { recomputeSourceBreakout } from '../services/breakoutService.js';
 import { refreshHotBoards } from '../services/hotBoardService.js';
 import { getNewsBriefSnapshot, refreshNewsBrief } from '../services/newsBriefService.js';
+import { checkDueCommentGuardWork } from '../services/commentGuardService.js';
 import { log } from '../utils/logger.js';
 
 interface RunningTask {
@@ -18,6 +19,7 @@ const runningControllers = new Map<number, RunningTask>();
 let isProcessing = false;
 let schedulerTimer: NodeJS.Timeout | null = null;
 let auxRefreshTimer: NodeJS.Timeout | null = null;
+let commentGuardTimer: NodeJS.Timeout | null = null;
 let hotBoardRefreshing = false;
 let newsBriefRefreshing = false;
 const retryCounts = new Map<number, number>();
@@ -436,7 +438,15 @@ export function startScheduler() {
     void checkDueAuxiliaryRefreshes();
   }, 15000);
 
-  log('INFO', 'scheduler', 'Background task scheduler started (creators 30s tick + hot-boards/news-brief 30m auto-refresh)');
+  // 每 60 秒检查一次到期的发片暖评任务及定时评论巡检（启动 25 秒后首次检查，遵守用户总开关与频率）
+  commentGuardTimer = setInterval(() => {
+    void checkDueCommentGuardWork();
+  }, 60 * 1000);
+  setTimeout(() => {
+    void checkDueCommentGuardWork();
+  }, 25000);
+
+  log('INFO', 'scheduler', 'Background task scheduler started (creators 30s tick + hot-boards/news-brief 30m + comment-guard 60s)');
 }
 
 export function stopScheduler() {
@@ -447,6 +457,10 @@ export function stopScheduler() {
   if (auxRefreshTimer) {
     clearInterval(auxRefreshTimer);
     auxRefreshTimer = null;
+  }
+  if (commentGuardTimer) {
+    clearInterval(commentGuardTimer);
+    commentGuardTimer = null;
   }
   for (const [, running] of runningControllers) {
     running.controller.abort(new Error('服务关闭'));

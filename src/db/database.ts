@@ -4,7 +4,7 @@ import crypto from 'node:crypto';
 import { DatabaseSync } from 'node:sqlite';
 import { PATHS, PLATFORM_PROFILES, getSafeProfileDir } from '../config.js';
 import { log } from '../utils/logger.js';
-import { MIGRATION_V1_SQL, MIGRATION_V2_SQL, MIGRATION_V3_SQL } from './schema.js';
+import { MIGRATION_V1_SQL, MIGRATION_V2_SQL, MIGRATION_V3_SQL, MIGRATION_V4_SQL } from './schema.js';
 
 let dbInstance: DatabaseSync | null = null;
 
@@ -49,6 +49,7 @@ function runMigrations(db: DatabaseSync): void {
     { version: 1, name: 'initial_schema', sql: MIGRATION_V1_SQL },
     { version: 2, name: 'topic_radar_v2', sql: MIGRATION_V2_SQL },
     { version: 3, name: 'creators_r2_comments_v3', sql: MIGRATION_V3_SQL },
+    { version: 4, name: 'comment_guard_v4', sql: MIGRATION_V4_SQL },
   ];
 
   for (const m of migrations) {

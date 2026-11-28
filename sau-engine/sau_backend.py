@@ -18,6 +18,12 @@ from myUtils.login import get_tencent_cookie, douyin_cookie_gen, get_ks_cookie, 
 from myUtils.postVideo import post_video_tencent, post_video_DouYin, post_video_ks, post_video_xhs, post_video_bilibili
 from uploader.base_video import BaseVideoUploader
 from utils.files_times import parse_schedule_at_list
+from comment_ops import (
+    get_comment_platform_capabilities,
+    post_creator_comment,
+    reply_to_comment,
+    sync_account_comments,
+)
 
 active_queues = {}
 active_queues_lock = threading.Lock()
@@ -1437,6 +1443,94 @@ def sse_stream(status_queue, queue_key=None, timeout_seconds=300):
         if queue_key:
             with active_queues_lock:
                 active_queues.pop(queue_key, None)
+
+# ==================== 创作者自有视频评论托管接口 ====================
+
+@app.route('/comments/capabilities', methods=['GET'])
+def comments_capabilities():
+    ensure_runtime_ready()
+    return jsonify({"code": 200, "msg": "success", "data": get_comment_platform_capabilities()}), 200
+
+
+@app.route('/comments/sync', methods=['POST'])
+def comments_sync():
+    ensure_runtime_ready()
+    data = request.get_json(silent=True)
+    if not isinstance(data, dict):
+        return jsonify({"code": 400, "msg": "请求体必须为 JSON 对象", "data": None}), 400
+    platform_type = data.get("type")
+    if isinstance(platform_type, bool) or not isinstance(platform_type, int) or platform_type not in (1, 2, 3, 4):
+        return jsonify({"code": 400, "msg": f"不支持的平台类型: {platform_type}", "data": None}), 400
+    account_name = str(data.get("accountName") or "").strip()
+    raw_max = data.get("maxVideos", 20)
+    try:
+        max_videos = max(1, min(50, int(raw_max)))
+    except (TypeError, ValueError):
+        max_videos = 20
+    only_video_id = str(data.get("onlyVideoId") or "").strip()
+    result = sync_account_comments(
+        platform_type=platform_type,
+        account_name=account_name,
+        max_videos=max_videos,
+        only_video_id=only_video_id,
+    )
+    status_code = 200 if result.get("ok") else (401 if result.get("auth_required") else 400)
+    return jsonify({"code": status_code, "msg": result.get("message", ""), "data": result}), status_code
+
+
+@app.route('/comments/post', methods=['POST'])
+def comments_post():
+    ensure_runtime_ready()
+    data = request.get_json(silent=True)
+    if not isinstance(data, dict):
+        return jsonify({"code": 400, "msg": "请求体必须为 JSON 对象", "data": None}), 400
+    platform_type = data.get("type")
+    if isinstance(platform_type, bool) or not isinstance(platform_type, int) or platform_type not in (1, 2, 3, 4):
+        return jsonify({"code": 400, "msg": f"不支持的平台类型: {platform_type}", "data": None}), 400
+    comment_text = str(data.get("commentText") or "").strip()
+    if not comment_text:
+        return jsonify({"code": 400, "msg": "评论内容 commentText 不能为空", "data": None}), 400
+    result = post_creator_comment(
+        platform_type=platform_type,
+        account_name=str(data.get("accountName") or "").strip(),
+        video_id=str(data.get("videoId") or "").strip(),
+        video_title=str(data.get("videoTitle") or "").strip(),
+        comment_text=comment_text,
+        dry_run=bool(data.get("dryRun", False)),
+    )
+    status_code = 200 if result.get("ok") else (401 if result.get("auth_required") else 400)
+    return jsonify({"code": status_code, "msg": result.get("message", ""), "data": result}), status_code
+
+
+@app.route('/comments/reply', methods=['POST'])
+def comments_reply():
+    ensure_runtime_ready()
+    data = request.get_json(silent=True)
+    if not isinstance(data, dict):
+        return jsonify({"code": 400, "msg": "请求体必须为 JSON 对象", "data": None}), 400
+    platform_type = data.get("type")
+    if isinstance(platform_type, bool) or not isinstance(platform_type, int) or platform_type not in (1, 2, 3, 4):
+        return jsonify({"code": 400, "msg": f"不支持的平台类型: {platform_type}", "data": None}), 400
+    reply_text = str(data.get("replyText") or "").strip()
+    if not reply_text:
+        return jsonify({"code": 400, "msg": "回复内容 replyText 不能为空", "data": None}), 400
+    comment_text = str(data.get("commentText") or "").strip()
+    if not comment_text:
+        return jsonify({"code": 400, "msg": "原评论内容 commentText 不能为空", "data": None}), 400
+    result = reply_to_comment(
+        platform_type=platform_type,
+        account_name=str(data.get("accountName") or "").strip(),
+        video_id=str(data.get("videoId") or "").strip(),
+        video_title=str(data.get("videoTitle") or "").strip(),
+        comment_id=str(data.get("commentId") or "").strip(),
+        comment_text=comment_text,
+        author_name=str(data.get("authorName") or "").strip(),
+        reply_text=reply_text,
+        dry_run=bool(data.get("dryRun", False)),
+    )
+    status_code = 200 if result.get("ok") else (401 if result.get("auth_required") else 400)
+    return jsonify({"code": status_code, "msg": result.get("message", ""), "data": result}), status_code
+
 
 if __name__ == '__main__':
     ensure_runtime_ready()

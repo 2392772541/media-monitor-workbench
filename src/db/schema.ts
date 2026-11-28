@@ -407,3 +407,89 @@ export const MIGRATION_V3_SQL = `
   );
   CREATE INDEX IF NOT EXISTS idx_comment_topic_ideas_content ON comment_topic_ideas(content_id, id ASC);
 `;
+
+// V4 增量迁移：创作者评论托管（自有已发作品同步、发后暖评队列、粉丝评论追踪与防重复回复、巡检日志）
+export const MIGRATION_V4_SQL = `
+  CREATE TABLE IF NOT EXISTS creator_published_videos (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    platform_type INTEGER NOT NULL,
+    account_name TEXT NOT NULL DEFAULT '',
+    platform_video_id TEXT NOT NULL,
+    title TEXT NOT NULL DEFAULT '',
+    description TEXT NOT NULL DEFAULT '',
+    cover_url TEXT NOT NULL DEFAULT '',
+    video_url TEXT NOT NULL DEFAULT '',
+    published_at TEXT,
+    comment_count INTEGER NOT NULL DEFAULT 0,
+    like_count INTEGER NOT NULL DEFAULT 0,
+    play_count INTEGER NOT NULL DEFAULT 0,
+    warmup_status TEXT NOT NULL DEFAULT 'none',
+    last_synced_at TEXT NOT NULL,
+    created_at TEXT NOT NULL,
+    updated_at TEXT NOT NULL,
+    UNIQUE(platform_type, platform_video_id)
+  );
+  CREATE INDEX IF NOT EXISTS idx_creator_pub_videos_platform ON creator_published_videos(platform_type, published_at DESC, id DESC);
+
+  CREATE TABLE IF NOT EXISTS comment_warmup_jobs (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    platform_type INTEGER NOT NULL,
+    account_name TEXT NOT NULL DEFAULT '',
+    platform_video_id TEXT NOT NULL DEFAULT '',
+    video_title TEXT NOT NULL,
+    video_script TEXT NOT NULL DEFAULT '',
+    tags_json TEXT NOT NULL DEFAULT '[]',
+    comments_json TEXT NOT NULL DEFAULT '[]',
+    target_count INTEGER NOT NULL DEFAULT 3,
+    sent_count INTEGER NOT NULL DEFAULT 0,
+    mode TEXT NOT NULL DEFAULT 'auto',
+    status TEXT NOT NULL DEFAULT 'queued',
+    scheduled_for TEXT NOT NULL,
+    retry_count INTEGER NOT NULL DEFAULT 0,
+    last_error TEXT,
+    started_at TEXT,
+    finished_at TEXT,
+    created_at TEXT NOT NULL,
+    updated_at TEXT NOT NULL
+  );
+  CREATE INDEX IF NOT EXISTS idx_warmup_jobs_status_sched ON comment_warmup_jobs(status, scheduled_for ASC);
+
+  CREATE TABLE IF NOT EXISTS creator_video_comments (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    platform_type INTEGER NOT NULL,
+    account_name TEXT NOT NULL DEFAULT '',
+    platform_video_id TEXT NOT NULL,
+    video_title TEXT NOT NULL DEFAULT '',
+    platform_comment_id TEXT NOT NULL,
+    parent_comment_id TEXT NOT NULL DEFAULT '',
+    author_uid TEXT NOT NULL DEFAULT '',
+    author_name TEXT NOT NULL DEFAULT '',
+    comment_text TEXT NOT NULL,
+    like_count INTEGER NOT NULL DEFAULT 0,
+    comment_created_at TEXT,
+    is_author_comment INTEGER NOT NULL DEFAULT 0,
+    has_author_reply INTEGER NOT NULL DEFAULT 0,
+    reply_status TEXT NOT NULL DEFAULT 'pending',
+    skip_reason TEXT NOT NULL DEFAULT '',
+    ai_reply_text TEXT NOT NULL DEFAULT '',
+    sent_reply_text TEXT NOT NULL DEFAULT '',
+    replied_at TEXT,
+    last_error TEXT,
+    discovered_at TEXT NOT NULL,
+    updated_at TEXT NOT NULL,
+    UNIQUE(platform_type, platform_comment_id)
+  );
+  CREATE INDEX IF NOT EXISTS idx_creator_comments_status ON creator_video_comments(reply_status, discovered_at DESC);
+  CREATE INDEX IF NOT EXISTS idx_creator_comments_video ON creator_video_comments(platform_type, platform_video_id, discovered_at DESC);
+
+  CREATE TABLE IF NOT EXISTS comment_guard_logs (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    action_type TEXT NOT NULL,
+    platform_type INTEGER,
+    level TEXT NOT NULL DEFAULT 'INFO',
+    summary TEXT NOT NULL,
+    detail_json TEXT NOT NULL DEFAULT '{}',
+    created_at TEXT NOT NULL
+  );
+  CREATE INDEX IF NOT EXISTS idx_comment_guard_logs_created ON comment_guard_logs(created_at DESC, id DESC);
+`;

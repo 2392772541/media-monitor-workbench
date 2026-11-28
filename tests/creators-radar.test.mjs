@@ -34,7 +34,8 @@ test('V3 增量迁移建表完整且支持 published_at / summary 补全回填',
     .prepare('SELECT version FROM schema_migrations ORDER BY version ASC')
     .all()
     .map((r) => Number(r.version));
-  assert.deepEqual(versions, [1, 2, 3]);
+  assert.deepEqual(versions.slice(0, 3), [1, 2, 3]);
+  assert.ok(versions.includes(4));
 
   const tables = db
     .prepare("SELECT name FROM sqlite_master WHERE type='table' AND name IN ('content_r2_analyses', 'comment_topic_ideas')")
