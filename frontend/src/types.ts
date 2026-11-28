@@ -749,6 +749,7 @@ export interface TrackerVideoItem {
   queue_position?: number | null;
   comment_count: number;
   comment_topics_count: number;
+  comment_topics?: CommentTopicIdeaItem[];
   r2_analysis?: R2AnalysisPayload | null;
   copy_digest?: CreatorCopyDigest | null;
 }

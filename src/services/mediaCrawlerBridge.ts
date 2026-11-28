@@ -7,6 +7,7 @@ import { escapeLikeTerm } from '../utils/sqlValidation.js';
 import { withHeadlessContext } from '../browser/profileManager.js';
 import { extractUrlFromShareText, resolveShortSourceUrl } from '../adapters/urlRecognizer.js';
 import { callAiJsonWithCache } from './aiRadarService.js';
+import { loadLatestSauPlatformCookies } from './sauCookieSync.js';
 import { log } from '../utils/logger.js';
 
 export interface MediaCrawlerStatus {
@@ -216,7 +217,63 @@ function toIntOrNull(v: unknown): number | null {
   return null;
 }
 
-// ===== 直采通道 1：B站公开高赞热评 API（免登录，毫秒级返回） =====
+// 从 B站 reply 响应结构中提取评论条目（兼容 /x/v2/reply、/x/v2/reply/main 与 /x/v2/reply/wbi/main）
+function collectBilibiliRepliesFromPayload(
+  payload: unknown,
+  postTitle: string,
+  postUrl: string,
+  map: Map<string, CrawledCommentRow>
+): number {
+  if (!payload || typeof payload !== 'object') return 0;
+  const data = (payload as { data?: Record<string, unknown> }).data;
+  if (!data || typeof data !== 'object') return 0;
+
+  type BiliReplyNode = {
+    rpid_str?: string;
+    rpid?: number;
+    like?: number;
+    ctime?: number;
+    member?: { uname?: string };
+    content?: { message?: string };
+    replies?: BiliReplyNode[];
+  };
+
+  const buckets: BiliReplyNode[] = [];
+  const topUpper = (data.top as { upper?: BiliReplyNode } | undefined)?.upper;
+  if (topUpper) buckets.push(topUpper);
+  if (Array.isArray(data.top_replies)) buckets.push(...(data.top_replies as BiliReplyNode[]));
+  if (Array.isArray(data.hots)) buckets.push(...(data.hots as BiliReplyNode[]));
+  if (Array.isArray(data.replies)) buckets.push(...(data.replies as BiliReplyNode[]));
+
+  let added = 0;
+  const addNode = (r: BiliReplyNode) => {
+    const id = String(r?.rpid_str || r?.rpid || '').trim();
+    const text = String(r?.content?.message || '').trim();
+    if (!id || !text || map.has(id)) return;
+    map.set(id, {
+      id,
+      author: String(r?.member?.uname || 'B站用户').trim(),
+      text: text.slice(0, 1000),
+      likes: Number(r?.like || 0),
+      publishedAt: r?.ctime ? new Date(r.ctime * 1000).toISOString() : null,
+      postTitle,
+      postUrl,
+    });
+    added++;
+  };
+
+  for (const r of buckets) {
+    addNode(r);
+    if (Array.isArray(r?.replies)) {
+      for (const sub of r.replies.slice(0, 2)) {
+        if (Number(sub?.like || 0) >= 3) addNode(sub);
+      }
+    }
+  }
+  return added;
+}
+
+// ===== 直采通道 1：B站高赞热评抓取（优先复用登录态拉全量，未登录自动走独立浏览器真签名 WBI 突破 3 条限制） =====
 async function fetchBilibiliCommentsDirect(urlOrBvid: string, maxComments = 30, job?: CommentCrawlJob): Promise<{
   comments: CrawledCommentRow[];
   postTitle: string;
@@ -233,14 +290,19 @@ async function fetchBilibiliCommentsDirect(urlOrBvid: string, maxComments = 30, 
   }
   const bvid = bvMatch[1];
   const postUrl = `https://www.bilibili.com/video/${bvid}`;
-  pushLog(`B站免登录直连读取视频信息：${bvid}`, job);
+  pushLog(`B站读取视频信息与高赞热评：${bvid}`, job);
 
-  const headers = {
+  const baseHeaders: Record<string, string> = {
     'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 Chrome/134.0.0.0 Safari/537.36',
-    Referer: 'https://www.bilibili.com/',
+    Referer: postUrl,
   };
+  const sauBili = loadLatestSauPlatformCookies('bilibili');
+  if (sauBili.found && sauBili.cookies.length > 0) {
+    baseHeaders.Cookie = sauBili.cookies.map((c) => `${c.name}=${c.value}`).join('; ');
+  }
+
   const viewRes = (await fetch(`https://api.bilibili.com/x/web-interface/view?bvid=${encodeURIComponent(bvid)}`, {
-    headers,
+    headers: baseHeaders,
     signal: AbortSignal.timeout(12000),
   }).then((r) => r.json())) as { code?: number; data?: { aid?: number; title?: string } };
 
@@ -248,49 +310,95 @@ async function fetchBilibiliCommentsDirect(urlOrBvid: string, maxComments = 30, 
   const postTitle = (viewRes?.data?.title || bvid).trim();
   if (!aid) throw new Error('未能获取到该 B 站视频的 AID');
 
-  const out: CrawledCommentRow[] = [];
-  const seen = new Set<string>();
-  const pages = Math.min(3, Math.max(1, Math.ceil(maxComments / 20)));
+  const map = new Map<string, CrawledCommentRow>();
 
-  for (let pn = 1; pn <= pages; pn++) {
-    const rep = (await fetch(`https://api.bilibili.com/x/v2/reply?type=1&oid=${aid}&sort=2&ps=20&pn=${pn}`, {
-      headers,
-      signal: AbortSignal.timeout(12000),
-    }).then((r) => r.json())) as {
-      code?: number;
-      data?: {
-        replies?: Array<{
-          rpid_str?: string;
-          rpid?: number;
-          like?: number;
-          ctime?: number;
-          member?: { uname?: string };
-          content?: { message?: string };
-        }>;
-      };
-    };
-    const replies = rep?.data?.replies || [];
-    for (const r of replies) {
-      const id = String(r.rpid_str || r.rpid || '');
-      const text = (r.content?.message || '').trim();
-      if (!id || !text || seen.has(id)) continue;
-      seen.add(id);
-      out.push({
-        id,
-        author: (r.member?.uname || 'B站用户').trim(),
-        text: text.slice(0, 1000),
-        likes: Number(r.like || 0),
-        publishedAt: r.ctime ? new Date(r.ctime * 1000).toISOString() : null,
-        postTitle,
-        postUrl,
-      });
-      if (out.length >= maxComments) break;
+  // 1) 若已带 B站登录 Cookie，优先走官方 cursor 接口毫秒级拉取 20~30+ 热评
+  if (baseHeaders.Cookie) {
+    let nextCursor = 0;
+    for (let pageNo = 0; pageNo < 3 && map.size < maxComments; pageNo++) {
+      try {
+        const rep = (await fetch(
+          `https://api.bilibili.com/x/v2/reply/main?type=1&oid=${aid}&mode=3&next=${nextCursor}&ps=20`,
+          { headers: baseHeaders, signal: AbortSignal.timeout(12000) }
+        ).then((r) => r.json())) as { code?: number; data?: { cursor?: { next?: number; is_end?: boolean } } };
+        if (rep?.code !== 0) break;
+        const added = collectBilibiliRepliesFromPayload(rep, postTitle, postUrl, map);
+        const cursor = rep?.data?.cursor;
+        if (!added || cursor?.is_end || cursor?.next == null || cursor.next === nextCursor) break;
+        nextCursor = cursor.next;
+      } catch {
+        break;
+      }
     }
-    if (replies.length < 15 || out.length >= maxComments) break;
   }
 
-  out.sort((a, b) => b.likes - a.likes);
-  pushLog(`B站免登录直采成功：拉回 ${out.length} 条高赞热评`, job);
+  // 2) 若接口受匿名限制仅返回 <= 6 条，启动独立 B站浏览器让页面原生 WBI 签名拉出完整高赞热评
+  if (map.size < Math.min(12, maxComments)) {
+    try {
+      pushLog(`B站接口仅返回 ${map.size} 条，启动独立浏览器拦截完整热评区...`, job);
+      await withHeadlessContext(
+        'bilibili',
+        `comments:${bvid}`,
+        async (ctx) => {
+          const page = ctx.pages()[0] || (await ctx.newPage());
+          page.on('response', async (resp) => {
+            const u = resp.url();
+            if (!/api\.bilibili\.com\/x\/v2\/reply/i.test(u)) return;
+            try {
+              const txt = await resp.text();
+              if (!txt || !txt.startsWith('{')) return;
+              const j = JSON.parse(txt);
+              collectBilibiliRepliesFromPayload(j, postTitle, postUrl, map);
+            } catch {
+              // ignore non-json
+            }
+          });
+
+          await page.goto(postUrl, { waitUntil: 'domcontentloaded', timeout: 30000 });
+          await page.waitForTimeout(1800);
+
+          let staleRounds = 0;
+          for (let round = 0; round < 5 && map.size < maxComments; round++) {
+            const before = map.size;
+            await page
+              .evaluate((r) => {
+                window.scrollBy(0, r === 0 ? 1100 : 1400);
+              }, round)
+              .catch(() => {});
+            await page.waitForTimeout(1500);
+            if (map.size > before) {
+              staleRounds = 0;
+            } else {
+              staleRounds++;
+              if (staleRounds >= 2 && map.size >= 8) break;
+            }
+          }
+        },
+        { headless: true }
+      );
+    } catch (err) {
+      pushLog(`B站浏览器拦截热评降级提示：${(err as Error).message}`, job);
+    }
+  }
+
+  // 3) 兜底再补一次公开 /x/v2/reply，保证至少能拿到基础热评
+  if (map.size < 3) {
+    try {
+      const rep = await fetch(`https://api.bilibili.com/x/v2/reply?type=1&oid=${aid}&sort=2&ps=20&pn=1`, {
+        headers: baseHeaders,
+        signal: AbortSignal.timeout(12000),
+      }).then((r) => r.json());
+      collectBilibiliRepliesFromPayload(rep, postTitle, postUrl, map);
+    } catch {
+      // ignore
+    }
+  }
+
+  const out = Array.from(map.values())
+    .sort((a, b) => b.likes - a.likes)
+    .slice(0, maxComments);
+
+  pushLog(`B站热评抓取完成：拉回 ${out.length} 条真实高赞评论`, job);
   return { comments: out, postTitle, postUrl };
 }
 
@@ -351,20 +459,42 @@ async function fetchDouyinCommentsDirect(rawInput: string, maxComments = 30, job
               digg_count?: number;
               create_time?: number;
               user?: { nickname?: string };
+              reply_comment?: Array<{
+                cid?: string;
+                text?: string;
+                digg_count?: number;
+                create_time?: number;
+                user?: { nickname?: string };
+              }>;
             }>;
           };
           for (const c of j.comments || []) {
             const id = String(c.cid || '').trim();
             const text = (c.text || '').trim();
-            if (!id || !text || map.has(id)) continue;
-            map.set(id, {
-              id,
-              author: (c.user?.nickname || '抖音观众').trim(),
-              text: text.slice(0, 1000),
-              likes: Number(c.digg_count || 0),
-              publishedAt: c.create_time ? new Date(c.create_time * 1000).toISOString() : null,
-              postUrl: videoUrl,
-            });
+            if (id && text && !map.has(id)) {
+              map.set(id, {
+                id,
+                author: (c.user?.nickname || '抖音观众').trim(),
+                text: text.slice(0, 1000),
+                likes: Number(c.digg_count || 0),
+                publishedAt: c.create_time ? new Date(c.create_time * 1000).toISOString() : null,
+                postUrl: videoUrl,
+              });
+            }
+            for (const rc of c.reply_comment || []) {
+              const rid = String(rc.cid || '').trim();
+              const rtext = (rc.text || '').trim();
+              if (rid && rtext && !map.has(rid)) {
+                map.set(rid, {
+                  id: rid,
+                  author: (rc.user?.nickname || '抖音观众').trim(),
+                  text: rtext.slice(0, 1000),
+                  likes: Number(rc.digg_count || 0),
+                  publishedAt: rc.create_time ? new Date(rc.create_time * 1000).toISOString() : null,
+                  postUrl: videoUrl,
+                });
+              }
+            }
           }
         } catch {
           // ignore
@@ -374,19 +504,47 @@ async function fetchDouyinCommentsDirect(rawInput: string, maxComments = 30, job
       await page.goto(videoUrl, { waitUntil: 'domcontentloaded', timeout: 30000 });
       for (let i = 0; i < 12; i++) {
         await page.waitForTimeout(500);
-        if (map.size >= Math.min(maxComments, 15)) break;
+        if (map.size >= 10) break;
+        // 若进入页面后评论区被折叠，第 3 秒尝试轻点一次评论按钮展开
+        if (i === 5 && map.size === 0) {
+          await page
+            .evaluate(() => {
+              const btn = document.querySelector(
+                '[data-e2e="feed-comment-icon"], [data-e2e="video-player-comment-btn"]'
+              ) as HTMLElement | null;
+              if (btn) btn.click();
+            })
+            .catch(() => {});
+        }
       }
 
-      // 向下滚动评论区触发拉取更多高赞评论
-      if (map.size > 0 && map.size < maxComments) {
+      // 多轮滚动真实评论容器与页面主体，拉足 20~35 条高赞评论（连续 2 轮无新增自动收尾）
+      let staleRounds = 0;
+      for (let round = 0; round < 5 && map.size < maxComments; round++) {
+        const before = map.size;
         await page
           .evaluate(() => {
-            window.scrollBy(0, 900);
-            const list = document.querySelector('[data-e2e="comment-list"]');
-            if (list) list.scrollTop += 1200;
+            window.scrollBy(0, 1200);
+            const list = document.querySelector('[data-e2e="comment-list"]') as HTMLElement | null;
+            if (list) {
+              list.scrollTop += 1600;
+              let parent = list.parentElement;
+              for (let depth = 0; depth < 5 && parent; depth++) {
+                if (parent.scrollHeight > parent.clientHeight + 40) {
+                  parent.scrollTop += 1600;
+                }
+                parent = parent.parentElement;
+              }
+            }
           })
           .catch(() => {});
-        await page.waitForTimeout(2200);
+        await page.waitForTimeout(1400);
+        if (map.size > before) {
+          staleRounds = 0;
+        } else {
+          staleRounds++;
+          if (staleRounds >= 2) break;
+        }
       }
 
       const pageTitle = await page.title().catch(() => '');

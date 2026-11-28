@@ -31,14 +31,17 @@ import {
   analyzeContentR2,
   apiRequest,
   compareCreatorsRemix,
+  extractCommentTopics,
   fetchCreatorHistory,
   fetchCreatorsFeed,
   fmtNum,
   fmtTime,
   PLATFORM_LABELS,
+  saveCommentTopicToBoard,
 } from '../api';
 import type { DrawerTab } from '../components/ContentDrawer';
 import type {
+  CommentTopicIdeaItem,
   CreatorCopyDigest,
   CreatorsFeedResp,
   R2AnalysisPayload,
@@ -78,6 +81,7 @@ const HEAT_LEVEL_LABELS: Record<R2AnalysisPayload['heatLevel'], string> = {
 
 const VERTICAL_PLATFORMS = new Set(['douyin', 'kuaishou', 'xiaohongshu', 'wechat-channels']);
 const VIDEO_PLATFORMS = new Set(['douyin', 'bilibili', 'youtube', 'kuaishou', 'xiaohongshu', 'wechat-channels']);
+const COMMENT_SUPPORTED_PLATFORMS = new Set(['douyin', 'bilibili', 'kuaishou', 'xiaohongshu']);
 
 function isVideoPlatform(platform: string): boolean {
   return VIDEO_PLATFORMS.has(String(platform || '').trim().toLowerCase());
@@ -180,6 +184,14 @@ export function CreatorsPage({
   const [busyTranscribeId, setBusyTranscribeId] = useState<number | null>(null);
   const [busyDigestId, setBusyDigestId] = useState<number | null>(null);
   const [busyR2Id, setBusyR2Id] = useState<number | null>(null);
+  const [busyCommentTopicsId, setBusyCommentTopicsId] = useState<number | null>(null);
+  const [savingTopicId, setSavingTopicId] = useState<number | null>(null);
+  const [collapsedCommentTopicIds, setCollapsedCommentTopicIds] = useState<Record<number, boolean>>({});
+  const [batchCommentProgress, setBatchCommentProgress] = useState<{
+    done: number;
+    total: number;
+    currentTitle?: string;
+  } | null>(null);
   const [busyFetchHistoryId, setBusyFetchHistoryId] = useState<number | null>(null);
   const [batchProgress, setBatchProgress] = useState<{ done: number; total: number } | null>(null);
 
@@ -746,6 +758,127 @@ export function CreatorsPage({
     }
   };
 
+  // 单条视频一键扒评论区并总结选题（自动拉取真实热评 → 提炼选题 → 直接展示在卡片内）
+  const handleCrawlCommentTopics = async (item: TrackerVideoItem, force = false) => {
+    setBusyCommentTopicsId(item.id);
+    try {
+      const res = await extractCommentTopics(item.id, { autoCrawl: true, force });
+      patchItemInFeed(item.id, {
+        comment_count: res.commentsCount,
+        comment_topics_count: res.topics.length,
+        comment_topics: res.topics,
+      });
+      setCollapsedCommentTopicIds((prev) => ({ ...prev, [item.id]: false }));
+      if (res.commentsCount === 0 || res.topics.length === 0) {
+        onToast(res.message || '暂未抓到公开评论，可打开右侧详情检查或稍后重试');
+      } else {
+        onToast(`已从 ${res.commentsCount} 条真实评论里扒出 ${res.topics.length} 个选题！`);
+      }
+      if (item.is_read === 0) {
+        void apiRequest('/api/radar/creators/mark-read', {
+          method: 'POST',
+          body: JSON.stringify({ contentId: item.id }),
+        }).then(() => onRefreshBadge());
+      }
+    } catch (err) {
+      onToast((err as Error).message);
+    } finally {
+      setBusyCommentTopicsId(null);
+    }
+  };
+
+  // 批量串行扒取本页前 5 条未提取视频的评论区并逐条总结选题
+  const handleBatchCrawlCommentTopics = async () => {
+    const targets = items
+      .filter(
+        (it) =>
+          COMMENT_SUPPORTED_PLATFORMS.has(it.platform) &&
+          ((it.comment_topics?.length || 0) === 0 || it.comment_topics_count === 0)
+      )
+      .slice(0, 5);
+    if (targets.length === 0) {
+      onToast('当前页面支持抓评论的视频都已经提炼过评论选题了');
+      return;
+    }
+    setBatchCommentProgress({ done: 0, total: targets.length, currentTitle: targets[0].title });
+    let successCount = 0;
+    let totalTopics = 0;
+    for (let i = 0; i < targets.length; i++) {
+      const target = targets[i];
+      setBusyCommentTopicsId(target.id);
+      setBatchCommentProgress({ done: i, total: targets.length, currentTitle: target.title });
+      try {
+        const res = await extractCommentTopics(target.id, { autoCrawl: true, force: false });
+        patchItemInFeed(target.id, {
+          comment_count: res.commentsCount,
+          comment_topics_count: res.topics.length,
+          comment_topics: res.topics,
+        });
+        setCollapsedCommentTopicIds((prev) => ({ ...prev, [target.id]: false }));
+        if (res.topics.length > 0) {
+          successCount++;
+          totalTopics += res.topics.length;
+        }
+      } catch (err) {
+        onToast(`《${target.title.slice(0, 14)}》扒评论出错：${(err as Error).message}`);
+      } finally {
+        setBatchCommentProgress({ done: i + 1, total: targets.length, currentTitle: target.title });
+      }
+    }
+    setBusyCommentTopicsId(null);
+    setBatchCommentProgress(null);
+    if (successCount > 0) {
+      onToast(`批量扒评论完成：成功为 ${successCount} 条视频总结出 ${totalTopics} 个评论区选题！`);
+    } else {
+      onToast('本批视频暂未抓到足够评论，可点单条卡片重试或先登录对应平台');
+    }
+  };
+
+  // 直接在视频卡片里把评论区总结出的选题一键存入「简易收藏本」
+  const handleSaveInlineTopic = async (contentId: number, topicId: number) => {
+    setSavingTopicId(topicId);
+    try {
+      const res = await saveCommentTopicToBoard(topicId);
+      setFeed((prev) => {
+        if (!prev) return prev;
+        const patchTopics = (list: TrackerVideoItem[]) =>
+          list.map((x) => {
+            if (x.id !== contentId) return x;
+            return {
+              ...x,
+              comment_topics: (x.comment_topics || []).map((t: CommentTopicIdeaItem) =>
+                t.id === topicId ? { ...t, savedBoardId: res.boardItem.id } : t
+              ),
+            };
+          });
+        return {
+          ...prev,
+          items: patchTopics(prev.items),
+          todayUpdates: { ...prev.todayUpdates, items: patchTopics(prev.todayUpdates.items) },
+          todayLeaderboard: {
+            ...prev.todayLeaderboard,
+            items: prev.todayLeaderboard.items.map((x) =>
+              x.id === contentId
+                ? {
+                    ...x,
+                    comment_topics: (x.comment_topics || []).map((t: CommentTopicIdeaItem) =>
+                      t.id === topicId ? { ...t, savedBoardId: res.boardItem.id } : t
+                    ),
+                  }
+                : x
+            ),
+          },
+        };
+      });
+      onToast('已存入选题库，可在左侧「简易收藏本」查看');
+      onRefreshBadge();
+    } catch (err) {
+      onToast((err as Error).message);
+    } finally {
+      setSavingTopicId(null);
+    }
+  };
+
   const handleToggleStar = async (item: TrackerVideoItem) => {
     try {
       if (item.saved_board_id) {
@@ -776,6 +909,11 @@ export function CreatorsPage({
   const items = feed?.items || [];
   const activeCreator = selectedCreatorId ? creators.find((c) => c.id === selectedCreatorId) || null : null;
   const unsummarizedCount = items.filter((it) => !it.copy_digest).length;
+  const uncrawledCommentCount = items.filter(
+    (it) =>
+      COMMENT_SUPPORTED_PLATFORMS.has(it.platform) &&
+      ((it.comment_topics?.length || 0) === 0 || it.comment_topics_count === 0)
+  ).length;
   const totalTodayNew = creators.reduce((sum, c) => sum + (c.today_new_count || 0), 0);
 
   return (
@@ -1191,6 +1329,22 @@ export function CreatorsPage({
                       : 'AI 对比哪条最适合二创'}
                 </button>
 
+                {(uncrawledCommentCount > 0 || batchCommentProgress) && (
+                  <button
+                    type="button"
+                    data-testid="btn-batch-comment-topics"
+                    className="btn btn-sm"
+                    style={{ background: '#fffbeb', color: '#b45309', borderColor: '#fde68a' }}
+                    disabled={Boolean(batchCommentProgress) || busyCommentTopicsId !== null}
+                    onClick={() => void handleBatchCrawlCommentTopics()}
+                  >
+                    <MessageSquareText size={13} />
+                    {batchCommentProgress
+                      ? `扒评论找选题 ${batchCommentProgress.done}/${batchCommentProgress.total}...`
+                      : `批量扒评论找选题 (${Math.min(5, uncrawledCommentCount)}条)`}
+                  </button>
+                )}
+
                 {(unsummarizedCount > 0 || batchProgress) && (
                   <button
                     type="button"
@@ -1417,6 +1571,10 @@ export function CreatorsPage({
                     const r2 = item.r2_analysis || null;
                     const isDigesting = busyDigestId === item.id;
                     const isAnalyzingR2 = busyR2Id === item.id;
+                    const isCrawlingComments = busyCommentTopicsId === item.id;
+                    const canCrawlComments = COMMENT_SUPPORTED_PLATFORMS.has(item.platform);
+                    const inlineTopics = item.comment_topics || [];
+                    const isTopicsCollapsed = Boolean(collapsedCommentTopicIds[item.id]);
                     const isCompareChecked = selectedCompareIds.includes(item.id);
                     const canUpgradeR2 = Boolean(hasTranscript && r2 && r2.basisSource !== '口播全文+真实数据');
 
@@ -1559,6 +1717,94 @@ export function CreatorsPage({
                         </div>
                       </div>
                     ) : null;
+
+                    const commentTopicsBlock =
+                      inlineTopics.length > 0 && !isTopicsCollapsed ? (
+                        <div className="comment-topics-inline" data-testid={`comment-topics-inline-${item.id}`}>
+                          <div className="comment-topics-inline-head">
+                            <div style={{ display: 'flex', alignItems: 'center', gap: 7, flexWrap: 'wrap' }}>
+                              <span className="comment-topics-pill">
+                                <MessageSquareText size={12} /> 评论区扒出的选题（{inlineTopics.length} 个）
+                              </span>
+                              <span style={{ fontSize: 11.5, color: '#92400e' }}>
+                                基于 {item.comment_count} 条真实热评总结
+                              </span>
+                            </div>
+                            <div style={{ display: 'flex', alignItems: 'center', gap: 6, flexWrap: 'wrap' }}>
+                              <button
+                                type="button"
+                                className="btn btn-sm"
+                                style={{ padding: '2px 8px', fontSize: 11.5 }}
+                                onClick={() => onOpenContent(item.id, 'comments', item.saved_board_id)}
+                              >
+                                看全部 {item.comment_count} 条原评
+                              </button>
+                              <button
+                                type="button"
+                                className="icon-ghost-btn"
+                                title="重新扒评论并更新选题"
+                                disabled={isCrawlingComments}
+                                onClick={() => void handleCrawlCommentTopics(item, true)}
+                              >
+                                <RotateCcw size={13} />
+                              </button>
+                            </div>
+                          </div>
+
+                          <div className="comment-topics-grid">
+                            {inlineTopics.map((tp, idx) => {
+                              const isSaved = Boolean(tp.savedBoardId);
+                              const isSaving = savingTopicId === tp.id;
+                              return (
+                                <div key={tp.id} className="comment-topic-mini-card" data-testid={`inline-topic-${tp.id}`}>
+                                  <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'flex-start', gap: 6 }}>
+                                    <div style={{ display: 'flex', alignItems: 'flex-start', gap: 6, minWidth: 0 }}>
+                                      <span className="comment-topic-idx">{idx + 1}</span>
+                                      <div style={{ fontWeight: 700, fontSize: 13, color: '#0f172a', lineHeight: 1.4 }}>
+                                        {tp.creationIdeaTitle || tp.topic}
+                                      </div>
+                                    </div>
+                                    <button
+                                      type="button"
+                                      data-testid={`inline-save-topic-${tp.id}`}
+                                      className={`btn btn-sm ${isSaved ? 'btn-star-active' : 'btn-primary'}`}
+                                      style={{ padding: '2px 8px', fontSize: 11, flexShrink: 0 }}
+                                      disabled={isSaved || isSaving}
+                                      onClick={() => void handleSaveInlineTopic(item.id, tp.id)}
+                                    >
+                                      <Star size={11} fill={isSaved ? 'currentColor' : 'none'} />
+                                      {isSaving ? '存入中' : isSaved ? '已存选题' : '存选题'}
+                                    </button>
+                                  </div>
+
+                                  <div style={{ display: 'flex', gap: 6, flexWrap: 'wrap', marginTop: 5 }}>
+                                    <span className="badge badge-amber" style={{ fontSize: 11 }}>
+                                      焦点：{tp.topic}
+                                    </span>
+                                    {tp.heatNote && (
+                                      <span className="badge badge-gray" style={{ fontSize: 11 }}>
+                                        {tp.heatNote}
+                                      </span>
+                                    )}
+                                  </div>
+
+                                  {tp.creationAngle && (
+                                    <div style={{ fontSize: 12, color: '#334155', marginTop: 5, lineHeight: 1.5 }}>
+                                      <strong>怎么拍：</strong>{tp.creationAngle}
+                                    </div>
+                                  )}
+
+                                  {tp.evidenceComments && tp.evidenceComments.length > 0 && (
+                                    <div className="comment-topic-quote">
+                                      观众原评：“{tp.evidenceComments[0]}”
+                                    </div>
+                                  )}
+                                </div>
+                              );
+                            })}
+                          </div>
+                        </div>
+                      ) : null;
 
                     return (
                       <div
@@ -1762,15 +2008,36 @@ export function CreatorsPage({
                                 </button>
                               )}
 
-                              <button
-                                type="button"
-                                data-testid={`btn-open-comments-${item.id}`}
-                                className="btn btn-sm"
-                                onClick={() => onOpenContent(item.id, 'comments', item.saved_board_id)}
-                              >
-                                <MessageSquareText size={13} />
-                                评论话题 ({item.comment_count}/{item.comment_topics_count})
-                              </button>
+                              {canCrawlComments &&
+                                (inlineTopics.length > 0 ? (
+                                  <button
+                                    type="button"
+                                    data-testid={`btn-open-comments-${item.id}`}
+                                    className="btn btn-sm"
+                                    style={{ background: '#fffbeb', color: '#b45309', borderColor: '#fde68a' }}
+                                    onClick={() =>
+                                      setCollapsedCommentTopicIds((prev) => ({ ...prev, [item.id]: !prev[item.id] }))
+                                    }
+                                  >
+                                    <MessageSquareText size={13} />
+                                    {isTopicsCollapsed
+                                      ? `展开评论选题 (${inlineTopics.length}个 · ${item.comment_count}评)`
+                                      : `评论选题 (${inlineTopics.length}个 · ${item.comment_count}评)`}
+                                    {isTopicsCollapsed ? <ChevronDown size={13} /> : <ChevronUp size={13} />}
+                                  </button>
+                                ) : (
+                                  <button
+                                    type="button"
+                                    data-testid={`btn-open-comments-${item.id}`}
+                                    className="btn btn-sm"
+                                    style={{ background: '#fffbeb', color: '#b45309', borderColor: '#fde68a' }}
+                                    disabled={isCrawlingComments || Boolean(batchCommentProgress)}
+                                    onClick={() => void handleCrawlCommentTopics(item, false)}
+                                  >
+                                    <MessageSquareText size={13} />
+                                    {isCrawlingComments ? '正在扒评论提选题...' : '扒评论找选题'}
+                                  </button>
+                                ))}
 
                               <button
                                 type="button"
@@ -1850,6 +2117,9 @@ export function CreatorsPage({
 
                         {/* 横屏与无封面源：1234 归纳铺满卡片下方 */}
                         {orientation !== 'vertical' && digestBlock}
+
+                        {/* 每个视频对应的评论区选题总结卡片（直接内联展示） */}
+                        {commentTopicsBlock}
 
                         {/* R2 三维 AI 分析结果卡片 */}
                         {r2Block}

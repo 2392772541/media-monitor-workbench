@@ -660,6 +660,24 @@ export function getContentCommentTopics(contentId: number): CommentTopicIdeaItem
   return rows.map(mapTopicRow);
 }
 
+// 批量查询一批视频已提炼好的评论区选题，用于对标博主列表页直接展示
+export function getCommentTopicsMapForContents(contentIds: number[]): Record<string, CommentTopicIdeaItem[]> {
+  const cleanIds = Array.from(new Set(contentIds.filter((id) => Number.isInteger(id) && id > 0)));
+  if (cleanIds.length === 0) return {};
+  const db = getDb();
+  const placeholders = cleanIds.map(() => '?').join(',');
+  const rows = db
+    .prepare(`SELECT * FROM comment_topic_ideas WHERE content_id IN (${placeholders}) ORDER BY content_id ASC, id ASC`)
+    .all(...cleanIds) as Array<Record<string, unknown>>;
+  const map: Record<string, CommentTopicIdeaItem[]> = {};
+  for (const row of rows) {
+    const key = String(row.content_id);
+    if (!map[key]) map[key] = [];
+    map[key].push(mapTopicRow(row));
+  }
+  return map;
+}
+
 // 校验每条引用评论必须真实存在于 content_comments（子串或 >=6 字重叠），防止大模型编造假评论
 function groundEvidenceComments(rawEvidence: unknown, realComments: RealCommentRow[]): string[] {
   const candidates = Array.isArray(rawEvidence) ? rawEvidence.map((x) => String(x || '').trim()).filter(Boolean) : [];
@@ -749,11 +767,18 @@ export async function extractCommentTopicsAndIdeas(
   };
 
   let { total, rows: realComments } = queryComments();
-  if (total === 0 && opts.autoCrawl === true) {
+  let crawlMessage: string | undefined;
+  let crawledNow = false;
+  // 若尚无评论，或用户主动重扒且之前仅抓到极少量（如旧 B站接口限流 3 条），自动重抓一次热评
+  if (opts.autoCrawl === true && (total === 0 || (opts.force === true && total < 10))) {
     try {
-      await fetchCommentsWithMediaCrawler(contentId);
-    } catch {
-      // 抓取失败不抛异常，下面按真实 0 条评论优雅返回
+      const crawlRes = await fetchCommentsWithMediaCrawler(contentId);
+      crawledNow = true;
+      if (!crawlRes.ok && crawlRes.message) {
+        crawlMessage = crawlRes.message;
+      }
+    } catch (err) {
+      crawlMessage = (err as Error).message;
     }
     const after = queryComments();
     total = after.total;
@@ -767,11 +792,11 @@ export async function extractCommentTopicsAndIdeas(
       contentId,
       commentsCount: 0,
       topics: [],
-      message: '暂无已采集的真实评论，请先抓取真实评论后再提炼话题',
+      message: crawlMessage || '暂无已采集的真实评论，请先抓取真实评论后再提炼话题',
     };
   }
 
-  if (!opts.force) {
+  if (!opts.force && !crawledNow) {
     const existing = db
       .prepare('SELECT * FROM comment_topic_ideas WHERE content_id = ? ORDER BY id ASC')
       .all(contentId) as Array<Record<string, unknown>>;

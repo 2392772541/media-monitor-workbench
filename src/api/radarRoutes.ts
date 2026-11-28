@@ -11,6 +11,7 @@ import {
   compareContentRemixSuitability,
   computeContentHeatScore,
   extractCommentTopicsAndIdeas,
+  getCommentTopicsMapForContents,
   getContentCommentTopics,
   getShanghaiDayWindow,
   mapR2RowToPayload,
@@ -129,7 +130,11 @@ const CREATOR_FEED_SELECT = `
   LEFT JOIN content_r2_analyses r2 ON r2.content_id = c.id
 `;
 
-function enrichCreatorFeedRow(row: Record<string, unknown>, digestMap: Record<string, unknown>): Record<string, unknown> {
+function enrichCreatorFeedRow(
+  row: Record<string, unknown>,
+  digestMap: Record<string, unknown>,
+  commentTopicsMap: Record<string, unknown[]> = {}
+): Record<string, unknown> {
   const {
     r2_what_it_says,
     r2_heat_verdict,
@@ -159,13 +164,15 @@ function enrichCreatorFeedRow(row: Record<string, unknown>, digestMap: Record<st
     : null;
 
   const asrPipe = getContentAsrPipelineState(Number(row.id));
+  const inlineCommentTopics = commentTopicsMap[String(row.id)] || [];
 
   return {
     ...rest,
     transcript_chars: Number(row.transcript_chars || 0),
     transcript_preview: transcriptPreview,
     comment_count: Number(row.comment_count || 0),
-    comment_topics_count: Number(row.comment_topics_count || 0),
+    comment_topics_count: Number(row.comment_topics_count || inlineCommentTopics.length || 0),
+    comment_topics: inlineCommentTopics,
     pipeline_stage: asrPipe.stage,
     queue_position: asrPipe.queuePosition,
     r2_analysis: r2Analysis,
@@ -1862,10 +1869,10 @@ ${script.slice(0, 4500)}
       `)
       .all(todayStartUtcIso, todayEndUtcIso) as Array<Record<string, unknown>>;
 
-    let todayUpdatesItems: Array<Record<string, unknown>>;
+    let todayRawRows: Array<Record<string, unknown>>;
     const hasTodayNew = todayRows.length > 0;
     if (hasTodayNew) {
-      todayUpdatesItems = todayRows.map((r) => enrichCreatorFeedRow(r, digestMap));
+      todayRawRows = todayRows;
     } else {
       const latestPerCreatorRows = db
         .prepare(`
@@ -1882,18 +1889,11 @@ ${script.slice(0, 4500)}
           LIMIT 20
         `)
         .all() as Array<Record<string, unknown>>;
-      todayUpdatesItems = latestPerCreatorRows.map((r) => {
+      todayRawRows = latestPerCreatorRows.map((r) => {
         const { rn: _rn, ...clean } = r;
-        return enrichCreatorFeedRow(clean, digestMap);
+        return clean;
       });
     }
-
-    const todayUpdates = {
-      dateLocal,
-      hasTodayNew,
-      todayCount: todayRows.length,
-      items: todayUpdatesItems,
-    };
 
     // R1：当日新发热度排行榜（当日 -> 近3天 -> 近7天 -> 历史高热兜底，兼容抖音 views=null）
     const lbLadder: Array<{
@@ -1950,48 +1950,6 @@ ${script.slice(0, 4500)}
         break;
       }
     }
-
-    const lbScored = lbCandidates
-      .map((row) => {
-        const enriched = enrichCreatorFeedRow(row, digestMap);
-        const { heatScore, heatBasis } = computeContentHeatScore({
-          latest_views: row.latest_views as number | null,
-          latest_likes: row.latest_likes as number | null,
-          latest_comments: row.latest_comments as number | null,
-          latest_favorites: row.latest_favorites as number | null,
-          latest_shares: row.latest_shares as number | null,
-          breakout_ratio: row.breakout_ratio as number | null,
-          breakout_score: row.breakout_score as number | null,
-        });
-        return { enriched, heatScore, heatBasis };
-      })
-      .sort((a, b) => {
-        if (b.heatScore !== a.heatScore) return b.heatScore - a.heatScore;
-        const bRatio = Number(b.enriched.breakout_ratio || 0);
-        const aRatio = Number(a.enriched.breakout_ratio || 0);
-        if (bRatio !== aRatio) return bRatio - aRatio;
-        const bLikes = Number(b.enriched.latest_likes || 0);
-        const aLikes = Number(a.enriched.latest_likes || 0);
-        if (bLikes !== aLikes) return bLikes - aLikes;
-        const bPub = Date.parse(String(b.enriched.published_at || b.enriched.discovered_at || '')) || 0;
-        const aPub = Date.parse(String(a.enriched.published_at || a.enriched.discovered_at || '')) || 0;
-        if (bPub !== aPub) return bPub - aPub;
-        return Number(b.enriched.id) - Number(a.enriched.id);
-      })
-      .slice(0, 10)
-      .map((entry, idx) => ({
-        ...entry.enriched,
-        rank: idx + 1,
-        heatScore: entry.heatScore,
-        heatBasis: entry.heatBasis,
-      }));
-
-    const todayLeaderboard = {
-      dateLocal,
-      isFallback: lbMeta.isFallback,
-      fallbackLabel: lbMeta.fallbackLabel,
-      items: lbScored,
-    };
 
     // R3：分博主历史作品列表（严格按发布时间从新到旧排序 + offset/limit 分页 + 搜索）
     const where: string[] = [sourceFilterSql];
@@ -2056,7 +2014,63 @@ ${script.slice(0, 4500)}
       if (items.length > 0) fallbackShown = true;
     }
 
-    const enrichedItems = items.map((it) => enrichCreatorFeedRow(it, digestMap));
+    const allVisibleIds = [
+      ...todayRawRows.map((r) => Number(r.id)),
+      ...lbCandidates.map((r) => Number(r.id)),
+      ...items.map((r) => Number(r.id)),
+    ];
+    const commentTopicsMap = getCommentTopicsMapForContents(allVisibleIds);
+
+    const todayUpdates = {
+      dateLocal,
+      hasTodayNew,
+      todayCount: todayRows.length,
+      items: todayRawRows.map((r) => enrichCreatorFeedRow(r, digestMap, commentTopicsMap)),
+    };
+
+    const lbScored = lbCandidates
+      .map((row) => {
+        const enriched = enrichCreatorFeedRow(row, digestMap, commentTopicsMap);
+        const { heatScore, heatBasis } = computeContentHeatScore({
+          latest_views: row.latest_views as number | null,
+          latest_likes: row.latest_likes as number | null,
+          latest_comments: row.latest_comments as number | null,
+          latest_favorites: row.latest_favorites as number | null,
+          latest_shares: row.latest_shares as number | null,
+          breakout_ratio: row.breakout_ratio as number | null,
+          breakout_score: row.breakout_score as number | null,
+        });
+        return { enriched, heatScore, heatBasis };
+      })
+      .sort((a, b) => {
+        if (b.heatScore !== a.heatScore) return b.heatScore - a.heatScore;
+        const bRatio = Number(b.enriched.breakout_ratio || 0);
+        const aRatio = Number(a.enriched.breakout_ratio || 0);
+        if (bRatio !== aRatio) return bRatio - aRatio;
+        const bLikes = Number(b.enriched.latest_likes || 0);
+        const aLikes = Number(a.enriched.latest_likes || 0);
+        if (bLikes !== aLikes) return bLikes - aLikes;
+        const bPub = Date.parse(String(b.enriched.published_at || b.enriched.discovered_at || '')) || 0;
+        const aPub = Date.parse(String(a.enriched.published_at || a.enriched.discovered_at || '')) || 0;
+        if (bPub !== aPub) return bPub - aPub;
+        return Number(b.enriched.id) - Number(a.enriched.id);
+      })
+      .slice(0, 10)
+      .map((entry, idx) => ({
+        ...entry.enriched,
+        rank: idx + 1,
+        heatScore: entry.heatScore,
+        heatBasis: entry.heatBasis,
+      }));
+
+    const todayLeaderboard = {
+      dateLocal,
+      isFallback: lbMeta.isFallback,
+      fallbackLabel: lbMeta.fallbackLabel,
+      items: lbScored,
+    };
+
+    const enrichedItems = items.map((it) => enrichCreatorFeedRow(it, digestMap, commentTopicsMap));
     const hasMore = !fallbackShown && offset + enrichedItems.length < total;
 
     const intervalRow = db.prepare("SELECT value FROM app_settings WHERE key = 'default_creator_interval'").get() as
