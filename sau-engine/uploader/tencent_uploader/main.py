@@ -186,7 +186,7 @@ class TencentVideo(object):
         )
         browser = await playwright.chromium.launch(**launch_options)
         # 创建一个浏览器上下文，使用指定的 cookie 文件
-        context = await browser.new_context(storage_state=f"{self.account_file}")
+        context = await browser.new_context(storage_state=f"{self.account_file}", bypass_csp=True)
         context = await set_init_script(context)
 
         # 创建一个新的页面

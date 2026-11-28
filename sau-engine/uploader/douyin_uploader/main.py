@@ -4,6 +4,7 @@ from datetime import datetime
 import asyncio
 import inspect
 import os
+import re
 from pathlib import Path
 
 from patchright.async_api import Page
@@ -599,127 +600,328 @@ class DouYinVideo(DouYinBaseUploader):
             return
 
         douyin_logger.info(_msg("🏃", "小人正在设置视频封面"))
-        await page.click('text="选择封面"')
-        cover_locator_str = 'div[id*="creator-content-modal"]'
-        cover_locator = page.locator(cover_locator_str)
-        await page.wait_for_selector(cover_locator_str)
+        logs_dir = Path(__file__).resolve().parents[2] / "logs"
+        logs_dir.mkdir(parents=True, exist_ok=True)
+        try:
+            # 2026 新版抖音发布页直接并排显示「竖封面3:4」(第1个选择封面) 与「横封面4:3」(第2个选择封面)
+            async def _upload_single_cover(cover_path: str, prefer_portrait: bool):
+                clicked_trigger = False
+                select_btns = page.get_by_text("选择封面", exact=True)
+                try:
+                    btn_count = await select_btns.count()
+                    if btn_count >= 2:
+                        target_btn = select_btns.nth(0) if prefer_portrait else select_btns.nth(1)
+                        if await target_btn.is_visible():
+                            await target_btn.click()
+                            clicked_trigger = True
+                            douyin_logger.info(_msg("🖼️", f"已点击抖音{'竖封面3:4' if prefer_portrait else '横封面4:3'}入口"))
+                    elif btn_count == 1 and await select_btns.first.is_visible():
+                        await select_btns.first.click()
+                        clicked_trigger = True
+                        douyin_logger.info(_msg("🖼️", "已点击抖音「选择封面」入口"))
+                except Exception:
+                    pass
 
-        upload_input = cover_locator.locator("div[class^='semi-upload upload'] >> input.semi-upload-hidden-input")
+                if not clicked_trigger:
+                    for trigger_text in ("设置竖封面", "选择封面", "编辑封面", "修改封面", "上传封面"):
+                        btn = page.get_by_text(trigger_text, exact=False).first
+                        try:
+                            if await btn.count() and await btn.is_visible():
+                                await btn.click()
+                                clicked_trigger = True
+                                douyin_logger.info(_msg("🖼️", f"已点击封面入口: {trigger_text}"))
+                                break
+                        except Exception:
+                            continue
+                if not clicked_trigger:
+                    await page.click('text="选择封面"', timeout=15000)
 
-        if self.thumbnail_landscape_path:
-            await page.wait_for_timeout(1000)
-            await upload_input.set_input_files(self.thumbnail_landscape_path)
-            await page.wait_for_timeout(2000)
-            douyin_logger.info(_msg("🖼️", "横版封面上传完成"))
+                await page.wait_for_timeout(1200)
+                cover_locator = None
+                for modal_sel in ('div[id*="creator-content-modal"]', '.semi-modal-content', '[role="dialog"]'):
+                    loc = page.locator(modal_sel).last
+                    try:
+                        if await loc.count() and await loc.is_visible():
+                            cover_locator = loc
+                            break
+                    except Exception:
+                        continue
+                if cover_locator is None:
+                    await page.wait_for_selector('div[id*="creator-content-modal"], .semi-modal-content, [role="dialog"]', timeout=15000)
+                    cover_locator = page.locator('div[id*="creator-content-modal"], .semi-modal-content, [role="dialog"]').last
 
-        if self.thumbnail_portrait_path:
-            await cover_locator.locator("div[class*='steps'] div").nth(1).click()
-            await page.wait_for_timeout(1000)
-            await upload_input.set_input_files(self.thumbnail_portrait_path)
-            await page.wait_for_timeout(2000)
-            douyin_logger.info(_msg("🖼️", "竖版封面上传完成"))
+                # 查找真正的「上传封面」文件输入框（避开左侧 AI 封面生成参考图框；已存在时不再误点弹窗按钮）
+                upload_input = None
+                for inp_sel in (
+                    "div[class^='semi-upload upload'] input.semi-upload-hidden-input",
+                    "div[class*='semi-upload'][class*='upload-'] input.semi-upload-hidden-input",
+                    "div[class^='semi-upload upload'] input[type='file']",
+                ):
+                    loc = cover_locator.locator(inp_sel).first
+                    try:
+                        if await loc.count():
+                            upload_input = loc
+                            break
+                    except Exception:
+                        continue
 
-        await cover_locator.locator('button:visible:has-text("完成")').click()
-        douyin_logger.info(_msg("🥳", "视频封面设置完成"))
-        await page.wait_for_selector("div.extractFooter", state="detached")
+                if upload_input is None:
+                    for tab_text in ("上传封面", "本地上传", "上传图片"):
+                        tab = cover_locator.get_by_text(tab_text, exact=False).first
+                        try:
+                            if await tab.count() and await tab.is_visible():
+                                await tab.click()
+                                await page.wait_for_timeout(800)
+                                break
+                        except Exception:
+                            continue
+                    for inp_sel in (
+                        "div[class^='semi-upload upload'] input.semi-upload-hidden-input",
+                        'input[type="file"][accept*="image"]',
+                        "input.semi-upload-hidden-input",
+                        'input[type="file"]',
+                    ):
+                        loc = cover_locator.locator(inp_sel).first
+                        try:
+                            if await loc.count():
+                                upload_input = loc
+                                break
+                        except Exception:
+                            continue
+                if upload_input is None:
+                    upload_input = page.locator("div[class^='semi-upload upload'] input.semi-upload-hidden-input").first
+                    if not await upload_input.count():
+                        upload_input = page.locator('input[type="file"][accept*="image"]').last
+
+                await page.wait_for_timeout(600)
+                await upload_input.set_input_files(cover_path)
+                await page.wait_for_timeout(3000)
+                douyin_logger.info(_msg("🖼️", f"{'竖版' if prefer_portrait else '横版'}封面图片已注入弹窗"))
+
+                # 若存在「下一步」按钮先点击
+                next_btn = cover_locator.locator('button:visible:has-text("下一步")').first
+                try:
+                    if await next_btn.count() and await next_btn.is_visible():
+                        await next_btn.click()
+                        await page.wait_for_timeout(1200)
+                except Exception:
+                    pass
+
+                done_re = re.compile(r"^\s*(完\s*成|确\s*定|确\s*认)\s*$")
+                done_clicked = False
+                for scope in (cover_locator, page):
+                    for loc in (
+                        scope.locator("button").filter(has_text=done_re),
+                        scope.get_by_role("button", name=done_re),
+                    ):
+                        try:
+                            cnt = await loc.count()
+                            for idx in range(cnt - 1, -1, -1):
+                                done_btn = loc.nth(idx)
+                                if await done_btn.is_visible():
+                                    await done_btn.click()
+                                    done_clicked = True
+                                    break
+                            if done_clicked:
+                                break
+                        except Exception:
+                            continue
+                    if done_clicked:
+                        break
+                if not done_clicked:
+                    raise RuntimeError("抖音封面弹窗未找到可见的「完成/确定」按钮")
+
+                # 2026 新版抖音在仅设置竖封面点「完成」后，会弹出「设置横封面获更多流量」二级弹窗，需点击「暂不设置」关闭
+                await page.wait_for_timeout(1200)
+                for skip_txt in ("暂不设置", "跳过", "稍后设置"):
+                    skip_btn = page.get_by_role("button", name=skip_txt, exact=False).first
+                    try:
+                        if await skip_btn.count() and await skip_btn.is_visible():
+                            await skip_btn.click()
+                            douyin_logger.info(_msg("🖼️", f"已关闭横封面引导弹窗: {skip_txt}"))
+                            await page.wait_for_timeout(1000)
+                            break
+                    except Exception:
+                        pass
+                    skip_alt = page.get_by_text(skip_txt, exact=True).first
+                    try:
+                        if await skip_alt.count() and await skip_alt.is_visible():
+                            await skip_alt.click()
+                            douyin_logger.info(_msg("🖼️", f"已关闭横封面引导弹窗: {skip_txt}"))
+                            await page.wait_for_timeout(1000)
+                            break
+                    except Exception:
+                        pass
+
+                try:
+                    await cover_locator.wait_for(state="hidden", timeout=15000)
+                except Exception:
+                    try:
+                        await page.wait_for_selector("div.extractFooter", state="detached", timeout=8000)
+                    except Exception:
+                        await page.wait_for_timeout(1500)
+
+            if self.thumbnail_portrait_path:
+                await _upload_single_cover(self.thumbnail_portrait_path, prefer_portrait=True)
+            if self.thumbnail_landscape_path:
+                await _upload_single_cover(self.thumbnail_landscape_path, prefer_portrait=False)
+            douyin_logger.info(_msg("🥳", "视频封面设置完成"))
+        except Exception as exc:
+            shot_path = logs_dir / f"debug_douyin_cover_{int(datetime.now().timestamp())}.png"
+            try:
+                await page.screenshot(path=str(shot_path), full_page=True)
+                douyin_logger.error(_msg("📸", f"抖音设置封面异常，已保存诊断截图: {shot_path}"))
+            except Exception:
+                pass
+            raise RuntimeError(f"抖音设置自定义封面失败: {exc}") from exc
 
     async def upload(self, playwright: Playwright) -> None:
         douyin_logger.info(_msg("🧍", "小人先检查 cookie、视频文件、封面和发布时间"))
         await self.validate_upload_args()
         douyin_logger.info(_msg("🥳", "上传前检查通过"))
 
-        browser = await playwright.chromium.launch(headless=self.headless, channel="chrome")
+        browser = await playwright.chromium.launch(**_douyin_launch_kwargs(headless=self.headless))
         context = await browser.new_context(
             storage_state=f"{self.account_file}",
             permissions=["geolocation"],
+            viewport={"width": 1440, "height": 900},
+            bypass_csp=True,
         )
         context = await set_init_script(context)
+        logs_dir = Path(__file__).resolve().parents[2] / "logs"
+        logs_dir.mkdir(parents=True, exist_ok=True)
 
-        page = await context.new_page()
-        await page.goto("https://creator.douyin.com/creator-micro/content/upload")
-        douyin_logger.info(_msg("🏃", f"小人开始搬运视频: {self.title}.mp4"))
-        douyin_logger.info(_msg("🧭", "小人正在赶往上传主页"))
-        await page.wait_for_url("https://creator.douyin.com/creator-micro/content/upload")
-        await page.locator("div[class^='container'] input").set_input_files(self.file_path)
+        try:
+            page = await context.new_page()
+            await page.goto("https://creator.douyin.com/creator-micro/content/upload", wait_until="domcontentloaded", timeout=30000)
+            douyin_logger.info(_msg("🏃", f"小人开始搬运视频: {self.title}.mp4"))
+            douyin_logger.info(_msg("🧭", "小人正在赶往上传主页"))
+            await page.wait_for_url("**/creator-micro/content/upload**", timeout=20000)
+            await page.locator("div[class^='container'] input").set_input_files(self.file_path)
 
-        while True:
-            try:
-                await page.wait_for_url(
-                    "https://creator.douyin.com/creator-micro/content/publish?enter_from=publish_page",
-                    timeout=3000,
-                )
-                douyin_logger.info(_msg("🥳", "已经进入 version_1 发布页面"))
-                break
-            except Exception:
-                try:
-                    await page.wait_for_url(
-                        "https://creator.douyin.com/creator-micro/content/post/video?enter_from=publish_page",
-                        timeout=3000,
-                    )
-                    douyin_logger.info(_msg("🥳", "已经进入 version_2 发布页面"))
+            enter_deadline = asyncio.get_running_loop().time() + 90
+            while True:
+                cur_url = page.url or ""
+                if "/creator-micro/content/publish" in cur_url or "/creator-micro/content/post/video" in cur_url:
+                    douyin_logger.info(_msg("🥳", f"已经进入抖音视频发布页面: {cur_url}"))
                     break
-                except Exception:
-                    douyin_logger.debug(_msg("🧍", "还没进到视频发布页面，小人继续等一会"))
-                    await asyncio.sleep(0.5)
-
-        await asyncio.sleep(1)
-        douyin_logger.info(_msg("✍️", "小人开始填标题、描述和话题"))
-        await self.fill_title_and_description(page, self.title, self.desc or self.title, self.tags)
-        douyin_logger.info(_msg("🏷️", f"小人一共贴了 {len(self.tags or [])} 个话题"))
-
-        while True:
-            try:
-                number = await page.locator('[class^="long-card"] div:has-text("重新上传")').count()
-                if number > 0:
-                    douyin_logger.success(_msg("🥳", "视频已经传完啦"))
-                    break
-                douyin_logger.info(_msg("🏃", "小人正在努力上传视频"))
-                await asyncio.sleep(2)
-                if await page.locator('div.progress-div > div:has-text("上传失败")').count():
-                    douyin_logger.error(_msg("😵", "检测到上传失败，小人准备重试"))
-                    await self.handle_upload_error(page)
-            except Exception:
-                douyin_logger.debug(_msg("🧍", "小人还在等视频上传完成"))
-                await asyncio.sleep(2)
-
-        if self.productLink and self.productTitle:
-            douyin_logger.info(_msg("🛒", "小人正在设置商品链接"))
-            await self.set_product_link(page, self.productLink, self.productTitle)
-            douyin_logger.info(_msg("🥳", "商品链接设置完成"))
-
-        await self.set_thumbnail(page)
-
-        third_part_element = '[class^="info"] > [class^="first-part"] div div.semi-switch'
-        if await page.locator(third_part_element).count():
-            if "semi-switch-checked" not in await page.eval_on_selector(third_part_element, "div => div.className"):
-                await page.locator(third_part_element).locator("input.semi-switch-native-control").click()
-
-        if self.publish_strategy == DOUYIN_PUBLISH_STRATEGY_SCHEDULED and self.publish_date != 0:
-            await self.set_schedule_time_douyin(page, self.publish_date)
-
-        while True:
-            try:
-                publish_button = page.get_by_role("button", name="发布", exact=True)
-                if await publish_button.count():
-                    await publish_button.click()
-                await page.wait_for_url(
-                    "https://creator.douyin.com/creator-micro/content/manage**",
-                    timeout=3000,
-                )
-                douyin_logger.success(_msg("🥳", "视频发布成功，小人开心收工"))
-                break
-            except Exception:
-                await self.handle_auto_video_cover(page)
-                douyin_logger.info(_msg("🏃", "小人正在冲刺发布视频"))
-                if self.debug:
-                    await page.screenshot(full_page=True)
+                if asyncio.get_running_loop().time() > enter_deadline:
+                    shot = logs_dir / f"debug_douyin_enter_{int(datetime.now().timestamp())}.png"
+                    await page.screenshot(path=str(shot), full_page=True)
+                    raise RuntimeError(f"等待进入抖音发布编辑页超时（当前 URL: {cur_url}，诊断图: {shot}）")
                 await asyncio.sleep(0.5)
 
-        await context.storage_state(path=self.account_file)
-        douyin_logger.success(_msg("🥳", "cookie 更新完毕"))
-        await asyncio.sleep(2)
-        await context.close()
-        await browser.close()
+            await asyncio.sleep(1.5)
+            douyin_logger.info(_msg("✍️", "小人开始填标题、描述和话题"))
+            await self.fill_title_and_description(page, self.title, self.desc or self.title, self.tags)
+            douyin_logger.info(_msg("🏷️", f"小人一共贴了 {len(self.tags or [])} 个话题"))
+
+            upload_deadline = asyncio.get_running_loop().time() + 480
+            upload_ticks = 0
+            saved_fail_shot = False
+            while True:
+                try:
+                    number = await page.locator('[class^="long-card"] div:has-text("重新上传")').count()
+                    if number == 0:
+                        number = await page.get_by_text("重新上传", exact=True).count()
+                    if number > 0:
+                        douyin_logger.success(_msg("🥳", "视频已经传完啦"))
+                        break
+                    if upload_ticks % 5 == 0:
+                        pct_text = ""
+                        try:
+                            pct_text = await page.evaluate(
+                                "() => { const m = (document.body.innerText || '').match(/\\d{1,3}%/); return m ? m[0] : ''; }"
+                            )
+                        except Exception:
+                            pct_text = ""
+                        douyin_logger.info(_msg("🏃", f"小人正在努力上传视频 {pct_text}".strip()))
+                    if await page.locator('div.progress-div > div:has-text("上传失败")').count():
+                        if not saved_fail_shot:
+                            saved_fail_shot = True
+                            fail_shot = logs_dir / f"debug_douyin_upload_fail_{int(datetime.now().timestamp())}.png"
+                            try:
+                                await page.screenshot(path=str(fail_shot), full_page=True)
+                                douyin_logger.error(_msg("📸", f"首次检测到抖音上传失败，已保存诊断图: {fail_shot}"))
+                            except Exception:
+                                pass
+                        douyin_logger.error(_msg("😵", "检测到上传失败，小人准备重试"))
+                        await self.handle_upload_error(page)
+                except Exception as exc:
+                    douyin_logger.debug(_msg("🧍", f"小人还在等视频上传完成: {exc}"))
+                if asyncio.get_running_loop().time() > upload_deadline:
+                    shot = logs_dir / f"debug_douyin_upload_timeout_{int(datetime.now().timestamp())}.png"
+                    await page.screenshot(path=str(shot), full_page=True)
+                    raise RuntimeError(f"抖音视频上传超时（超过 480 秒，诊断图: {shot}）")
+                upload_ticks += 1
+                await asyncio.sleep(2)
+
+            if self.productLink and self.productTitle:
+                douyin_logger.info(_msg("🛒", "小人正在设置商品链接"))
+                await self.set_product_link(page, self.productLink, self.productTitle)
+                douyin_logger.info(_msg("🥳", "商品链接设置完成"))
+
+            await self.set_thumbnail(page)
+
+            third_part_element = '[class^="info"] > [class^="first-part"] div div.semi-switch'
+            if await page.locator(third_part_element).count():
+                if "semi-switch-checked" not in await page.eval_on_selector(third_part_element, "div => div.className"):
+                    await page.locator(third_part_element).locator("input.semi-switch-native-control").click()
+
+            if self.publish_strategy == DOUYIN_PUBLISH_STRATEGY_SCHEDULED and self.publish_date != 0:
+                await self.set_schedule_time_douyin(page, self.publish_date)
+
+            # 关闭可能出现的引导气泡（如「我知道了」）避免遮挡发布按钮
+            try:
+                know_btn = page.get_by_text("我知道了", exact=True).first
+                if await know_btn.count() and await know_btn.is_visible():
+                    await know_btn.click()
+                    await asyncio.sleep(0.5)
+            except Exception:
+                pass
+
+            publish_deadline = asyncio.get_running_loop().time() + 90
+            while True:
+                try:
+                    # 兜底清理可能残留的横封面引导弹窗
+                    skip_btn = page.get_by_text("暂不设置", exact=True).first
+                    if await skip_btn.count() and await skip_btn.is_visible():
+                        await skip_btn.click()
+                        await asyncio.sleep(0.8)
+                    publish_button = page.get_by_role("button", name="发布", exact=True)
+                    if await publish_button.count():
+                        await publish_button.click(timeout=10000)
+                    await page.wait_for_url(
+                        "https://creator.douyin.com/creator-micro/content/manage**",
+                        timeout=4000,
+                    )
+                    douyin_logger.success(_msg("🥳", "视频发布成功，小人开心收工"))
+                    break
+                except Exception:
+                    if "/creator-micro/content/manage" in (page.url or ""):
+                        douyin_logger.success(_msg("🥳", "视频发布成功，小人开心收工"))
+                        break
+                    await self.handle_auto_video_cover(page)
+                    douyin_logger.info(_msg("🏃", "小人正在冲刺发布视频"))
+                    if asyncio.get_running_loop().time() > publish_deadline:
+                        shot = logs_dir / f"debug_douyin_publish_{int(datetime.now().timestamp())}.png"
+                        await page.screenshot(path=str(shot), full_page=True)
+                        toast_txt = ""
+                        try:
+                            toast_txt = (await page.locator('.semi-toast-content, [role="alert"]').first.inner_text(timeout=1000)).strip()
+                        except Exception:
+                            pass
+                        raise RuntimeError(
+                            f"抖音点击发布后 90 秒内未跳转到作品管理页（当前 URL: {page.url}，页面提示: {toast_txt or '无'}，诊断图: {shot}）"
+                        )
+                    await asyncio.sleep(1)
+
+            await context.storage_state(path=self.account_file)
+            douyin_logger.success(_msg("🥳", "cookie 更新完毕"))
+            await asyncio.sleep(2)
+        finally:
+            await context.close()
+            await browser.close()
 
     async def douyin_upload_video(self):
         async with async_playwright() as playwright:

@@ -4,6 +4,7 @@ from __future__ import annotations
 import asyncio
 import inspect
 import os
+import re
 from datetime import datetime
 from pathlib import Path
 
@@ -437,65 +438,117 @@ class KSVideo(KSBaseUploader):
             return
 
         kuaishou_logger.info(_msg("🖼️", "小人准备设置封面"))
+        logs_dir = Path(__file__).resolve().parents[2] / "logs"
+        logs_dir.mkdir(parents=True, exist_ok=True)
+        try:
+            opened = False
+            cover_label = page.locator("span").filter(has_text="封面设置").first
+            try:
+                if await cover_label.count() and await cover_label.is_visible():
+                    await cover_label.locator("xpath=../following-sibling::div[1]").locator("div").nth(0).click()
+                    opened = True
+            except Exception:
+                pass
 
-        cover_label = page.locator("span").filter(has_text="封面设置")
-        await cover_label.wait_for(state="visible", timeout=30000)
-        await cover_label.locator("xpath=../following-sibling::div[1]").locator('div').nth(0).click()
+            if not opened:
+                for txt in ("设置封面", "编辑封面", "修改封面", "上传封面"):
+                    btn = page.get_by_text(txt, exact=False).first
+                    try:
+                        if await btn.count() and await btn.is_visible():
+                            await btn.click()
+                            opened = True
+                            break
+                    except Exception:
+                        continue
+            if not opened:
+                raise RuntimeError("未找到快手封面设置入口")
 
-        modal = page.locator('div[role="document"].ant-modal')
-        await modal.wait_for(state="visible", timeout=30000)
+            # 精准锁定包含「上传封面」的封面设置弹窗，避免匹配到 DOM 末尾的隐藏 ant-modal
+            modal = page.locator('div[role="document"].ant-modal, .ant-modal-content').filter(has_text="上传封面").first
+            await modal.wait_for(state="visible", timeout=25000)
 
-        upload_cover_tab = modal.get_by_text("上传封面", exact=True)
-        await upload_cover_tab.wait_for(state="visible", timeout=10000)
-        await upload_cover_tab.click()
+            for tab_txt in ("上传封面", "本地上传"):
+                upload_cover_tab = modal.get_by_text(tab_txt, exact=False).first
+                try:
+                    if await upload_cover_tab.count() and await upload_cover_tab.is_visible():
+                        await upload_cover_tab.click()
+                        await asyncio.sleep(0.8)
+                        break
+                except Exception:
+                    continue
 
-        file_input = modal.locator('input[type="file"]')
-        await file_input.wait_for(state="attached", timeout=30000)
-        await file_input.set_input_files(self.thumbnail_path)
-        await asyncio.sleep(1)
+            file_input = modal.locator('input[type="file"]').first
+            await file_input.wait_for(state="attached", timeout=20000)
+            await file_input.set_input_files(self.thumbnail_path)
+            await asyncio.sleep(2.5)
 
-        confirm_button = modal.get_by_role("button", name="确认", exact=True)
-        await confirm_button.wait_for(state="visible", timeout=10000)
-        await confirm_button.click()
+            # Ant Design 两字中文按钮常带内部空格（如「确 认」），兼容 button / div / span 文本点击
+            confirm_re = re.compile(r"^\s*(确\s*认|确\s*定|完\s*成)\s*$")
+            confirmed = False
+            for loc in (
+                modal.locator("button").filter(has_text=confirm_re),
+                modal.get_by_role("button", name=confirm_re),
+                modal.locator(".ant-btn, div, span").filter(has_text=confirm_re),
+                modal.get_by_text(confirm_re),
+            ):
+                try:
+                    cnt = await loc.count()
+                    for idx in range(cnt - 1, -1, -1):
+                        btn = loc.nth(idx)
+                        if await btn.is_visible():
+                            await btn.click()
+                            confirmed = True
+                            break
+                    if confirmed:
+                        break
+                except Exception:
+                    continue
+            if not confirmed:
+                raise RuntimeError("快手封面弹窗未找到可见的「确认/确定」按钮")
 
-        await modal.wait_for(state="hidden", timeout=30000)
-        kuaishou_logger.success(_msg("🥳", "封面已经设置完成"))
+            await modal.wait_for(state="hidden", timeout=25000)
+            kuaishou_logger.success(_msg("🥳", "封面已经设置完成"))
+        except Exception as exc:
+            shot = logs_dir / f"debug_ks_cover_{int(datetime.now().timestamp())}.png"
+            try:
+                await page.screenshot(path=str(shot), full_page=True)
+                kuaishou_logger.error(_msg("📸", f"快手设置封面异常，已保存诊断截图: {shot}"))
+            except Exception:
+                pass
+            raise RuntimeError(f"快手设置自定义封面失败: {exc}") from exc
 
     async def upload(self, playwright: Playwright) -> None:
         kuaishou_logger.info(_msg("🧍", "小人先检查 cookie、视频文件、封面和发布时间"))
         await self.validate_upload_args()
         kuaishou_logger.info(_msg("🥳", "上传前检查通过"))
 
-        if self.local_executable_path:
-            browser = await playwright.chromium.launch(
-                headless=self.headless,
-                executable_path=self.local_executable_path,
-            )
-        else:
-            browser = await playwright.chromium.launch(
-                headless=self.headless,
-                channel="chrome",
-            )
-        context = await browser.new_context(storage_state=self.account_file)
+        browser = await playwright.chromium.launch(**_ks_launch_kwargs(headless=self.headless))
+        context = await browser.new_context(
+            storage_state=self.account_file,
+            viewport={"width": 1440, "height": 900},
+            bypass_csp=True,
+        )
         context = await set_init_script(context)
+        logs_dir = Path(__file__).resolve().parents[2] / "logs"
+        logs_dir.mkdir(parents=True, exist_ok=True)
 
         upload_success = False
         try:
             page = await context.new_page()
-            await page.goto(KUAISHOU_UPLOAD_URL)
+            await page.goto(KUAISHOU_UPLOAD_URL, wait_until="domcontentloaded", timeout=30000)
             kuaishou_logger.info(_msg("🏃", f"小人开始搬运视频: {self.title}.mp4"))
             kuaishou_logger.info(_msg("🧭", "小人正在赶往快手上传主页"))
-            await page.wait_for_url(KUAISHOU_UPLOAD_URL_PATTERN)
+            await page.wait_for_url(KUAISHOU_UPLOAD_URL_PATTERN, timeout=20000)
 
             upload_button = page.locator("button[class^='_upload-btn']")
-            await upload_button.wait_for(state="visible", timeout=10000)
+            await upload_button.wait_for(state="visible", timeout=15000)
 
             async with page.expect_file_chooser() as fc_info:
                 await upload_button.click()
             file_chooser = await fc_info.value
             await file_chooser.set_files(self.file_path)
 
-            await asyncio.sleep(2)
+            await asyncio.sleep(3)
 
             know_button = page.locator('button[type="button"] span:text("我知道了")').first
             try:
@@ -519,12 +572,22 @@ class KSVideo(KSBaseUploader):
                 await page.keyboard.type(f"#{tag} ")
                 await asyncio.sleep(2)
 
-            max_retries = 60
+            # 适配 4K 大视频（最长 480 秒）：确认上传中状态完全结束且视频已就绪
+            max_retries = 240
             retry_count = 0
+            saw_uploading = False
             while retry_count < max_retries:
                 try:
-                    number = await page.locator("text=上传中").count()
-                    if number == 0:
+                    uploading_cnt = await page.locator("text=上传中").count()
+                    if uploading_cnt == 0:
+                        uploading_cnt = await page.locator("text=正在上传").count()
+                    if uploading_cnt > 0:
+                        saw_uploading = True
+                    success_cnt = (
+                        await page.locator("text=上传成功").count()
+                        + await page.locator("text=重新上传").count()
+                    )
+                    if uploading_cnt == 0 and (success_cnt > 0 or saw_uploading or retry_count >= 5):
                         kuaishou_logger.success(_msg("🥳", "视频已经传完啦"))
                         break
 
@@ -541,13 +604,16 @@ class KSVideo(KSBaseUploader):
                 retry_count += 1
 
             if retry_count == max_retries:
-                kuaishou_logger.warning(_msg("😵", "超过最大重试次数，视频上传可能未完成"))
+                shot = logs_dir / f"debug_ks_upload_timeout_{int(datetime.now().timestamp())}.png"
+                await page.screenshot(path=str(shot), full_page=True)
+                raise RuntimeError(f"快手视频上传超时（超过 480 秒，诊断图: {shot}）")
 
             await self.set_thumbnail(page)
 
             if self.publish_strategy == KUAISHOU_PUBLISH_STRATEGY_SCHEDULED and self.publish_date != 0:
                 await self.set_schedule_time(page, self.publish_date)
 
+            publish_deadline = asyncio.get_running_loop().time() + 90
             while True:
                 try:
                     publish_button = page.get_by_text("发布", exact=True)
@@ -559,13 +625,20 @@ class KSVideo(KSBaseUploader):
                     if await confirm_button.count() > 0:
                         await confirm_button.click()
 
-                    await page.wait_for_url(KUAISHOU_MANAGE_URL_PATTERN, timeout=5000)
+                    await page.wait_for_url("**/article/manage/video**", timeout=5000)
                     kuaishou_logger.success(_msg("🥳", "视频发布成功，小人开心收工"))
                     break
                 except Exception as exc:
+                    if "/article/manage/video" in (page.url or ""):
+                        kuaishou_logger.success(_msg("🥳", "视频发布成功，小人开心收工"))
+                        break
                     kuaishou_logger.info(_msg("🏃", f"小人正在冲刺发布视频: {exc}"))
-                    if self.debug:
-                        await page.screenshot(full_page=True)
+                    if asyncio.get_running_loop().time() > publish_deadline:
+                        shot = logs_dir / f"debug_ks_publish_{int(datetime.now().timestamp())}.png"
+                        await page.screenshot(path=str(shot), full_page=True)
+                        raise RuntimeError(
+                            f"快手点击发布后 90 秒内未跳转到作品管理页（当前 URL: {page.url}，诊断图: {shot}）"
+                        )
                     await asyncio.sleep(1)
 
             upload_success = True

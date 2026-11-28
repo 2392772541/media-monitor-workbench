@@ -425,26 +425,71 @@ export async function proxySauJson(
     return { status: 503, payload: { code: 503, msg: ready.message || '发布引擎未就绪', data: null } };
   }
 
-  const controller = new AbortController();
-  const timer = setTimeout(() => controller.abort(), timeoutMs);
-  try {
-    const init: RequestInit = {
-      method,
-      signal: controller.signal,
-      headers: method === 'POST' ? { 'Content-Type': 'application/json' } : undefined,
-      body: method === 'POST' ? JSON.stringify(body ?? {}) : undefined,
-    };
-    const res = await fetch(`${SAU_BASE_URL}${targetPath}`, init);
-    const payload = await res.json().catch(() => ({ code: res.status, msg: res.statusText, data: null }));
-    return { status: res.status, payload };
-  } catch (err) {
-    return {
-      status: 502,
-      payload: { code: 502, msg: `连接发布引擎失败: ${(err as Error).message}`, data: null },
-    };
-  } finally {
-    clearTimeout(timer);
+  // 使用原生 http.request 替代 undici fetch，彻底规避 Node 默认 300s headersTimeout 拦截大视频上传
+  const payloadStr = method === 'POST' ? JSON.stringify(body ?? {}) : '';
+  const payloadBuf = method === 'POST' ? Buffer.from(payloadStr, 'utf8') : null;
+  const headers: Record<string, string | number> = {};
+  if (payloadBuf) {
+    headers['Content-Type'] = 'application/json; charset=utf-8';
+    headers['Content-Length'] = payloadBuf.length;
   }
+
+  return new Promise<{ status: number; payload: unknown }>((resolve) => {
+    let settled = false;
+    const finish = (result: { status: number; payload: unknown }) => {
+      if (settled) return;
+      settled = true;
+      clearTimeout(timer);
+      resolve(result);
+    };
+
+    const req = http.request(
+      {
+        hostname: SAU_HOST,
+        port: SAU_PORT,
+        path: targetPath,
+        method,
+        headers,
+      },
+      (res) => {
+        const chunks: Buffer[] = [];
+        res.on('data', (chunk: Buffer) => chunks.push(chunk));
+        res.on('end', () => {
+          const rawText = Buffer.concat(chunks).toString('utf8');
+          const status = res.statusCode || 200;
+          let parsed: unknown;
+          try {
+            parsed = rawText ? JSON.parse(rawText) : { code: status, msg: res.statusMessage || '', data: null };
+          } catch {
+            parsed = { code: status, msg: res.statusMessage || rawText.slice(0, 200), data: null };
+          }
+          finish({ status, payload: parsed });
+        });
+        res.on('error', (err) => {
+          finish({
+            status: 502,
+            payload: { code: 502, msg: `读取发布引擎响应失败: ${err.message}`, data: null },
+          });
+        });
+      }
+    );
+
+    const timer = setTimeout(() => {
+      req.destroy(new Error(`请求发布引擎超时（>${Math.round(timeoutMs / 1000)}秒）`));
+    }, timeoutMs);
+
+    req.on('error', (err) => {
+      finish({
+        status: 502,
+        payload: { code: 502, msg: `连接发布引擎失败: ${err.message}`, data: null },
+      });
+    });
+
+    if (payloadBuf) {
+      req.write(payloadBuf);
+    }
+    req.end();
+  });
 }
 
 export async function proxySauSseLogin(req: FastifyRequest, reply: FastifyReply, queryString: string): Promise<void> {

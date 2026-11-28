@@ -793,18 +793,18 @@ export function registerRoutes(app: FastifyInstance, shutdownHandler: () => Prom
         filePath,
         ...(customFilename ? { filename: customFilename } : {}),
       },
-      60000
+      120000
     );
     return reply.code(res.status).send(res.payload);
   });
 
   app.post('/api/sau/post-video', async (req, reply) => {
-    const res = await proxySauJson('POST', '/postVideo', req.body, 300000);
+    const res = await proxySauJson('POST', '/postVideo', req.body, 600000);
     return reply.code(res.status).send(res.payload);
   });
 
   app.post('/api/sau/post-video-batch', async (req, reply) => {
-    const res = await proxySauJson('POST', '/postVideoBatch', req.body, 300000);
+    const res = await proxySauJson('POST', '/postVideoBatch', req.body, 600000);
     return reply.code(res.status).send(res.payload);
   });
 

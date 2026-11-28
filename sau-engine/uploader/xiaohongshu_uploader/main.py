@@ -626,10 +626,11 @@ class XiaoHongShuVideo(XiaoHongShuBaseUploader):
         xiaohongshu_logger.info(_msg("🧍", "小人先检查 cookie、视频文件、封面和发布时间"))
         await self.validate_upload_args()
         xiaohongshu_logger.info(_msg("🥳", "上传前检查通过"))
-        browser = await playwright.chromium.launch(headless=self.headless, channel="chrome")
+        browser = await playwright.chromium.launch(**_xhs_launch_kwargs(headless=self.headless))
         context = await browser.new_context(
             permissions=["geolocation"],
             storage_state=self.account_file,
+            bypass_csp=True,
         )
         context = await set_init_script(context)
 
@@ -744,10 +745,11 @@ class XiaoHongShuNote(XiaoHongShuBaseUploader):
         xiaohongshu_logger.info(_msg("🧍", "小人先检查 cookie、图片和发布时间"))
         await self.validate_upload_args()
         xiaohongshu_logger.info(_msg("🥳", "图文上传前检查通过"))
-        browser = await playwright.chromium.launch(headless=self.headless, channel="chrome")
+        browser = await playwright.chromium.launch(**_xhs_launch_kwargs(headless=self.headless))
         context = await browser.new_context(
             permissions=["geolocation"],
             storage_state=self.account_file,
+            bypass_csp=True,
         )
         context = await set_init_script(context)
 

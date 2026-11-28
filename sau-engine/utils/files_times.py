@@ -96,3 +96,39 @@ def generate_schedule_time_next_day(total_videos, videos_per_day = 1, daily_time
     if timestamps:
         schedule = [int(time.timestamp()) for time in schedule]
     return schedule
+
+
+def parse_schedule_at_list(raw_schedule_at, total_videos: int = 1) -> list[datetime]:
+    """解析精确定时时间字符串或列表（支持当天 YYYY-MM-DD HH:MM）。"""
+    if isinstance(raw_schedule_at, str):
+        entries = [raw_schedule_at.strip()]
+    elif isinstance(raw_schedule_at, (list, tuple)):
+        entries = [str(x or "").strip() for x in raw_schedule_at if str(x or "").strip()]
+    else:
+        raise ValueError("scheduleAt 必须为 YYYY-MM-DD HH:MM 字符串或非空字符串列表")
+
+    if not entries:
+        raise ValueError("scheduleAt 不能为空")
+
+    parsed: list[datetime] = []
+    for entry in entries:
+        normalized = entry.replace("T", " ").strip()
+        dt = None
+        for fmt in ("%Y-%m-%d %H:%M", "%Y-%m-%d %H:%M:%S"):
+            try:
+                dt = datetime.strptime(normalized, fmt)
+                break
+            except ValueError:
+                continue
+        if dt is None:
+            raise ValueError(f"定时时间格式错误: {entry!r}，必须为 YYYY-MM-DD HH:MM（例如 2026-11-28 19:00）")
+        parsed.append(dt.replace(second=0, microsecond=0))
+
+    count = max(1, int(total_videos or 1))
+    if len(parsed) < count:
+        # 仅给单时间点时复用到所有视频（每条递延 1 天）
+        last = parsed[-1]
+        while len(parsed) < count:
+            last = last + timedelta(days=1)
+            parsed.append(last)
+    return parsed[:count]

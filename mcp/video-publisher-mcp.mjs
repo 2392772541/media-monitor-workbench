@@ -15,10 +15,11 @@ const SERVER_INFO = { name: 'video_publisher', version: '0.1.0' };
 
 const STATUS_TIMEOUT_MS = 10_000;
 const VALIDATE_TIMEOUT_MS = 130_000;
-const IMPORT_TIMEOUT_MS = 65_000;
-const PUBLISH_TIMEOUT_MS = 320_000;
+const IMPORT_TIMEOUT_MS = 120_000;
+const PUBLISH_TIMEOUT_MS = 620_000;
 
 const SUPPORTED_VIDEO_EXTS = new Set(['.mp4', '.mov', '.avi', '.mkv', '.m4v', '.webm', '.flv', '.wmv']);
+const SUPPORTED_IMAGE_EXTS = new Set(['.jpg', '.jpeg', '.png', '.webp', '.bmp']);
 const PLATFORM_NAMES = {
   1: '小红书',
   2: '微信视频号',
@@ -278,12 +279,13 @@ function splitRawCopyByRules(rawCopy, titleHint, explicitTags) {
   return { baseTitle, baseDesc, mergedTags };
 }
 
-// 与 workbench_fallback.py 对齐：前置校验定时发布参数与 2 小时最小提前量
+// 与 workbench_fallback.py 对齐：前置校验定时发布参数（支持当天/跨天精确 scheduleAt 与 2 小时最小提前量）
 function validateTimerSchedule({
   enableTimer,
   videosPerDay,
   rawDailyTimes,
   startDays,
+  rawScheduleAt,
   totalVideos = 1,
   nowDate = new Date(),
 }) {
@@ -303,7 +305,58 @@ function validateTimerSchedule({
       dailyTimes: dailyTimes.length > 0 ? dailyTimes : ['10:00', '18:00'],
       videosPerDay: Number.isInteger(videosPerDay) && videosPerDay >= 1 ? videosPerDay : 1,
       startDays: Number.isInteger(startDays) && startDays >= 0 ? startDays : 0,
+      scheduleAt: null,
       earliestSchedule: null,
+    };
+  }
+
+  const pad2 = (n) => String(n).padStart(2, '0');
+  const fmtDt = (d) =>
+    `${d.getFullYear()}-${pad2(d.getMonth() + 1)}-${pad2(d.getDate())} ${pad2(d.getHours())}:${pad2(d.getMinutes())}`;
+
+  // 优先支持精确日期时间 scheduleAt（支持当天 YYYY-MM-DD HH:MM）
+  const hasScheduleAt =
+    (typeof rawScheduleAt === 'string' && rawScheduleAt.trim().length > 0) ||
+    (Array.isArray(rawScheduleAt) && rawScheduleAt.length > 0);
+  if (hasScheduleAt) {
+    const rawList = typeof rawScheduleAt === 'string' ? [rawScheduleAt.trim()] : rawScheduleAt.map((s) => String(s || '').trim()).filter(Boolean);
+    if (rawList.length === 0) {
+      throw new Error('启用定时发布时，scheduleAt 不能为空');
+    }
+    const normalizedAt = [];
+    let earliestDate = null;
+    for (const item of rawList) {
+      const m = item.replace('T', ' ').match(/^(\d{4})-(\d{2})-(\d{2})\s+(\d{1,2}):(\d{2})(?::\d{2})?$/);
+      if (!m) {
+        throw new Error(`定时时间格式错误: ${item}，必须为 YYYY-MM-DD HH:MM（例如 2026-11-28 19:00）`);
+      }
+      const [, y, mo, d, h, mi] = m.map(Number);
+      const dt = new Date(y, mo - 1, d, h, mi, 0, 0);
+      if (
+        Number.isNaN(dt.getTime()) ||
+        dt.getFullYear() !== y ||
+        dt.getMonth() !== mo - 1 ||
+        dt.getDate() !== d ||
+        dt.getHours() !== h ||
+        dt.getMinutes() !== mi
+      ) {
+        throw new Error(`定时时间无效: ${item}`);
+      }
+      normalizedAt.push(fmtDt(dt));
+      if (!earliestDate || dt.getTime() < earliestDate.getTime()) {
+        earliestDate = dt;
+      }
+    }
+    const earliestText = earliestDate ? fmtDt(earliestDate) : '';
+    if (!earliestDate || earliestDate.getTime() <= nowDate.getTime() + 2 * 3600 * 1000) {
+      throw new Error(`最早定时时间（${earliestText}）必须晚于当前时间至少 2 小时以上`);
+    }
+    return {
+      dailyTimes: dailyTimes.length > 0 ? dailyTimes : ['10:00', '18:00'],
+      videosPerDay: Number.isInteger(videosPerDay) && videosPerDay >= 1 ? videosPerDay : 1,
+      startDays: Number.isInteger(startDays) && startDays >= 0 ? startDays : 0,
+      scheduleAt: normalizedAt.length === 1 ? normalizedAt[0] : normalizedAt,
+      earliestSchedule: earliestText,
     };
   }
 
@@ -356,12 +409,7 @@ function validateTimerSchedule({
     }
   }
 
-  const pad2 = (n) => String(n).padStart(2, '0');
-  const earliestText = earliestDate
-    ? `${earliestDate.getFullYear()}-${pad2(earliestDate.getMonth() + 1)}-${pad2(earliestDate.getDate())} ${pad2(
-        earliestDate.getHours()
-      )}:${pad2(earliestDate.getMinutes())}`
-    : '';
+  const earliestText = earliestDate ? fmtDt(earliestDate) : '';
   if (!earliestDate || earliestDate.getTime() <= nowDate.getTime() + 2 * 3600 * 1000) {
     throw new Error(`最早定时时间（${earliestText}）必须晚于当前时间至少 2 小时以上`);
   }
@@ -370,6 +418,7 @@ function validateTimerSchedule({
     dailyTimes: normalizedTimes,
     videosPerDay,
     startDays,
+    scheduleAt: null,
     earliestSchedule: earliestText,
   };
 }
@@ -680,12 +729,41 @@ async function handlePublishVideoToPlatforms(args) {
       videosPerDay: rawVideosPerDay,
       rawDailyTimes: args?.dailyTimes,
       startDays: rawStartDays,
+      rawScheduleAt: args?.scheduleAt,
       totalVideos: inputFileList.length > 0 ? inputFileList.length : 1,
     });
   } catch (err) {
     return makeToolError(err?.message || '定时发布参数校验失败', {
       timerValidation: { ok: false, enableTimer },
     });
+  }
+
+  // 可选封面图片只读校验（支持 .jpg/.jpeg/.png/.webp/.bmp）
+  const rawCoverPath =
+    typeof args?.coverPath === 'string'
+      ? args.coverPath.trim().replace(/^['"]|['"]$/g, '')
+      : typeof args?.thumbnail === 'string'
+        ? args.thumbnail.trim().replace(/^['"]|['"]$/g, '')
+        : '';
+  let coverValidation = null;
+  if (rawCoverPath) {
+    const isAbs = path.isAbsolute(rawCoverPath);
+    const exists = isAbs && fs.existsSync(rawCoverPath);
+    const isFile = exists && fs.statSync(rawCoverPath).isFile();
+    const ext = path.extname(rawCoverPath).toLowerCase();
+    const extSupported = SUPPORTED_IMAGE_EXTS.has(ext);
+    coverValidation = {
+      coverPath: rawCoverPath,
+      isAbsolute: isAbs,
+      exists,
+      isFile,
+      extension: ext,
+      supported: extSupported,
+      ok: Boolean(isAbs && exists && isFile && extSupported),
+    };
+    if (!coverValidation.ok) {
+      return makeToolError('自定义封面图片校验未通过（未执行导入或发布）', coverValidation);
+    }
   }
 
   // 防误发硬守卫：非 dryRun 实际导入/发布前必须显式传入 confirmed: true
@@ -803,6 +881,8 @@ async function handlePublishVideoToPlatforms(args) {
         videosPerDay: timerConfig.videosPerDay,
         dailyTimes: timerConfig.dailyTimes,
         startDays: timerConfig.startDays,
+        ...(timerConfig.scheduleAt ? { scheduleAt: timerConfig.scheduleAt } : {}),
+        ...(rawCoverPath ? { thumbnail: rawCoverPath } : {}),
         category: Number(args?.category || 0) || 0,
         isDraft: p === 2 ? isDraft : false,
         productLink: p === 3 ? String(args?.productLink || '') : '',
@@ -837,6 +917,7 @@ async function handlePublishVideoToPlatforms(args) {
     return makeToolSuccess({
       dryRun: true,
       fileValidation,
+      ...(coverValidation ? { coverValidation } : {}),
       results: dryResults,
     });
   }
@@ -1104,6 +1185,14 @@ const TOOLS = [
         startDays: {
           type: 'integer',
           description: '定时发布起始偏移天数（0表示明天）',
+        },
+        scheduleAt: {
+          type: ['string', 'array'],
+          description: '可选精确定时时间（YYYY-MM-DD HH:MM，支持当天或跨天，需晚于当前时间 2 小时以上）',
+        },
+        coverPath: {
+          type: 'string',
+          description: '可选本机自定义封面图片绝对路径（.png/.jpg/.jpeg/.webp/.bmp，抖音/快手/小红书支持）',
         },
         category: {
           type: 'integer',

@@ -17,6 +17,7 @@ from conf import BASE_DIR
 from myUtils.login import get_tencent_cookie, douyin_cookie_gen, get_ks_cookie, xiaohongshu_cookie_gen
 from myUtils.postVideo import post_video_tencent, post_video_DouYin, post_video_ks, post_video_xhs
 from uploader.base_video import BaseVideoUploader
+from utils.files_times import parse_schedule_at_list
 
 active_queues = {}
 active_queues_lock = threading.Lock()
@@ -108,14 +109,19 @@ def record_publish_history(
     is_draft,
     status,
     message='',
+    schedule_datetimes=None,
 ):
     """Persist publish execution summary so users can inspect & reuse history."""
     ensure_runtime_ready()
     schedule_summary = ''
     if enable_timer:
-        times_text = ', '.join(str(t) for t in (daily_times or []))
-        start_label = '明天' if start_days == 0 else ('后天' if start_days == 1 else f'{start_days}天后')
-        schedule_summary = f'定时({start_label}起，每天{videos_per_day or 1}条 {times_text})'
+        if schedule_datetimes:
+            dt_text = ', '.join(dt.strftime('%Y-%m-%d %H:%M') for dt in schedule_datetimes)
+            schedule_summary = f'定时({dt_text})'
+        else:
+            times_text = ', '.join(str(t) for t in (daily_times or []))
+            start_label = '明天' if start_days == 0 else ('后天' if start_days == 1 else f'{start_days}天后')
+            schedule_summary = f'定时({start_label}起，每天{videos_per_day or 1}条 {times_text})'
     else:
         schedule_summary = '立即发布'
 
@@ -781,57 +787,81 @@ def _validate_post_payload(data):
     videos_per_day = data.get("videosPerDay")
     daily_times = data.get("dailyTimes")
     start_days = data.get("startDays", 0)
+    raw_schedule_at = data.get("scheduleAt")
+    schedule_datetimes = None
 
     if enable_timer == 1:
-        if isinstance(videos_per_day, bool) or not isinstance(videos_per_day, int) or videos_per_day < 1:
-            return None, "启用定时发布时，videosPerDay 必须为大于等于 1 的整数"
-        if not isinstance(daily_times, list) or len(daily_times) == 0:
-            return None, "启用定时发布时，dailyTimes 必须为非空 HH:MM 字符串数组"
-        parsed_times = []
-        normalized_times = []
-        for entry in daily_times:
-            if not isinstance(entry, str):
-                return None, f"定时时间点必须为 HH:MM 字符串: {entry!r}"
-            match = re.fullmatch(r"(\d{1,2}):(\d{2})", entry.strip())
-            if not match:
-                return None, f"定时时间点格式错误: {entry!r}，必须为 HH:MM"
-            hour, minute = int(match.group(1)), int(match.group(2))
-            if not (0 <= hour <= 23 and 0 <= minute <= 59):
-                return None, f"定时时间点超出有效范围: {entry!r}（小时 0~23，分钟 0~59）"
-            parsed_times.append((hour, minute))
-            normalized_times.append(f"{hour:02d}:{minute:02d}")
-        if videos_per_day > len(normalized_times):
-            return None, f"启用定时发布时，videosPerDay ({videos_per_day}) 不能大于 dailyTimes 数量 ({len(normalized_times)})"
-        if start_days is None:
-            start_days = 0
-        if isinstance(start_days, bool) or not isinstance(start_days, int) or start_days < 0:
-            return None, "启用定时发布时，startDays 必须为大于等于 0 的整数"
-
         current_time = datetime.now()
-        schedule = []
-        for video_idx in range(len(file_list)):
-            day = video_idx // videos_per_day + start_days + 1
-            daily_video_index = video_idx % videos_per_day
-            hour, minute = parsed_times[daily_video_index]
-            scheduled_dt = current_time + timedelta(
-                days=day,
-                hours=hour - current_time.hour,
-                minutes=minute - current_time.minute,
-                seconds=-current_time.second,
-                microseconds=-current_time.microsecond,
-            )
-            schedule.append(scheduled_dt)
-        earliest = min(schedule)
-        if earliest <= current_time + timedelta(hours=2):
-            return None, f"最早定时时间（{earliest.strftime('%Y-%m-%d %H:%M')}）必须晚于当前时间至少 2 小时以上"
-        daily_times = normalized_times
+        if raw_schedule_at is not None and raw_schedule_at != "":
+            try:
+                schedule_datetimes = parse_schedule_at_list(raw_schedule_at, len(file_list))
+            except ValueError as exc:
+                return None, str(exc)
+            earliest = min(schedule_datetimes)
+            if earliest <= current_time + timedelta(hours=2):
+                return None, f"最早定时时间（{earliest.strftime('%Y-%m-%d %H:%M')}）必须晚于当前时间至少 2 小时以上"
+        else:
+            if isinstance(videos_per_day, bool) or not isinstance(videos_per_day, int) or videos_per_day < 1:
+                return None, "启用定时发布时，videosPerDay 必须为大于等于 1 的整数"
+            if not isinstance(daily_times, list) or len(daily_times) == 0:
+                return None, "启用定时发布时，dailyTimes 必须为非空 HH:MM 字符串数组"
+            parsed_times = []
+            normalized_times = []
+            for entry in daily_times:
+                if not isinstance(entry, str):
+                    return None, f"定时时间点必须为 HH:MM 字符串: {entry!r}"
+                match = re.fullmatch(r"(\d{1,2}):(\d{2})", entry.strip())
+                if not match:
+                    return None, f"定时时间点格式错误: {entry!r}，必须为 HH:MM"
+                hour, minute = int(match.group(1)), int(match.group(2))
+                if not (0 <= hour <= 23 and 0 <= minute <= 59):
+                    return None, f"定时时间点超出有效范围: {entry!r}（小时 0~23，分钟 0~59）"
+                parsed_times.append((hour, minute))
+                normalized_times.append(f"{hour:02d}:{minute:02d}")
+            if videos_per_day > len(normalized_times):
+                return None, f"启用定时发布时，videosPerDay ({videos_per_day}) 不能大于 dailyTimes 数量 ({len(normalized_times)})"
+            if start_days is None:
+                start_days = 0
+            if isinstance(start_days, bool) or not isinstance(start_days, int) or start_days < 0:
+                return None, "启用定时发布时，startDays 必须为大于等于 0 的整数"
+
+            schedule = []
+            for video_idx in range(len(file_list)):
+                day = video_idx // videos_per_day + start_days + 1
+                daily_video_index = video_idx % videos_per_day
+                hour, minute = parsed_times[daily_video_index]
+                scheduled_dt = current_time + timedelta(
+                    days=day,
+                    hours=hour - current_time.hour,
+                    minutes=minute - current_time.minute,
+                    seconds=-current_time.second,
+                    microseconds=-current_time.microsecond,
+                )
+                schedule.append(scheduled_dt)
+            earliest = min(schedule)
+            if earliest <= current_time + timedelta(hours=2):
+                return None, f"最早定时时间（{earliest.strftime('%Y-%m-%d %H:%M')}）必须晚于当前时间至少 2 小时以上"
+            daily_times = normalized_times
 
     category = data.get("category")
     if category == 0:
         category = None
     product_link = data.get("productLink", "")
     product_title = data.get("productTitle", "")
-    thumbnail_path = data.get("thumbnail", "")
+
+    raw_thumb = data.get("coverPath") if data.get("coverPath") not in (None, "") else data.get("thumbnail", "")
+    thumbnail_path = ""
+    if raw_thumb is not None and raw_thumb != "":
+        if not isinstance(raw_thumb, str):
+            return None, "封面路径 thumbnail/coverPath 必须为字符串"
+        cleaned_thumb = raw_thumb.strip().strip('"').strip("'").strip()
+        if cleaned_thumb:
+            try:
+                validated_cover = BaseVideoUploader.validate_image_file(cleaned_thumb)
+                thumbnail_path = str(validated_cover)
+            except (FileNotFoundError, ValueError, OSError) as exc:
+                return None, f"封面图片校验失败: {exc}"
+
     return {
         "type": platform_type,
         "title": title,
@@ -844,9 +874,10 @@ def _validate_post_payload(data):
         "videos_per_day": videos_per_day,
         "daily_times": daily_times,
         "start_days": start_days,
+        "schedule_datetimes": schedule_datetimes,
         "product_link": product_link if isinstance(product_link, str) else "",
         "product_title": product_title if isinstance(product_title, str) else "",
-        "thumbnail_path": thumbnail_path if isinstance(thumbnail_path, str) else "",
+        "thumbnail_path": thumbnail_path,
         "is_draft": bool(data.get("isDraft", False)),
     }, None
 
@@ -874,6 +905,7 @@ def postVideo():
     videos_per_day = parsed["videos_per_day"]
     daily_times = parsed["daily_times"]
     start_days = parsed["start_days"]
+    schedule_datetimes = parsed["schedule_datetimes"]
 
     print("File List:", file_list)
     print("Account List:", account_list)
@@ -881,17 +913,25 @@ def postVideo():
     try:
         match type:
             case 1:
-                post_video_xhs(title, file_list, tags, account_list, category, enableTimer, videos_per_day, daily_times,
-                                   start_days, desc=description)
+                post_video_xhs(
+                    title, file_list, tags, account_list, category, enableTimer, videos_per_day, daily_times,
+                    start_days, desc=description, thumbnail_path=thumbnail_path, schedule_datetimes=schedule_datetimes,
+                )
             case 2:
-                post_video_tencent(title, file_list, tags, account_list, category, enableTimer, videos_per_day, daily_times,
-                                   start_days, is_draft, desc=description)
+                post_video_tencent(
+                    title, file_list, tags, account_list, category, enableTimer, videos_per_day, daily_times,
+                    start_days, is_draft, desc=description, schedule_datetimes=schedule_datetimes,
+                )
             case 3:
-                post_video_DouYin(title, file_list, tags, account_list, category, enableTimer, videos_per_day, daily_times,
-                          start_days, thumbnail_path, productLink, productTitle, desc=description)
+                post_video_DouYin(
+                    title, file_list, tags, account_list, category, enableTimer, videos_per_day, daily_times,
+                    start_days, thumbnail_path, productLink, productTitle, desc=description, schedule_datetimes=schedule_datetimes,
+                )
             case 4:
-                post_video_ks(title, file_list, tags, account_list, category, enableTimer, videos_per_day, daily_times,
-                          start_days, desc=description)
+                post_video_ks(
+                    title, file_list, tags, account_list, category, enableTimer, videos_per_day, daily_times,
+                    start_days, desc=description, thumbnail_path=thumbnail_path, schedule_datetimes=schedule_datetimes,
+                )
             case _:
                 return jsonify({"code": 400, "msg": f"不支持的平台类型: {type}", "data": None}), 400
 
@@ -899,7 +939,7 @@ def postVideo():
         record_publish_history(
             type, title, file_list, account_list, tags,
             enableTimer, videos_per_day, daily_times, start_days,
-            is_draft, 'success', '发布任务已提交'
+            is_draft, 'success', '发布任务已提交', schedule_datetimes=schedule_datetimes
         )
         return jsonify(
             {
@@ -913,7 +953,7 @@ def postVideo():
             record_publish_history(
                 type, title, file_list, account_list, tags,
                 enableTimer, videos_per_day, daily_times, start_days,
-                is_draft, 'error', str(e)
+                is_draft, 'error', str(e), schedule_datetimes=schedule_datetimes
             )
         except Exception:
             pass
@@ -1010,35 +1050,44 @@ def postVideoBatch():
         videos_per_day = parsed["videos_per_day"]
         daily_times = parsed["daily_times"]
         start_days = parsed["start_days"]
+        schedule_datetimes = parsed["schedule_datetimes"]
         print("File List:", file_list)
         print("Account List:", account_list)
         try:
             match type:
                 case 1:
-                    post_video_xhs(title, file_list, tags, account_list, category, enableTimer, videos_per_day, daily_times,
-                                   start_days, desc=description)
+                    post_video_xhs(
+                        title, file_list, tags, account_list, category, enableTimer, videos_per_day, daily_times,
+                        start_days, desc=description, thumbnail_path=thumbnail_path, schedule_datetimes=schedule_datetimes,
+                    )
                 case 2:
-                    post_video_tencent(title, file_list, tags, account_list, category, enableTimer, videos_per_day, daily_times,
-                                       start_days, is_draft, desc=description)
+                    post_video_tencent(
+                        title, file_list, tags, account_list, category, enableTimer, videos_per_day, daily_times,
+                        start_days, is_draft, desc=description, schedule_datetimes=schedule_datetimes,
+                    )
                 case 3:
-                    post_video_DouYin(title, file_list, tags, account_list, category, enableTimer, videos_per_day, daily_times,
-                              start_days, thumbnail_path, productLink, productTitle, desc=description)
+                    post_video_DouYin(
+                        title, file_list, tags, account_list, category, enableTimer, videos_per_day, daily_times,
+                        start_days, thumbnail_path, productLink, productTitle, desc=description, schedule_datetimes=schedule_datetimes,
+                    )
                 case 4:
-                    post_video_ks(title, file_list, tags, account_list, category, enableTimer, videos_per_day, daily_times,
-                              start_days, desc=description)
+                    post_video_ks(
+                        title, file_list, tags, account_list, category, enableTimer, videos_per_day, daily_times,
+                        start_days, desc=description, thumbnail_path=thumbnail_path, schedule_datetimes=schedule_datetimes,
+                    )
                 case _:
                     return jsonify({"code": 400, "msg": f"Unsupported platform type: {type}", "data": None}), 400
             record_publish_history(
                 type, title, file_list, account_list, tags,
                 enableTimer, videos_per_day, daily_times, start_days,
-                is_draft, 'success', '批量发布任务已提交'
+                is_draft, 'success', '批量发布任务已提交', schedule_datetimes=schedule_datetimes
             )
         except Exception as e:
             try:
                 record_publish_history(
                     type, title, file_list, account_list, tags,
                     enableTimer, videos_per_day, daily_times, start_days,
-                    is_draft, 'error', str(e)
+                    is_draft, 'error', str(e), schedule_datetimes=schedule_datetimes
                 )
             except Exception:
                 pass

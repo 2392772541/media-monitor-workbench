@@ -313,3 +313,108 @@ def test_note_2_update_userinfo_validation_and_404(tmp_path, monkeypatch):
     accounts = client.get("/getAccounts").get_json()["data"]
     assert accounts[0][1] == 1
     assert accounts[0][3] == "新名字"
+
+
+def test_same_day_schedule_at_and_cover_path_validation(tmp_path, monkeypatch):
+    monkeypatch.setattr(sau_backend, "BASE_DIR", tmp_path)
+    monkeypatch.setattr(postVideo, "BASE_DIR", tmp_path)
+    sau_backend.ensure_runtime_ready()
+    (tmp_path / "videoFile" / "ok.mp4").write_bytes(b"video")
+    (tmp_path / "cookiesFile" / "ok.json").write_text("{}", encoding="utf-8")
+    # 构造一张最小合法竖版 PNG（100x200）
+    import struct
+    import zlib
+    def make_png(w, h):
+        ihdr = struct.pack(">IIBBBBB", w, h, 8, 2, 0, 0, 0)
+        def chunk(tag, data):
+            return struct.pack(">I", len(data)) + tag + data + struct.pack(">I", zlib.crc32(tag + data) & 0xFFFFFFFF)
+        return b"\x89PNG\r\n\x1a\n" + chunk(b"IHDR", ihdr) + chunk(b"IEND", b"")
+
+    portrait_png = tmp_path / "cover_portrait.png"
+    portrait_png.write_bytes(make_png(100, 200))
+    client = sau_backend.app.test_client()
+
+    # 1. 不存在的封面路径返回 400
+    bad_cover = client.post(
+        "/postVideo",
+        json={
+            "type": 3,
+            "title": "封面校验",
+            "fileList": ["ok.mp4"],
+            "accountList": ["ok.json"],
+            "coverPath": str(tmp_path / "missing.png"),
+        },
+    )
+    assert bad_cover.status_code == 400
+
+    # 2. 当天 scheduleAt 支持 2 小时以后，拦截 2 小时以内
+    class FixedNoon(datetime):
+        @classmethod
+        def now(cls, tz=None):
+            return datetime(2026, 11, 28, 12, 0, 0)
+
+    captured = []
+    def fake_dy(*args, **kwargs):
+        captured.append(("dy", args, kwargs))
+    def fake_ks(*args, **kwargs):
+        captured.append(("ks", args, kwargs))
+
+    with patch.object(sau_backend, "datetime", FixedNoon), \
+         patch.object(sau_backend, "post_video_DouYin", side_effect=fake_dy), \
+         patch.object(sau_backend, "post_video_ks", side_effect=fake_ks):
+        too_soon = client.post(
+            "/postVideo",
+            json={
+                "type": 3,
+                "title": "当天过近",
+                "fileList": ["ok.mp4"],
+                "accountList": ["ok.json"],
+                "enableTimer": 1,
+                "scheduleAt": "2026-11-28 13:30",
+            },
+        )
+        assert too_soon.status_code == 400
+
+        ok_same_day = client.post(
+            "/postVideo",
+            json={
+                "type": 3,
+                "title": "当天19点",
+                "fileList": ["ok.mp4"],
+                "accountList": ["ok.json"],
+                "enableTimer": 1,
+                "scheduleAt": "2026-11-28 19:00",
+                "coverPath": str(portrait_png),
+            },
+        )
+        assert ok_same_day.status_code == 200
+
+        ok_ks_cover = client.post(
+            "/postVideo",
+            json={
+                "type": 4,
+                "title": "快手封面",
+                "fileList": ["ok.mp4"],
+                "accountList": ["ok.json"],
+                "thumbnail": str(portrait_png),
+            },
+        )
+        assert ok_ks_cover.status_code == 200
+
+    assert captured[0][0] == "dy"
+    assert captured[0][2]["schedule_datetimes"] == [datetime(2026, 11, 28, 19, 0)]
+    assert captured[0][1][9] == str(portrait_png.resolve())
+    assert captured[1][0] == "ks"
+    assert captured[1][2]["thumbnail_path"] == str(portrait_png.resolve())
+
+    # 3. post_video_DouYin 自动把竖版封面传给 thumbnail_portrait_path
+    dy_init = {}
+    class DummyDy:
+        def __init__(self, *args, **kwargs):
+            dy_init["kwargs"] = kwargs
+        async def douyin_upload_video(self):
+            return None
+    with patch.object(postVideo, "DouYinVideo", DummyDy):
+        postVideo.post_video_DouYin("竖屏", ["ok.mp4"], ["tag"], ["ok.json"], thumbnail_path=str(portrait_png))
+    assert dy_init["kwargs"]["thumbnail_portrait_path"] == str(portrait_png)
+    assert dy_init["kwargs"]["thumbnail_landscape_path"] is None
