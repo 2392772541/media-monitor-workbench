@@ -1,6 +1,7 @@
 import asyncio
 import json
 import os
+import shutil
 import sqlite3
 import threading
 import time
@@ -13,6 +14,7 @@ from flask import Flask, request, jsonify, Response, render_template, send_from_
 from conf import BASE_DIR
 from myUtils.login import get_tencent_cookie, douyin_cookie_gen, get_ks_cookie, xiaohongshu_cookie_gen
 from myUtils.postVideo import post_video_tencent, post_video_DouYin, post_video_ks, post_video_xhs
+from uploader.base_video import BaseVideoUploader
 
 active_queues = {}
 active_queues_lock = threading.Lock()
@@ -286,6 +288,118 @@ def upload_save():
         return jsonify({
             "code": 500,
             "msg": f"upload failed: {e}",
+            "data": None
+        }), 500
+
+
+@app.route('/importLocalFile', methods=['POST'])
+def import_local_file():
+    """免拖拽导入本机绝对路径视频文件到素材库，并登记到 file_records。"""
+    data = request.get_json(silent=True) or {}
+    raw_val = data.get('filePath')
+    raw_path = raw_val.strip().strip('"').strip("'").strip() if isinstance(raw_val, str) else ''
+
+    if not raw_path or not Path(raw_path).is_absolute():
+        return jsonify({
+            "code": 400,
+            "msg": "filePath must be a non-empty absolute path",
+            "data": None
+        }), 400
+
+    src_path = Path(raw_path)
+    if not src_path.exists():
+        return jsonify({
+            "code": 404,
+            "msg": f"Local file not found: {src_path}",
+            "data": None
+        }), 404
+    if not src_path.is_file():
+        return jsonify({
+            "code": 400,
+            "msg": f"Path is not a regular file: {src_path}",
+            "data": None
+        }), 400
+    if src_path.suffix.lower() not in BaseVideoUploader.SUPPORTED_VIDEO_EXTENSIONS:
+        return jsonify({
+            "code": 400,
+            "msg": f"Unsupported video extension: {src_path.suffix}",
+            "data": None
+        }), 400
+
+    # 处理可选自定义文件名：保留安全文件名及原始视频扩展名，拒绝非法路径段
+    custom_raw = data.get('filename')
+    if custom_raw is not None:
+        if not isinstance(custom_raw, str):
+            return jsonify({
+                "code": 400,
+                "msg": "Invalid filename",
+                "data": None
+            }), 400
+        custom_stripped = custom_raw.strip()
+        if custom_stripped:
+            if custom_stripped in {".", ".."} or any(sep in custom_stripped for sep in ("/", "\\")):
+                safe_candidate = Path(custom_stripped).name
+                if not safe_candidate or safe_candidate in {".", ".."}:
+                    return jsonify({
+                        "code": 400,
+                        "msg": "Invalid filename",
+                        "data": None
+                    }), 400
+            else:
+                safe_candidate = Path(custom_stripped).name
+            if not safe_candidate or safe_candidate in {".", ".."}:
+                return jsonify({
+                    "code": 400,
+                    "msg": "Invalid filename",
+                    "data": None
+                }), 400
+            if src_path.suffix and not safe_candidate.lower().endswith(src_path.suffix.lower()):
+                final_name = f"{safe_candidate}{src_path.suffix}"
+            else:
+                final_name = safe_candidate
+        else:
+            final_name = src_path.name
+    else:
+        final_name = src_path.name
+
+    try:
+        video_dir = Path(BASE_DIR / "videoFile")
+        video_dir.mkdir(parents=True, exist_ok=True)
+        saved_name = f"{uuid.uuid1()}_{final_name}"
+        dest_path = video_dir / saved_name
+        shutil.copy2(src_path, dest_path)
+
+        filesize = round(float(os.path.getsize(dest_path)) / (1024 * 1024), 2)
+        ensure_runtime_ready()
+        conn = sqlite3.connect(Path(BASE_DIR / "db" / "database.db"))
+        try:
+            cursor = conn.cursor()
+            cursor.execute(
+                '''
+                INSERT INTO file_records (filename, filesize, file_path)
+                VALUES (?, ?, ?)
+                ''',
+                (final_name, filesize, saved_name),
+            )
+            record_id = cursor.lastrowid
+            conn.commit()
+        finally:
+            conn.close()
+
+        return jsonify({
+            "code": 200,
+            "msg": "import success",
+            "data": {
+                "id": record_id,
+                "filename": final_name,
+                "filepath": saved_name,
+                "filesize": filesize,
+            }
+        }), 200
+    except Exception as e:
+        return jsonify({
+            "code": 500,
+            "msg": f"import failed: {e}",
             "data": None
         }), 500
 
@@ -601,13 +715,13 @@ def postVideo():
                                    start_days, description)
             case 2:
                 post_video_tencent(title, file_list, tags, account_list, category, enableTimer, videos_per_day, daily_times,
-                                   start_days, is_draft)
+                                   start_days, is_draft, desc=description)
             case 3:
                 post_video_DouYin(title, file_list, tags, account_list, category, enableTimer, videos_per_day, daily_times,
                           start_days, thumbnail_path, productLink, productTitle, description)
             case 4:
                 post_video_ks(title, file_list, tags, account_list, category, enableTimer, videos_per_day, daily_times,
-                          start_days)
+                          start_days, desc=description)
             case _:
                 return jsonify({"code": 400, "msg": f"不支持的平台类型: {type}", "data": None}), 400
 
@@ -689,6 +803,7 @@ def postVideoBatch():
         account_list = data.get('accountList', [])
         type = data.get('type')
         title = data.get('title')
+        description = data.get('description', '') or ''
         tags = data.get('tags')
         category = data.get('category')
         enableTimer = data.get('enableTimer')
@@ -709,16 +824,16 @@ def postVideoBatch():
             match type:
                 case 1:
                     post_video_xhs(title, file_list, tags, account_list, category, enableTimer, videos_per_day, daily_times,
-                                   start_days)
+                                   start_days, desc=description)
                 case 2:
                     post_video_tencent(title, file_list, tags, account_list, category, enableTimer, videos_per_day, daily_times,
-                                       start_days, is_draft)
+                                       start_days, is_draft, desc=description)
                 case 3:
                     post_video_DouYin(title, file_list, tags, account_list, category, enableTimer, videos_per_day, daily_times,
-                              start_days, thumbnail_path, productLink, productTitle)
+                              start_days, thumbnail_path, productLink, productTitle, desc=description)
                 case 4:
                     post_video_ks(title, file_list, tags, account_list, category, enableTimer, videos_per_day, daily_times,
-                              start_days)
+                              start_days, desc=description)
             record_publish_history(
                 type, title, file_list, account_list, tags,
                 enableTimer, videos_per_day, daily_times, start_days,

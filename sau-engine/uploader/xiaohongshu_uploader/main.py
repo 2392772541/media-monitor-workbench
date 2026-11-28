@@ -455,21 +455,39 @@ class XiaoHongShuBaseUploader(BaseVideoUploader):
         await page.keyboard.press("Enter")
 
     async def fill_tags(self, page: Page) -> None:
-        if not getattr(self, "tags", None):
+        # 清洗标签：去空白与前导 #、保序去重、最多保留 6 个
+        raw_tags = getattr(self, "tags", None) or []
+        clean_tags: list[str] = []
+        seen: set[str] = set()
+        for raw in raw_tags:
+            cleaned = str(raw).strip().lstrip("#").strip()
+            if not cleaned or cleaned in seen:
+                continue
+            seen.add(cleaned)
+            clean_tags.append(cleaned)
+            if len(clean_tags) >= 6:
+                break
+
+        if not clean_tags:
             return
 
         if not getattr(self, "desc", ""):
             desc = page.locator('p[data-placeholder*="输入正文描述"]')
             await desc.click()
 
-        await page.keyboard.type("#" + self.tags[0], delay=30)
-        await page.locator('#creator-editor-topic-container').wait_for(
-            state="visible",
-            timeout=3000
-        )
-        first_item = page.locator('#creator-editor-topic-container .item').first
-        await first_item.wait_for(state="visible", timeout=2000)
-        await first_item.click()
+        for tag in clean_tags:
+            await page.keyboard.type("#" + tag, delay=30)
+            try:
+                await page.locator('#creator-editor-topic-container').wait_for(
+                    state="visible",
+                    timeout=3000
+                )
+                first_item = page.locator('#creator-editor-topic-container .item').first
+                await first_item.wait_for(state="visible", timeout=2000)
+                await first_item.click()
+            except Exception as exc:
+                xiaohongshu_logger.warning(f"未匹配到小红书话题建议 '{tag}'，使用空格跳过: {exc}")
+                await page.keyboard.press("Space")
 
     async def fill_meta(self, page: Page) -> None:
         await self.fill_title(page)

@@ -432,7 +432,7 @@ class DouYinBaseUploader(BaseVideoUploader):
         await description_editor.click()
         await page.keyboard.press("Control+KeyA")
         await page.keyboard.press("Delete")
-        await page.keyboard.type(description)
+        await page.keyboard.type(description or "")
 
         for tag in tags or []:
             await page.keyboard.type(" #" + tag)
@@ -548,7 +548,7 @@ class DouYinVideo(DouYinBaseUploader):
         )
         self.title = title
         self.file_path = file_path
-        self.tags = tags
+        self.tags = tags or []
         self.thumbnail_landscape_path = thumbnail_landscape_path
         self.thumbnail_portrait_path = thumbnail_portrait_path
         self.productLink = productLink
@@ -662,7 +662,7 @@ class DouYinVideo(DouYinBaseUploader):
         await asyncio.sleep(1)
         douyin_logger.info(_msg("✍️", "小人开始填标题、描述和话题"))
         await self.fill_title_and_description(page, self.title, self.desc or self.title, self.tags)
-        douyin_logger.info(_msg("🏷️", f"小人一共贴了 {len(self.tags)} 个话题"))
+        douyin_logger.info(_msg("🏷️", f"小人一共贴了 {len(self.tags or [])} 个话题"))
 
         while True:
             try:

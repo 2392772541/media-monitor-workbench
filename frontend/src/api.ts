@@ -1,3 +1,12 @@
+import type {
+  CommentTopicsResp,
+  CreatorsFeedResp,
+  FetchCreatorHistoryResp,
+  R2AnalysisPayload,
+  RemixCompareResponse,
+  TopicBoardItem,
+} from './types';
+
 export async function apiRequest<T>(url: string, init?: RequestInit): Promise<T> {
   const headers: Record<string, string> = {
     ...(init?.body !== undefined ? { 'Content-Type': 'application/json' } : {}),
@@ -77,4 +86,94 @@ export function safeJsonArray<T = string>(raw?: string | null): T[] {
   } catch {
     return [];
   }
+}
+
+export async function fetchCreatorsFeed(params: {
+  creatorId?: number | null;
+  days: number;
+  offset?: number;
+  limit?: number;
+  includeRss?: boolean;
+  search?: string;
+}): Promise<CreatorsFeedResp> {
+  const qs = new URLSearchParams();
+  if (params.creatorId) qs.set('creatorId', String(params.creatorId));
+  qs.set('days', String(params.days));
+  qs.set('offset', String(params.offset ?? 0));
+  qs.set('limit', String(params.limit ?? 30));
+  qs.set('includeRss', params.includeRss ? '1' : '0');
+  if (params.search && params.search.trim()) {
+    qs.set('search', params.search.trim());
+  }
+  return apiRequest<CreatorsFeedResp>(`/api/radar/creators/feed?${qs.toString()}`);
+}
+
+export async function analyzeContentR2(
+  contentId: number,
+  force = false
+): Promise<{ ok: boolean; analysis: R2AnalysisPayload }> {
+  return apiRequest<{ ok: boolean; analysis: R2AnalysisPayload }>(`/api/radar/intel/${contentId}/r2-analyze`, {
+    method: 'POST',
+    body: JSON.stringify({ force }),
+  });
+}
+
+export async function compareCreatorsRemix(payload: {
+  contentIds?: number[];
+  creatorId?: number | null;
+}): Promise<RemixCompareResponse> {
+  const body: { contentIds?: number[]; creatorId?: number } = {};
+  if (payload.contentIds && payload.contentIds.length > 0) {
+    body.contentIds = payload.contentIds;
+  }
+  if (payload.creatorId) {
+    body.creatorId = payload.creatorId;
+  }
+  return apiRequest<RemixCompareResponse>('/api/radar/creators/compare-remix', {
+    method: 'POST',
+    body: JSON.stringify(body),
+  });
+}
+
+export async function fetchCreatorHistory(creatorId: number, maxPages = 3): Promise<FetchCreatorHistoryResp> {
+  return apiRequest<FetchCreatorHistoryResp>(`/api/radar/creators/${creatorId}/fetch-history`, {
+    method: 'POST',
+    body: JSON.stringify({ maxPages }),
+  });
+}
+
+export async function extractCommentTopics(
+  contentId: number,
+  opts?: { autoCrawl?: boolean; force?: boolean }
+): Promise<CommentTopicsResp> {
+  return apiRequest<CommentTopicsResp>(`/api/radar/intel/${contentId}/comments/topics`, {
+    method: 'POST',
+    body: JSON.stringify({
+      autoCrawl: Boolean(opts?.autoCrawl),
+      force: Boolean(opts?.force),
+    }),
+  });
+}
+
+export async function saveCommentTopicToBoard(
+  topicId: number
+): Promise<{ ok: boolean; topicId: number; boardItem: TopicBoardItem }> {
+  return apiRequest<{ ok: boolean; topicId: number; boardItem: TopicBoardItem }>(
+    `/api/radar/comments/topics/${topicId}/save-board`,
+    { method: 'POST' }
+  );
+}
+
+export async function saveTopicToBoard(payload: {
+  title: string;
+  source_content_id?: number | null;
+  core_angle?: string;
+  notes?: string;
+  tags?: string[];
+  source_url?: string;
+}): Promise<{ ok: boolean; item: TopicBoardItem }> {
+  return apiRequest<{ ok: boolean; item: TopicBoardItem }>('/api/radar/board', {
+    method: 'POST',
+    body: JSON.stringify(payload),
+  });
 }

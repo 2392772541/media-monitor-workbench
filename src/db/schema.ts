@@ -372,3 +372,38 @@ export const MIGRATION_V2_SQL = `
   );
   CREATE INDEX IF NOT EXISTS idx_tingwu_jobs_content ON tingwu_jobs(content_id, created_at DESC);
 `;
+
+// V3 增量迁移：新增对标博主 R2 三项统一分析表与 R4 评论区热门话题转选题表
+export const MIGRATION_V3_SQL = `
+  CREATE TABLE IF NOT EXISTS content_r2_analyses (
+    content_id INTEGER PRIMARY KEY REFERENCES contents(id) ON DELETE CASCADE,
+    what_it_says TEXT NOT NULL DEFAULT '',
+    heat_verdict TEXT NOT NULL DEFAULT '',
+    heat_level TEXT NOT NULL DEFAULT 'normal',
+    remix_suitability TEXT NOT NULL DEFAULT '',
+    remix_score REAL NOT NULL DEFAULT 0,
+    remix_angle TEXT NOT NULL DEFAULT '',
+    basis_source TEXT NOT NULL DEFAULT '标题简介+真实数据',
+    model TEXT NOT NULL DEFAULT '',
+    fingerprint TEXT NOT NULL DEFAULT '',
+    created_at TEXT NOT NULL,
+    updated_at TEXT NOT NULL
+  );
+  CREATE INDEX IF NOT EXISTS idx_r2_analyses_score ON content_r2_analyses(remix_score DESC, updated_at DESC);
+
+  CREATE TABLE IF NOT EXISTS comment_topic_ideas (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    content_id INTEGER NOT NULL REFERENCES contents(id) ON DELETE CASCADE,
+    topic TEXT NOT NULL,
+    heat_note TEXT NOT NULL DEFAULT '',
+    evidence_comments_json TEXT NOT NULL DEFAULT '[]',
+    creation_idea_title TEXT NOT NULL DEFAULT '',
+    creation_angle TEXT NOT NULL DEFAULT '',
+    comments_snapshot_count INTEGER NOT NULL DEFAULT 0,
+    saved_board_id INTEGER REFERENCES topic_board(id) ON DELETE SET NULL,
+    created_at TEXT NOT NULL,
+    updated_at TEXT NOT NULL,
+    UNIQUE(content_id, topic)
+  );
+  CREATE INDEX IF NOT EXISTS idx_comment_topic_ideas_content ON comment_topic_ideas(content_id, id ASC);
+`;

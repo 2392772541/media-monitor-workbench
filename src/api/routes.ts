@@ -680,6 +680,25 @@ export function registerRoutes(app: FastifyInstance, shutdownHandler: () => Prom
     await proxySauFileDownload(req, reply, `/getFile?filename=${encodeURIComponent(filename)}`);
   });
 
+  // 免拖拽导入本机视频文件到内置 SAU 素材库
+  app.post<{ Body: { filePath?: string; filename?: string } }>('/api/sau/import-local-file', async (req, reply) => {
+    const filePath = typeof req.body?.filePath === 'string' ? req.body.filePath.trim() : '';
+    if (!filePath) {
+      return reply.code(400).send({ code: 400, msg: '缺少有效的本地视频路径 filePath', data: null });
+    }
+    const customFilename = typeof req.body?.filename === 'string' ? req.body.filename.trim() : '';
+    const res = await proxySauJson(
+      'POST',
+      '/importLocalFile',
+      {
+        filePath,
+        ...(customFilename ? { filename: customFilename } : {}),
+      },
+      60000
+    );
+    return reply.code(res.status).send(res.payload);
+  });
+
   app.post('/api/sau/post-video', async (req, reply) => {
     const res = await proxySauJson('POST', '/postVideo', req.body, 300000);
     return reply.code(res.status).send(res.payload);

@@ -12,9 +12,10 @@ import {
   RefreshCw,
   ExternalLink,
   AlertTriangle,
+  Star,
 } from 'lucide-react';
-import { apiRequest, fmtTime } from '../api';
-import type { CommentCrawlJob, CommentCrawlJobSummary } from '../types';
+import { apiRequest, fmtTime, saveTopicToBoard } from '../api';
+import type { CommentCrawlJob, CommentCrawlJobSummary, TopicBoardItem } from '../types';
 
 type PlatformKey = 'douyin' | 'bilibili' | 'xiaohongshu' | 'kuaishou';
 type CrawlMode = 'detail' | 'search' | 'creator';
@@ -64,9 +65,11 @@ function platformColor(p: string): string {
 export function CommentsPage({
   onToast,
   onNavigate,
+  onRefreshBadge,
 }: {
   onToast: (msg: string) => void;
   onNavigate?: (tab: string) => void;
+  onRefreshBadge?: () => void;
 }) {
   const [platform, setPlatform] = useState<PlatformKey>('douyin');
   const [mode, setMode] = useState<CrawlMode>('detail');
@@ -83,6 +86,17 @@ export function CommentsPage({
   const [searchText, setSearchText] = useState('');
   const [sortBy, setSortBy] = useState<'likes' | 'time'>('likes');
   const [copiedTop, setCopiedTop] = useState(false);
+  const [savedBoardTitles, setSavedBoardTitles] = useState<Set<string>>(() => new Set());
+  const [savingAngleKey, setSavingAngleKey] = useState<string | null>(null);
+
+  const loadBoardTitles = async () => {
+    try {
+      const res = await apiRequest<{ items: TopicBoardItem[] }>('/api/radar/board');
+      setSavedBoardTitles(new Set((res.items || []).map((it) => String(it.title || '').trim()).filter(Boolean)));
+    } catch {
+      // 忽略静默查询异常
+    }
+  };
 
   // 加载历史任务列表
   const loadJobs = async (autoSelectFirst = false) => {
@@ -109,6 +123,7 @@ export function CommentsPage({
 
   useEffect(() => {
     void loadJobs(true);
+    void loadBoardTitles();
   }, []);
 
   useEffect(() => {
@@ -195,6 +210,45 @@ export function CommentsPage({
       onToast('已删除该条采集记录');
     } catch (err) {
       onToast((err as Error).message);
+    }
+  };
+
+  const handleSaveAngleToBoard = async (key: string, titleText: string, kindLabel: string) => {
+    if (!activeJob) return;
+    const cleanTitle = titleText.trim();
+    if (!cleanTitle || savedBoardTitles.has(cleanTitle)) return;
+    setSavingAngleKey(key);
+    try {
+      const topEvidence = [...activeJob.comments]
+        .sort((a, b) => (b.likes || 0) - (a.likes || 0))
+        .slice(0, 3)
+        .map((c) => `[👍${c.likes ?? 0}] ${c.author || '观众'}：${c.text}`)
+        .join('\n');
+      const sourceUrl = activeJob.input.trim().startsWith('http') ? activeJob.input.trim() : '';
+      await saveTopicToBoard({
+        title: cleanTitle,
+        source_content_id: null,
+        core_angle: activeJob.aiSummary?.oneLineTakeaway || `来自评论区${kindLabel}`,
+        notes: [
+          `来源：${platformLabel(activeJob.platform)} · ${modeLabel(activeJob.mode)}采集（${activeJob.input}）`,
+          topEvidence ? `代表热评：\n${topEvidence}` : '',
+        ]
+          .filter(Boolean)
+          .join('\n\n'),
+        tags: ['评论话题', platformLabel(activeJob.platform)],
+        source_url: sourceUrl,
+      });
+      setSavedBoardTitles((prev) => {
+        const next = new Set(prev);
+        next.add(cleanTitle);
+        return next;
+      });
+      onToast('已存入选题库，可在「简易收藏本」查看');
+      onRefreshBadge?.();
+    } catch (err) {
+      onToast((err as Error).message);
+    } finally {
+      setSavingAngleKey(null);
     }
   };
 
@@ -521,7 +575,14 @@ export function CommentsPage({
                 <div style={{ display: 'flex', flexDirection: 'column', gap: 10 }}>
                   {activeJob.aiSummary.oneLineTakeaway && (
                     <div className="accent-box accent-indigo">
-                      <div className="accent-box-label">AI 一句话结论</div>
+                      <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', gap: 8, flexWrap: 'wrap' }}>
+                        <div className="accent-box-label">AI 一句话结论</div>
+                        {onNavigate && (
+                          <button type="button" className="btn btn-sm" onClick={() => onNavigate('saved')}>
+                            去收藏本查看选题库
+                          </button>
+                        )}
+                      </div>
                       <div className="accent-box-text" style={{ fontWeight: 600 }}>{activeJob.aiSummary.oneLineTakeaway}</div>
                     </div>
                   )}
@@ -537,17 +598,57 @@ export function CommentsPage({
                     <div className="accent-box accent-amber">
                       <div className="accent-box-label">核心吐槽与痛点</div>
                       <ul className="comments-ai-ul">
-                        {activeJob.aiSummary.painPoints.map((p, idx) => (
-                          <li key={idx}>{p}</li>
-                        ))}
+                        {activeJob.aiSummary.painPoints.map((p, idx) => {
+                          const clean = p.trim();
+                          const isSaved = savedBoardTitles.has(clean);
+                          const key = `pain-${activeJob.id}-${idx}`;
+                          return (
+                            <li key={idx} style={{ display: 'flex', flexDirection: 'column', gap: 5, marginBottom: 6 }}>
+                              <span>{p}</span>
+                              <div>
+                                <button
+                                  type="button"
+                                  data-testid={`save-pain-${idx}`}
+                                  className={`btn btn-sm ${isSaved ? 'btn-star-active' : ''}`}
+                                  style={{ padding: '2px 8px', fontSize: 11.5 }}
+                                  disabled={isSaved || savingAngleKey === key}
+                                  onClick={() => void handleSaveAngleToBoard(key, p, '痛点')}
+                                >
+                                  <Star size={11} fill={isSaved ? 'currentColor' : 'none'} />
+                                  {savingAngleKey === key ? '存入中...' : isSaved ? '已存入选题库' : '一键存为创作选题'}
+                                </button>
+                              </div>
+                            </li>
+                          );
+                        })}
                       </ul>
                     </div>
                     <div className="accent-box accent-green">
                       <div className="accent-box-label">可直接拍的切入角度</div>
                       <ul className="comments-ai-ul">
-                        {activeJob.aiSummary.topicAngles.map((a, idx) => (
-                          <li key={idx}>{a}</li>
-                        ))}
+                        {activeJob.aiSummary.topicAngles.map((a, idx) => {
+                          const clean = a.trim();
+                          const isSaved = savedBoardTitles.has(clean);
+                          const key = `angle-${activeJob.id}-${idx}`;
+                          return (
+                            <li key={idx} style={{ display: 'flex', flexDirection: 'column', gap: 5, marginBottom: 6 }}>
+                              <span>{a}</span>
+                              <div>
+                                <button
+                                  type="button"
+                                  data-testid={`save-angle-${idx}`}
+                                  className={`btn btn-sm ${isSaved ? 'btn-star-active' : 'btn-primary'}`}
+                                  style={{ padding: '2px 8px', fontSize: 11.5 }}
+                                  disabled={isSaved || savingAngleKey === key}
+                                  onClick={() => void handleSaveAngleToBoard(key, a, '切入角度')}
+                                >
+                                  <Star size={11} fill={isSaved ? 'currentColor' : 'none'} />
+                                  {savingAngleKey === key ? '存入中...' : isSaved ? '已存入选题库' : '一键存为创作选题'}
+                                </button>
+                              </div>
+                            </li>
+                          );
+                        })}
                       </ul>
                     </div>
                   </div>

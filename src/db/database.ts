@@ -4,7 +4,7 @@ import crypto from 'node:crypto';
 import { DatabaseSync } from 'node:sqlite';
 import { PATHS, PLATFORM_PROFILES, getSafeProfileDir } from '../config.js';
 import { log } from '../utils/logger.js';
-import { MIGRATION_V1_SQL, MIGRATION_V2_SQL } from './schema.js';
+import { MIGRATION_V1_SQL, MIGRATION_V2_SQL, MIGRATION_V3_SQL } from './schema.js';
 
 let dbInstance: DatabaseSync | null = null;
 
@@ -48,6 +48,7 @@ function runMigrations(db: DatabaseSync): void {
   const migrations: Array<{ version: number; name: string; sql: string }> = [
     { version: 1, name: 'initial_schema', sql: MIGRATION_V1_SQL },
     { version: 2, name: 'topic_radar_v2', sql: MIGRATION_V2_SQL },
+    { version: 3, name: 'creators_r2_comments_v3', sql: MIGRATION_V3_SQL },
   ];
 
   for (const m of migrations) {
@@ -311,15 +312,29 @@ export function upsertContentWithMetrics(input: UpsertContentInput): { contentId
   } else {
     contentId = existing.id;
     const nextTitle = input.title.trim() || existing.title;
+    const nextSummary = (input.summary || '').trim();
     const nextBody = (input.body || '').trim().length > existing.body.length ? (input.body || '').trim() : existing.body;
+    // 若历史记录缺少 published_at 或 summary，则在后续抓取补全，不破坏既有非空发布时间
     db.prepare(`
       UPDATE contents SET
         title = ?,
+        summary = CASE WHEN (summary IS NULL OR summary = '') AND ? != '' THEN ? ELSE summary END,
         body = ?,
         cover_url = CASE WHEN ? != '' THEN ? ELSE cover_url END,
+        published_at = COALESCE(published_at, ?),
         page_updated_at = COALESCE(?, page_updated_at)
       WHERE id = ?
-    `).run(nextTitle, nextBody, input.coverUrl || '', input.coverUrl || '', input.pageUpdatedAt || null, contentId);
+    `).run(
+      nextTitle,
+      nextSummary,
+      nextSummary,
+      nextBody,
+      input.coverUrl || '',
+      input.coverUrl || '',
+      input.publishedAt || null,
+      input.pageUpdatedAt || null,
+      contentId
+    );
   }
 
   let metricsUpdated = false;

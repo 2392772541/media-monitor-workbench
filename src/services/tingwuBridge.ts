@@ -4,6 +4,9 @@ import { execFileSync, spawn } from 'node:child_process';
 import { PATHS, PROJECT_ROOT } from '../config.js';
 import { getDb } from '../db/database.js';
 import { log } from '../utils/logger.js';
+import { generateCreatorCopyDigest } from './creatorDigestService.js';
+
+export type AsrPipelineStage = 'queued' | 'downloading' | 'transcribing' | 'digesting';
 
 export interface TingwuStatus {
   installed: boolean;
@@ -18,16 +21,47 @@ export interface TingwuStatus {
   ffmpegAvailable: boolean;
   running: boolean;
   currentJob: string | null;
+  queueLength: number;
   lastLogs: string[];
 }
 
 const MOBILE_IOS_UA =
   'Mozilla/5.0 (iPhone; CPU iPhone OS 17_5 like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/17.5 Mobile/15E148 Safari/604.1';
 
+interface QueuedAsrTask {
+  contentId: number;
+  jobId: number;
+  platform: string;
+  canonicalUrl: string;
+  title: string;
+  autoDigest: boolean;
+}
+
 let asrRunning = false;
 let currentJobLabel: string | null = null;
+let activeContentId: number | null = null;
+let activeStage: AsrPipelineStage | null = null;
+const asrQueue: QueuedAsrTask[] = [];
 let asrLogs: string[] = [];
 let cachedPythonProbe: { pythonExe: string; ready: boolean; gpuReady: boolean; checkedAt: number } | null = null;
+
+export function getContentAsrPipelineState(contentId: number): {
+  stage: AsrPipelineStage | null;
+  queuePosition: number | null;
+} {
+  if (activeContentId === contentId && activeStage) {
+    return { stage: activeStage, queuePosition: 0 };
+  }
+  const idx = asrQueue.findIndex((t) => t.contentId === contentId);
+  if (idx >= 0) {
+    return { stage: 'queued', queuePosition: idx + 1 };
+  }
+  return { stage: null, queuePosition: null };
+}
+
+export function isAsrPipelineBusy(): boolean {
+  return asrRunning || asrQueue.length > 0;
+}
 
 function addLog(msg: string) {
   const line = `[${new Date().toLocaleTimeString('zh-CN')}] ${msg}`;
@@ -101,6 +135,7 @@ export function getTingwuStatus(): TingwuStatus {
     ffmpegAvailable: hasExecutable('ffmpeg'),
     running: asrRunning,
     currentJob: currentJobLabel,
+    queueLength: asrQueue.length,
     lastLogs: asrLogs.slice(-20),
   };
 }
@@ -215,11 +250,13 @@ async function extractDouyinAudioToMp3(videoUrl: string, outMp3Path: string): Pr
   if (!item) return false;
 
   const rawUrls: string[] = [];
-  // 仅用于抽取纯音频，优先直接走原始高速 CDN 链接，避免替换 /play/ 导致个别节点卡死超时
+  // 优先走无水印官方高速 CDN（/play/ 通常体积小 30%+ 且首包快 10 倍），失败再回退原始 /playwm/
   for (const u of item.video?.play_addr?.url_list || []) {
     if (!u) continue;
+    if (u.includes('/playwm/')) {
+      rawUrls.push(u.replace('/playwm/', '/play/'));
+    }
     rawUrls.push(u);
-    if (u.includes('/playwm/')) rawUrls.push(u.replace('/playwm/', '/play/'));
   }
   if (rawUrls.length === 0) {
     for (const u of item.music?.play_url?.url_list || []) {
@@ -232,7 +269,14 @@ async function extractDouyinAudioToMp3(videoUrl: string, outMp3Path: string): Pr
   for (const mediaUrl of rawUrls) {
     const ac = new AbortController();
     const connectTimer = setTimeout(() => ac.abort(), 15000);
-    let bodyTimer: ReturnType<typeof setTimeout> | null = null;
+    let stallTimer: ReturnType<typeof setTimeout> | null = null;
+    let totalTimer: ReturnType<typeof setTimeout> | null = null;
+    let ws: fs.WriteStream | null = null;
+    const resetStall = () => {
+      if (stallTimer) clearTimeout(stallTimer);
+      // 连续 25 秒收不到任何数据包即判定该 CDN 节点卡死，立刻切下一个备用节点
+      stallTimer = setTimeout(() => ac.abort(), 25000);
+    };
     try {
       const mr = await fetch(mediaUrl, {
         headers: { 'User-Agent': MOBILE_IOS_UA, Referer: 'https://www.iesdouyin.com/' },
@@ -241,18 +285,49 @@ async function extractDouyinAudioToMp3(videoUrl: string, outMp3Path: string): Pr
       });
       clearTimeout(connectTimer);
       const ct = (mr.headers.get('content-type') || '').toLowerCase();
-      if (!mr.ok || ct.includes('text/html')) continue;
-      // 响应头正常后放宽正文下载至 180 秒，确保 10~30 分钟长视频绝不被中途掐断
-      bodyTimer = setTimeout(() => ac.abort(), 180000);
-      const buf = Buffer.from(await mr.arrayBuffer());
-      clearTimeout(bodyTimer);
-      if (buf.length < 8192) continue;
-      fs.writeFileSync(tmpRaw, buf);
+      if (!mr.ok || ct.includes('text/html') || !mr.body) continue;
+
+      totalTimer = setTimeout(() => ac.abort(), 240000);
+      resetStall();
+      ws = fs.createWriteStream(tmpRaw);
+      const reader = mr.body.getReader();
+      let written = 0;
+
+      while (true) {
+        const { done, value } = await reader.read();
+        if (done) break;
+        if (value && value.byteLength > 0) {
+          resetStall();
+          written += value.byteLength;
+          if (!ws.write(Buffer.from(value))) {
+            await new Promise<void>((resolve) => ws!.once('drain', resolve));
+          }
+        }
+      }
+
+      await new Promise<void>((resolve, reject) => {
+        ws!.end((err?: Error | null) => (err ? reject(err) : resolve()));
+      });
+      if (stallTimer) clearTimeout(stallTimer);
+      if (totalTimer) clearTimeout(totalTimer);
+      if (written < 8192) {
+        fs.rmSync(tmpRaw, { force: true });
+        continue;
+      }
       downloaded = true;
       break;
     } catch {
       clearTimeout(connectTimer);
-      if (bodyTimer) clearTimeout(bodyTimer);
+      if (stallTimer) clearTimeout(stallTimer);
+      if (totalTimer) clearTimeout(totalTimer);
+      if (ws) {
+        try {
+          ws.destroy();
+        } catch {
+          // ignore
+        }
+      }
+      fs.rmSync(tmpRaw, { force: true });
       continue;
     }
   }
@@ -272,64 +347,33 @@ async function extractDouyinAudioToMp3(videoUrl: string, outMp3Path: string): Pr
   }
 }
 
-/**
- * 单端口一键「免 Cookie 抽纯音频 → 本机 RTX 4070 显卡 faster-whisper 转写 → 干净口播全文自动回库」。
- * 彻底免登录、不掉线、不耗网页免费额度、通常 10～25 秒出稿。
- */
-export function startTingwuTranscription(contentId: number): {
-  started: boolean;
-  jobId?: number;
-  message: string;
-} {
+// 串行消费本机 RTX 显卡转写队列（每次只跑 1 条视频，不卡电脑、不爆显存，转完自动接深度 1234 归纳）
+async function drainAsrQueue(): Promise<void> {
+  if (asrRunning) return;
   const st = getTingwuStatus();
-  if (!st.installed) {
-    return {
-      started: false,
-      message: '未检测到本机 faster-whisper 环境（请确认已安装 faster-whisper 或配置 MMW_PYTHON_PATH）',
-    };
-  }
-  if (!st.ffmpegAvailable) return { started: false, message: '本机未检测到 ffmpeg，无法抽取纯音频' };
-  if (asrRunning) return { started: false, message: `本机显卡正在转写另一条视频：${currentJobLabel}` };
 
-  const db = getDb();
-  const content = db
-    .prepare('SELECT id, platform, canonical_url, title FROM contents WHERE id = ?')
-    .get(contentId) as { id: number; platform: string; canonical_url: string; title: string } | undefined;
-  if (!content) return { started: false, message: '内容不存在' };
-  if (content.platform === 'douyin' && !/\/video\/\d+/.test(content.canonical_url)) {
-    return {
-      started: false,
-      message: '当前条目是抖音热搜词条（非单个视频链接），请点开具体抖音视频作品再转口播稿',
-    };
-  }
-
-  const now = new Date().toISOString();
-  fs.mkdirSync(PATHS.audioDir, { recursive: true });
-  const outDir = path.join(PATHS.transcriptsDir, `content-${contentId}`);
-  fs.mkdirSync(outDir, { recursive: true });
-
-  const jobRes = db
-    .prepare(`
-      INSERT INTO tingwu_jobs (content_id, output_dir, status, created_at, updated_at)
-      VALUES (?, ?, 'downloading', ?, ?)
-    `)
-    .run(contentId, outDir, now, now);
-  const jobId = Number(jobRes.lastInsertRowid);
-
-  db.prepare("UPDATE contents SET transcript_status = 'transcribing' WHERE id = ?").run(contentId);
-
-  void (async () => {
+  while (asrQueue.length > 0) {
+    const task = asrQueue.shift()!;
     asrRunning = true;
-    currentJobLabel = `本地显卡转写：${content.title.slice(0, 24)}`;
+    activeContentId = task.contentId;
+    activeStage = 'downloading';
+    currentJobLabel = `显卡转写：${task.title.slice(0, 24)}`;
+
+    const db = getDb();
     try {
-      const uniqueStem = `content-${contentId}_${Date.now().toString(36)}`;
+      db.prepare("UPDATE tingwu_jobs SET status = 'downloading', updated_at = ? WHERE id = ?").run(
+        new Date().toISOString(),
+        task.jobId
+      );
+
+      const uniqueStem = `content-${task.contentId}_${Date.now().toString(36)}`;
       const audioBase = path.join(PATHS.audioDir, uniqueStem);
       const audioMp3 = `${audioBase}.mp3`;
       let finalAudioPath = '';
 
-      if (content.platform === 'douyin') {
-        addLog(`步骤 1/2：免 Cookie 提取抖音纯音频 -> ${path.basename(audioMp3)}`);
-        const ok = await extractDouyinAudioToMp3(content.canonical_url, audioMp3);
+      if (task.platform === 'douyin') {
+        addLog(`步骤 1/3：免 Cookie 提取抖音纯音频 -> ${path.basename(audioMp3)}`);
+        const ok = await extractDouyinAudioToMp3(task.canonicalUrl, audioMp3);
         if (ok) finalAudioPath = audioMp3;
       }
 
@@ -337,7 +381,7 @@ export function startTingwuTranscription(contentId: number): {
         if (!st.ytDlpAvailable) {
           throw new Error('直链提取未命中且本机未安装 yt-dlp');
         }
-        addLog(`步骤 1/2：使用 yt-dlp 提取视频纯音频 -> ${path.basename(audioMp3)}`);
+        addLog(`步骤 1/3：使用 yt-dlp 提取视频纯音频 -> ${path.basename(audioMp3)}`);
         const ytArgs = [
           '-x',
           '--audio-format',
@@ -345,11 +389,18 @@ export function startTingwuTranscription(contentId: number): {
           '--audio-quality',
           '6',
           '--no-playlist',
-          '-o',
-          `${audioBase}.%(ext)s`,
-          content.canonical_url,
         ];
-        const dlRes = await runCommandAsync('yt-dlp', ytArgs, PATHS.audioDir, 180000, (l) => {
+        if (task.platform === 'bilibili') {
+          ytArgs.push(
+            '--user-agent',
+            'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/126.0.0.0 Safari/537.36',
+            '--add-header',
+            'Referer:https://www.bilibili.com/'
+          );
+        }
+        ytArgs.push('-o', `${audioBase}.%(ext)s`, task.canonicalUrl);
+
+        const dlRes = await runCommandAsync('yt-dlp', ytArgs, PATHS.audioDir, 240000, (l) => {
           if (l.includes('[download]') || l.includes('ERROR')) addLog(l.slice(0, 140));
         });
         const candidateAudio = fs
@@ -357,19 +408,23 @@ export function startTingwuTranscription(contentId: number): {
           .find((f) => f.startsWith(`${uniqueStem}.`) && /\.(mp3|m4a|wav|webm|opus)$/i.test(f));
 
         if (dlRes.code !== 0 || !candidateAudio) {
-          throw new Error('音频抽取失败（若是受限或私密视频，请确认链接可直接播放）');
+          const errHint = (dlRes.stderr || dlRes.stdout || '').trim().slice(-180);
+          throw new Error(`音频抽取失败：${errHint || '请确认视频链接可正常播放'}`);
         }
         finalAudioPath = path.join(PATHS.audioDir, candidateAudio);
       }
 
+      activeStage = 'transcribing';
       db.prepare("UPDATE tingwu_jobs SET audio_path = ?, status = 'uploading', updated_at = ? WHERE id = ?").run(
         finalAudioPath,
         new Date().toISOString(),
-        jobId
+        task.jobId
       );
 
+      const outDir = path.join(PATHS.transcriptsDir, `content-${task.contentId}`);
+      fs.mkdirSync(outDir, { recursive: true });
       const outputTxt = path.join(outDir, `${uniqueStem}.txt`);
-      addLog(`步骤 2/2：本机 ${st.gpuReady ? 'RTX 显卡' : 'CPU'} faster-whisper (${st.model}) 开始离线转写...`);
+      addLog(`步骤 2/3：本机 ${st.gpuReady ? 'RTX 显卡' : 'CPU'} faster-whisper (${st.model}) 开始离线转写...`);
 
       const asrRes = await runCommandAsync(
         st.pythonExe,
@@ -414,33 +469,154 @@ export function startTingwuTranscription(contentId: number): {
           transcript_source = 'faster-whisper',
           body = CASE WHEN length(body) < 120 THEN ? ELSE body END
         WHERE id = ?
-      `).run(transcriptText, transcriptText.slice(0, 12000), contentId);
+      `).run(transcriptText, transcriptText.slice(0, 12000), task.contentId);
+
+      addLog(`步骤 2/3 完成：已拿到完整口播 ${transcriptText.length} 字 ${metaNote}`);
+
+      let digestError: string | null = null;
+      if (task.autoDigest) {
+        activeStage = 'digesting';
+        currentJobLabel = `深度归纳 1234：${task.title.slice(0, 22)}`;
+        db.prepare("UPDATE tingwu_jobs SET transcript_path = ?, status = 'digesting', updated_at = ? WHERE id = ?").run(
+          outputTxt,
+          new Date().toISOString(),
+          task.jobId
+        );
+        try {
+          addLog(`步骤 3/3：正按 ${transcriptText.length} 字完整口播深度提炼 1234 核心要点与可执行动作...`);
+          await generateCreatorCopyDigest(task.contentId, true);
+          addLog(`步骤 3/3 完成：深度 1234 归纳已入库！`);
+        } catch (digestErr) {
+          digestError = `完整口播已保存，深度归纳暂时失败（点「按口播归纳」可秒重试）：${(digestErr as Error).message}`;
+          addLog(digestError);
+        }
+      }
 
       db.prepare(`
-        UPDATE tingwu_jobs SET transcript_path = ?, status = 'done', error_message = NULL, updated_at = ? WHERE id = ?
-      `).run(outputTxt, doneAt, jobId);
-
-      addLog(`本地转写完成！共 ${transcriptText.length} 字 ${metaNote}`);
+        UPDATE tingwu_jobs SET transcript_path = ?, status = 'done', error_message = ?, updated_at = ? WHERE id = ?
+      `).run(outputTxt, digestError, new Date().toISOString(), task.jobId);
     } catch (err) {
       const msg = (err as Error).message;
       addLog(`转写中断：${msg}`);
-      db.prepare("UPDATE contents SET transcript_status = 'failed' WHERE id = ?").run(contentId);
+      db.prepare("UPDATE contents SET transcript_status = 'failed' WHERE id = ?").run(task.contentId);
       db.prepare("UPDATE tingwu_jobs SET status = 'failed', error_message = ?, updated_at = ? WHERE id = ?").run(
         msg,
         new Date().toISOString(),
-        jobId
+        task.jobId
       );
     } finally {
       asrRunning = false;
+      activeContentId = null;
+      activeStage = null;
       currentJobLabel = null;
     }
-  })();
+  }
+}
+
+/**
+ * 单端口一键「免 Cookie/yt-dlp 抽纯音频 → 本机 RTX 显卡 faster-whisper 转完整口播 → 自动深度归纳 1234」。
+ * 支持串行排队，多条视频依次处理不卡死、不爆显存。
+ */
+export function enqueueTranscriptAndDigest(
+  contentId: number,
+  autoDigest = true
+): {
+  started: boolean;
+  queued?: boolean;
+  alreadyQueued?: boolean;
+  position?: number;
+  jobId?: number;
+  message: string;
+} {
+  const st = getTingwuStatus();
+  if (!st.installed) {
+    return {
+      started: false,
+      message: '未检测到本机 faster-whisper 环境（请确认已安装 faster-whisper 或配置 MMW_PYTHON_PATH）',
+    };
+  }
+  if (!st.ffmpegAvailable) return { started: false, message: '本机未检测到 ffmpeg，无法抽取纯音频' };
+
+  // 若已在执行中或已在队列中，不重复入队（若请求自动归纳则升级标记）
+  if (activeContentId === contentId) {
+    return {
+      started: true,
+      queued: true,
+      alreadyQueued: true,
+      position: 0,
+      message: '正在转写这条视频的完整口播，完成后会自动生成 1234 深度归纳',
+    };
+  }
+  const existingIdx = asrQueue.findIndex((t) => t.contentId === contentId);
+  if (existingIdx >= 0) {
+    if (autoDigest) asrQueue[existingIdx].autoDigest = true;
+    return {
+      started: true,
+      queued: true,
+      alreadyQueued: true,
+      position: existingIdx + 1,
+      message: `已在显卡转写队列第 ${existingIdx + 1} 位，转完自动出 1234 深度归纳`,
+    };
+  }
+
+  const db = getDb();
+  const content = db
+    .prepare('SELECT id, platform, canonical_url, title FROM contents WHERE id = ?')
+    .get(contentId) as { id: number; platform: string; canonical_url: string; title: string } | undefined;
+  if (!content) return { started: false, message: '内容不存在' };
+  if (content.platform === 'douyin' && !/\/video\/\d+/.test(content.canonical_url)) {
+    return {
+      started: false,
+      message: '当前条目是抖音热搜词条（非单个视频链接），请点开具体抖音视频作品再转口播稿',
+    };
+  }
+
+  const now = new Date().toISOString();
+  fs.mkdirSync(PATHS.audioDir, { recursive: true });
+  const outDir = path.join(PATHS.transcriptsDir, `content-${contentId}`);
+  fs.mkdirSync(outDir, { recursive: true });
+
+  const initialStatus = asrRunning ? 'queued' : 'downloading';
+  const jobRes = db
+    .prepare(`
+      INSERT INTO tingwu_jobs (content_id, output_dir, status, created_at, updated_at)
+      VALUES (?, ?, ?, ?, ?)
+    `)
+    .run(contentId, outDir, initialStatus, now, now);
+  const jobId = Number(jobRes.lastInsertRowid);
+
+  db.prepare("UPDATE contents SET transcript_status = 'transcribing' WHERE id = ?").run(contentId);
+
+  asrQueue.push({
+    contentId,
+    jobId,
+    platform: content.platform,
+    canonicalUrl: content.canonical_url,
+    title: content.title,
+    autoDigest,
+  });
+
+  const pos = asrRunning ? asrQueue.length : 0;
+  void drainAsrQueue();
 
   return {
     started: true,
+    queued: true,
     jobId,
-    message: `已启动本机${st.gpuReady ? ' RTX 显卡' : ''}免费离线转写，通常十几秒内自动出口播全文`,
+    position: pos,
+    message:
+      pos > 0
+        ? `已加入本机显卡队列（第 ${pos} 位）：提取音频 → 转完整口播 → 自动深度归纳 1234`
+        : `已启动本机${st.gpuReady ? ' RTX 显卡' : ''}免费流水线：提音频 → 转完整口播 → 按口播深度归纳 1234`,
   };
+}
+
+export function startTingwuTranscription(contentId: number): {
+  started: boolean;
+  jobId?: number;
+  message: string;
+} {
+  return enqueueTranscriptAndDigest(contentId, true);
 }
 
 // 补同步已落盘的本地转写文本

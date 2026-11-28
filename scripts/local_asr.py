@@ -70,12 +70,27 @@ def register_cuda_dll_dirs() -> list[str]:
 
 
 def format_paragraphs(segments_text: list[str]) -> str:
-    """将口播分段文本按自然语义整理为干净、无时间轴、易复制的中文段落。"""
+    """将口播分段文本按自然语义整理为干净、无时间轴、无复读幻觉、易复制的中文段落。"""
     cleaned = []
+    prev_norm = ""
+    repeat_run = 0
     for raw in segments_text:
         t = re.sub(r"\s+", " ", (raw or "").strip())
         if not t:
             continue
+        # 过滤 Whisper 静音/配乐段偶发的提示词回显或连续相同句子复读
+        if "准确识别专业名词并使用规范中文标点符号" in t or t in ("简体中文普通话。", "简体中文普通话"):
+            continue
+        norm = re.sub(r"[，。！？、；：,.!?;:\s]+", "", t)
+        if not norm:
+            continue
+        if norm == prev_norm:
+            repeat_run += 1
+            if repeat_run >= 1:
+                continue
+        else:
+            prev_norm = norm
+            repeat_run = 0
         cleaned.append(t)
 
     if not cleaned:
@@ -135,9 +150,11 @@ def run_asr(audio_path: str, output_txt: str, model_name: str, language: str | N
             str(src),
             language=language or None,
             vad_filter=True,
-            vad_parameters={"min_silence_duration_ms": 450},
+            vad_parameters={"min_silence_duration_ms": 500},
             beam_size=5,
-            initial_prompt="以下是普通话简体中文视频口播内容，请准确识别专业名词并使用规范中文标点符号。",
+            condition_on_previous_text=False,
+            no_speech_threshold=0.6,
+            initial_prompt="简体中文普通话。",
         )
         texts = [seg.text for seg in segments_iter]
         return texts, info

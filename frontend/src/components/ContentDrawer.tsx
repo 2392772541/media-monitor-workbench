@@ -13,8 +13,17 @@ import {
   Flame,
   Wand2,
 } from 'lucide-react';
-import { apiRequest, fmtNum, fmtTime, PLATFORM_LABELS, safeJsonArray } from '../api';
-import type { MetricSnapshot, PublishInspirationDraft } from '../types';
+import {
+  analyzeContentR2,
+  apiRequest,
+  extractCommentTopics,
+  fmtNum,
+  fmtTime,
+  PLATFORM_LABELS,
+  safeJsonArray,
+  saveCommentTopicToBoard,
+} from '../api';
+import type { ContentDetailResp, PublishInspirationDraft, R2AnalysisPayload } from '../types';
 
 export type DrawerTab = 'point' | 'transcript' | 'comments';
 
@@ -33,49 +42,13 @@ interface ContentDrawerProps {
   onToast: (msg: string) => void;
 }
 
-interface DetailResp {
-  content: {
-    id: number;
-    platform: string;
-    canonical_url: string;
-    title: string;
-    author: string;
-    source_name: string;
-    summary: string;
-    body: string;
-    transcript: string;
-    transcript_status: string;
-    breakout_ratio: number | null;
-    breakout_score: number | null;
-    breakout_reason: string;
-    follower_count: number | null;
-    published_at: string | null;
-    discovered_at: string;
-  };
-  metrics: MetricSnapshot[];
-  comments: Array<{
-    id: number;
-    author: string;
-    text: string;
-    likes: number | null;
-    published_at: string | null;
-  }>;
-  analysis: {
-    category: string;
-    summary_zh: string;
-    core_points_json: string;
-    diff_angles_json: string;
-    trend_judgement: string;
-    content_form_advice: string;
-    analyzed_at: string;
-  } | null;
-  tingwuJobs: Array<{
-    id: number;
-    status: string;
-    error_message: string | null;
-    updated_at: string;
-  }>;
-}
+const HEAT_LEVEL_LABELS: Record<R2AnalysisPayload['heatLevel'], string> = {
+  viral: '大爆款',
+  hot: '较火',
+  normal: '表现平稳',
+  low: '热度偏弱',
+  unknown: '数据不足',
+};
 
 const PLATFORM_COLORS: Record<string, string> = {
   bilibili: '#4f46e5',
@@ -94,19 +67,20 @@ export function ContentDrawer({
   onOpenRemix,
   onToast,
 }: ContentDrawerProps) {
-  const [detail, setDetail] = useState<DetailResp | null>(null);
+  const [detail, setDetail] = useState<ContentDetailResp | null>(null);
   const [loading, setLoading] = useState(false);
   const [tab, setTab] = useState<DrawerTab>('point');
   const [busy, setBusy] = useState<string | null>(null);
   const [savedBoardId, setSavedBoardId] = useState<number | null>(null);
   const [copied, setCopied] = useState(false);
+  const [topicsNotice, setTopicsNotice] = useState<string | null>(null);
 
   // 加载内容详情与收藏状态
   const loadDetail = async (contentId: number) => {
     setLoading(true);
     try {
       const [d, boardRes] = await Promise.all([
-        apiRequest<DetailResp>(`/api/radar/intel/${contentId}/detail`),
+        apiRequest<ContentDetailResp>(`/api/radar/intel/${contentId}/detail`),
         apiRequest<{ items: Array<{ id: number; source_content_id: number | null; source_url: string }> }>('/api/radar/board'),
       ]);
       setDetail(d);
@@ -124,10 +98,12 @@ export function ContentDrawer({
   useEffect(() => {
     if (!target) {
       setDetail(null);
+      setTopicsNotice(null);
       return;
     }
     setTab(target.initialTab || 'point');
     setSavedBoardId(target.savedBoardId ?? null);
+    setTopicsNotice(null);
     void loadDetail(target.contentId);
   }, [target?.contentId, target?.initialTab]);
 
@@ -139,7 +115,7 @@ export function ContentDrawer({
     const inFlight = st === 'transcribing' || jobSt === 'downloading' || jobSt === 'uploading';
     if (!inFlight) return;
     const timer = setInterval(() => {
-      void apiRequest<DetailResp>(`/api/radar/intel/${target.contentId}/detail`)
+      void apiRequest<ContentDetailResp>(`/api/radar/intel/${target.contentId}/detail`)
         .then((d) => {
           setDetail(d);
           if (d.content.transcript_status === 'done') {
@@ -167,7 +143,72 @@ export function ContentDrawer({
   const latestMetric = detail?.metrics?.[detail.metrics.length - 1];
   const content = detail?.content;
   const analysis = detail?.analysis;
+  const r2Analysis = detail?.r2Analysis || null;
+  const commentTopics = detail?.commentTopics || [];
   const platColor = PLATFORM_COLORS[content?.platform || ''] || '#4f46e5';
+
+  // AI 三维分析（讲了什么 / 火不火 / 是否适合二次创作）
+  const handleR2Analyze = async (force = false) => {
+    if (!content) return;
+    setBusy('r2');
+    try {
+      await analyzeContentR2(content.id, force);
+      onToast(force ? 'AI 三维分析已重新生成' : 'AI 三维分析完成');
+      await loadDetail(content.id);
+      onChanged();
+    } catch (err) {
+      onToast((err as Error).message);
+    } finally {
+      setBusy(null);
+    }
+  };
+
+  // 从真实评论提炼讨论话题并生成创作选题
+  const handleExtractTopics = async (force = false) => {
+    if (!content) return;
+    setBusy('topics');
+    setTopicsNotice(null);
+    try {
+      const autoCrawl = (detail?.comments.length || 0) === 0 && Boolean(canCrawlComments);
+      const res = await extractCommentTopics(content.id, { autoCrawl, force });
+      if (res.commentsCount === 0 || res.topics.length === 0) {
+        const msg = res.message || '暂无已采集的真实评论，请先采集评论后再提炼话题';
+        setTopicsNotice(msg);
+        onToast(msg);
+      } else {
+        onToast(`已从 ${res.commentsCount} 条真实评论提炼出 ${res.topics.length} 个热门话题`);
+      }
+      await loadDetail(content.id);
+      onChanged();
+    } catch (err) {
+      onToast((err as Error).message);
+    } finally {
+      setBusy(null);
+    }
+  };
+
+  // 一键将评论话题存入选题库
+  const handleSaveTopicToBoard = async (topicId: number) => {
+    setBusy(`save-topic-${topicId}`);
+    try {
+      const res = await saveCommentTopicToBoard(topicId);
+      setDetail((prev) => {
+        if (!prev) return prev;
+        return {
+          ...prev,
+          commentTopics: prev.commentTopics.map((t) =>
+            t.id === topicId ? { ...t, savedBoardId: res.boardItem.id } : t
+          ),
+        };
+      });
+      onToast('已存入选题库，可在「简易收藏本」查看');
+      onChanged();
+    } catch (err) {
+      onToast((err as Error).message);
+    } finally {
+      setBusy(null);
+    }
+  };
 
   // 收藏 / 取消收藏
   const handleToggleSave = async () => {
@@ -320,13 +361,19 @@ export function ContentDrawer({
           {content && (
             <>
               <div className="drawer-metrics">
-                <span>播放 {fmtNum(latestMetric?.views)}</span>
+                <span>播放 {latestMetric?.views == null ? '未公开' : fmtNum(latestMetric.views)}</span>
                 <span>·</span>
                 <span>点赞 {fmtNum(latestMetric?.likes)}</span>
                 <span>·</span>
                 <span>评论 {fmtNum(latestMetric?.comments)}</span>
                 <span>·</span>
                 <span>收藏 {fmtNum(latestMetric?.favorites)}</span>
+                {latestMetric?.shares != null && (
+                  <>
+                    <span>·</span>
+                    <span>转发 {fmtNum(latestMetric.shares)}</span>
+                  </>
+                )}
                 <span>·</span>
                 <span>{fmtTime(content.published_at || content.discovered_at)}</span>
               </div>
@@ -395,7 +442,8 @@ export function ContentDrawer({
             className={`drawer-tab ${tab === 'comments' ? 'active' : ''}`}
             onClick={() => setTab('comments')}
           >
-            <MessageSquareText size={14} /> 真实热评 ({detail?.comments.length || 0})
+            <MessageSquareText size={14} /> 真实热评 ({detail?.comments.length || 0}
+            {commentTopics.length > 0 ? ` · ${commentTopics.length} 话题` : ''})
           </button>
         </div>
 
@@ -407,8 +455,69 @@ export function ContentDrawer({
             <div style={{ padding: 36, textAlign: 'center', color: 'var(--text-muted)' }}>内容不存在或已删除</div>
           ) : tab === 'point' ? (
             <div style={{ display: 'flex', flexDirection: 'column', gap: 12 }}>
+              {/* R2 三维 AI 分析（讲了什么 / 火不火 / 是否适合二次创作） */}
+              <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', gap: 8, flexWrap: 'wrap' }}>
+                <div style={{ display: 'flex', alignItems: 'center', gap: 6, flexWrap: 'wrap' }}>
+                  <span style={{ fontSize: 13.5, fontWeight: 800, color: 'var(--text)' }}>AI 三维诊断</span>
+                  {r2Analysis && (
+                    <span className="badge badge-gray" style={{ fontSize: 11 }}>
+                      {r2Analysis.basisSource}
+                    </span>
+                  )}
+                </div>
+                <button
+                  type="button"
+                  data-testid="drawer-r2-analyze-btn"
+                  className="btn btn-primary btn-sm"
+                  disabled={busy === 'r2'}
+                  onClick={() => void handleR2Analyze(Boolean(r2Analysis))}
+                >
+                  <Sparkles size={13} />
+                  {busy === 'r2' ? 'AI 分析中...' : r2Analysis ? '刷新 AI 三维分析' : '生成 AI 三维分析'}
+                </button>
+              </div>
+
+              {r2Analysis ? (
+                <div style={{ display: 'flex', flexDirection: 'column', gap: 10 }} data-testid="drawer-r2-result">
+                  <div className="accent-box accent-indigo">
+                    <div className="accent-box-label">1. 视频讲了什么</div>
+                    <div className="accent-box-text">{r2Analysis.whatItSays}</div>
+                  </div>
+                  <div className="accent-box accent-amber">
+                    <div className="accent-box-label" style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', gap: 8 }}>
+                      <span>2. 火不火</span>
+                      <span className={`r2-heat-pill ${r2Analysis.heatLevel}`}>
+                        {HEAT_LEVEL_LABELS[r2Analysis.heatLevel] || r2Analysis.heatLevel}
+                      </span>
+                    </div>
+                    <div className="accent-box-text">{r2Analysis.heatVerdict}</div>
+                  </div>
+                  <div className="accent-box accent-green">
+                    <div className="accent-box-label" style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', gap: 8 }}>
+                      <span>3. 是否适合二次创作</span>
+                      <span className="r2-heat-pill normal">二创指数 {r2Analysis.remixScore}/100</span>
+                    </div>
+                    <div className="accent-box-text">{r2Analysis.remixSuitability}</div>
+                    {r2Analysis.remixAngle && (
+                      <div style={{ marginTop: 6, fontSize: 12.5, color: '#166534', fontWeight: 600 }}>
+                        建议切入：{r2Analysis.remixAngle}
+                      </div>
+                    )}
+                  </div>
+                  <div style={{ fontSize: 11.5, color: 'var(--text-muted)' }}>
+                    更新于 {fmtTime(r2Analysis.updatedAt)}
+                  </div>
+                </div>
+              ) : (
+                <div style={{ padding: '14px', background: 'var(--surface-muted)', borderRadius: 10, fontSize: 12.5, color: 'var(--text-muted)' }}>
+                  点击右上角「生成 AI 三维分析」，一次看清这条视频讲了什么、火不火、以及值不值得二次创作。
+                </div>
+              )}
+
+              {/* 既有「一句话看点」兼容保留 */}
               {analysis ? (
-                <>
+                <div style={{ display: 'flex', flexDirection: 'column', gap: 10, marginTop: 6 }}>
+                  <div style={{ fontSize: 12.5, fontWeight: 700, color: 'var(--text-muted)' }}>扩展看点归纳</div>
                   <div className="accent-box accent-indigo">
                     <div className="accent-box-label">一句话看点</div>
                     <div className="accent-box-text">{analysis.summary_zh || content.summary || '暂无摘要'}</div>
@@ -425,7 +534,7 @@ export function ContentDrawer({
                       {diffAngles[0] || analysis.content_form_advice || '建议从普通人最关心的痛点直接给结论'}
                     </div>
                   </div>
-                  <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginTop: 4 }}>
+                  <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginTop: 2 }}>
                     <span style={{ fontSize: 12, color: 'var(--text-muted)' }}>
                       提炼于 {fmtTime(analysis.analyzed_at)}
                     </span>
@@ -437,9 +546,9 @@ export function ContentDrawer({
                       <RefreshCw size={12} /> {busy === 'analyze' ? '重新生成中...' : '换个角度重提炼'}
                     </button>
                   </div>
-                </>
+                </div>
               ) : (
-                <div style={{ display: 'flex', flexDirection: 'column', gap: 12 }}>
+                <div style={{ display: 'flex', flexDirection: 'column', gap: 10, marginTop: 4 }}>
                   {content.summary && (
                     <div className="accent-box accent-indigo">
                       <div className="accent-box-label">原始简介</div>
@@ -452,16 +561,16 @@ export function ContentDrawer({
                       <div className="accent-box-text">{content.breakout_reason}</div>
                     </div>
                   )}
-                  <div style={{ padding: '18px 14px', background: 'var(--surface-muted)', borderRadius: 10, textAlign: 'center' }}>
-                    <div style={{ fontSize: 13, color: 'var(--text-muted)', marginBottom: 10 }}>
-                      还没生成 AI 一句话看点，点一下自动提炼核心亮点与借势思路
+                  <div style={{ padding: '14px', background: 'var(--surface-muted)', borderRadius: 10, textAlign: 'center' }}>
+                    <div style={{ fontSize: 12.5, color: 'var(--text-muted)', marginBottom: 8 }}>
+                      还可按旧版结构生成扩展看点与借势角度
                     </div>
                     <button
-                      className="btn btn-primary"
+                      className="btn btn-secondary btn-sm"
                       disabled={busy === 'analyze'}
                       onClick={() => void handleAnalyze(false)}
                     >
-                      <Sparkles size={14} /> {busy === 'analyze' ? 'AI 提炼中...' : 'AI 一句话提炼看点'}
+                      <Sparkles size={13} /> {busy === 'analyze' ? 'AI 提炼中...' : '生成扩展看点'}
                     </button>
                   </div>
                 </div>
@@ -531,42 +640,148 @@ export function ContentDrawer({
               </div>
             </div>
           ) : (
-            <div style={{ display: 'flex', flexDirection: 'column', gap: 10 }}>
+            <div style={{ display: 'flex', flexDirection: 'column', gap: 12 }}>
               <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', gap: 8, flexWrap: 'wrap' }}>
                 <span style={{ fontSize: 12, color: 'var(--text-muted)' }}>
-                  抖音 / B站直连抓取真实高赞热评（按点赞从高到低）
+                  先抓真实评论，再基于真实评论提炼观众讨论话题与创作选题
                 </span>
-                {canCrawlComments ? (
+                <div style={{ display: 'flex', gap: 6, flexWrap: 'wrap' }}>
+                  {canCrawlComments ? (
+                    <button
+                      type="button"
+                      data-testid="drawer-crawl-comments-btn"
+                      className="btn btn-secondary btn-sm"
+                      disabled={busy === 'comments'}
+                      onClick={() => void handleFetchComments()}
+                    >
+                      <RefreshCw size={12} /> {busy === 'comments' ? '采集中...' : '采集评论'}
+                    </button>
+                  ) : (
+                    <span style={{ fontSize: 11.5, color: 'var(--text-muted)' }}>支持抖音 / B站 / 快手</span>
+                  )}
                   <button
+                    type="button"
+                    data-testid="drawer-extract-topics-btn"
                     className="btn btn-primary btn-sm"
-                    disabled={busy === 'comments'}
-                    onClick={() => void handleFetchComments()}
+                    disabled={busy === 'topics' || busy === 'comments'}
+                    onClick={() => void handleExtractTopics(commentTopics.length > 0)}
                   >
-                    <RefreshCw size={12} /> {busy === 'comments' ? '正在抓取热评...' : '抓取真实热评'}
+                    <Sparkles size={12} />
+                    {busy === 'topics'
+                      ? '提炼中...'
+                      : commentTopics.length > 0
+                        ? '重新提炼讨论话题'
+                        : '提炼讨论话题转选题'}
                   </button>
-                ) : (
-                  <span style={{ fontSize: 11.5, color: 'var(--text-muted)' }}>当前支持抖音 / B站 / 快手</span>
-                )}
+                </div>
               </div>
 
+              {topicsNotice && (
+                <div style={{ padding: '10px 12px', borderRadius: 9, background: '#fffbeb', color: '#92400e', fontSize: 12.5 }}>
+                  {topicsNotice}
+                </div>
+              )}
+
+              {/* R4 评论区热门话题与创作选题建议 */}
+              {commentTopics.length > 0 && (
+                <div data-testid="drawer-comment-topics">
+                  <div style={{ fontSize: 13, fontWeight: 800, color: 'var(--text)', marginBottom: 6 }}>
+                    评论区热门讨论话题 & 推荐选题（{commentTopics.length} 个）
+                  </div>
+                  <div className="r4-topic-list">
+                    {commentTopics.map((t) => {
+                      const isSaved = Boolean(t.savedBoardId);
+                      const isSaving = busy === `save-topic-${t.id}`;
+                      return (
+                        <div key={t.id} className="r4-topic-card" data-testid={`comment-topic-${t.id}`}>
+                          <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'flex-start', gap: 8, flexWrap: 'wrap' }}>
+                            <div style={{ fontWeight: 700, fontSize: 13.5, color: 'var(--text)' }}>{t.topic}</div>
+                            {t.heatNote && (
+                              <span className="badge badge-amber" style={{ fontSize: 11 }}>
+                                {t.heatNote}
+                              </span>
+                            )}
+                          </div>
+
+                          {t.evidenceComments && t.evidenceComments.length > 0 && (
+                            <div className="r4-evidence-list">
+                              {t.evidenceComments.map((evText, idx) => (
+                                <div key={idx} className="r4-evidence-quote">
+                                  “{evText}”
+                                </div>
+                              ))}
+                            </div>
+                          )}
+
+                          <div className="r4-idea-box">
+                            <div style={{ fontSize: 12.5, fontWeight: 700, color: '#166534' }}>
+                              推荐选题：{t.creationIdeaTitle}
+                            </div>
+                            {t.creationAngle && (
+                              <div style={{ fontSize: 12.5, color: '#334155', marginTop: 3, lineHeight: 1.5 }}>
+                                切入建议：{t.creationAngle}
+                              </div>
+                            )}
+                          </div>
+
+                          <div style={{ display: 'flex', gap: 8, flexWrap: 'wrap', marginTop: 9 }}>
+                            <button
+                              type="button"
+                              data-testid={`save-comment-topic-${t.id}`}
+                              className={`btn btn-sm ${isSaved ? 'btn-star-active' : 'btn-primary'}`}
+                              disabled={isSaved || isSaving}
+                              onClick={() => void handleSaveTopicToBoard(t.id)}
+                            >
+                              <Star size={12} fill={isSaved ? 'currentColor' : 'none'} />
+                              {isSaving ? '存入中...' : isSaved ? '已存入选题库' : '存入选题库'}
+                            </button>
+                            <button
+                              type="button"
+                              className="btn btn-secondary btn-sm"
+                              onClick={() => {
+                                onSendToPublish({
+                                  title: t.creationIdeaTitle || t.topic,
+                                  tags: [PLATFORM_LABELS[content.platform] || '热点', '评论选题'],
+                                  script: t.creationAngle,
+                                  sourceName: content.source_name,
+                                  sourceUrl: content.canonical_url,
+                                });
+                                onClose();
+                              }}
+                            >
+                              <Send size={12} /> 带入发布
+                            </button>
+                          </div>
+                        </div>
+                      );
+                    })}
+                  </div>
+                </div>
+              )}
+
               {detail && detail.comments.length > 0 ? (
-                <div className="feed-list">
-                  {detail.comments.map((cm) => (
-                    <div key={cm.id} className="comment-row">
-                      <div style={{ display: 'flex', justifyContent: 'space-between', fontSize: 12, marginBottom: 4 }}>
-                        <strong>{cm.author || '匿名观众'}</strong>
-                        <span style={{ color: '#ea580c', fontWeight: 600 }}>
-                          👍 {cm.likes ?? 0} · <span style={{ color: 'var(--text-muted)', fontWeight: 400 }}>{fmtTime(cm.published_at)}</span>
-                        </span>
+                <div>
+                  <div style={{ fontSize: 12.5, fontWeight: 700, color: 'var(--text-muted)', marginBottom: 4 }}>
+                    已采集真实评论（{detail.comments.length} 条）
+                  </div>
+                  <div className="feed-list">
+                    {detail.comments.map((cm) => (
+                      <div key={cm.id} className="comment-row">
+                        <div style={{ display: 'flex', justifyContent: 'space-between', fontSize: 12, marginBottom: 4 }}>
+                          <strong>{cm.author || '匿名观众'}</strong>
+                          <span style={{ color: '#ea580c', fontWeight: 600 }}>
+                            👍 {cm.likes ?? 0} · <span style={{ color: 'var(--text-muted)', fontWeight: 400 }}>{fmtTime(cm.published_at)}</span>
+                          </span>
+                        </div>
+                        <div style={{ fontSize: 13, lineHeight: 1.55, color: '#334155' }}>{cm.text}</div>
                       </div>
-                      <div style={{ fontSize: 13, lineHeight: 1.55, color: '#334155' }}>{cm.text}</div>
-                    </div>
-                  ))}
+                    ))}
+                  </div>
                 </div>
               ) : (
                 <div style={{ padding: '24px 12px', textAlign: 'center', color: 'var(--text-muted)', background: 'var(--surface-muted)', borderRadius: 10 }}>
                   {canCrawlComments
-                    ? '还没抓过这条作品的评论，点右上角「抓取真实热评」就能把高赞评论拉回来。'
+                    ? '还没抓过这条作品的评论，点右上角「采集评论」或「提炼讨论话题转选题」即可抓取高赞评论。'
                     : '该来源暂不支持自动抓取评论，可点击顶部「打开原链接」查看。'}
                 </div>
               )}

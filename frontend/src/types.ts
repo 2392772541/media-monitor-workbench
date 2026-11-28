@@ -641,3 +641,214 @@ export interface CommentCrawlJobSummary {
 export interface CommentCrawlJob extends Omit<CommentCrawlJobSummary, 'commentCount'> {
   comments: CrawledCommentRow[];
 }
+
+// ===== 对标博主升级 & 评论话题转化（R1–R4）类型 =====
+
+export interface R2AnalysisPayload {
+  contentId: number;
+  whatItSays: string;
+  heatVerdict: string;
+  heatLevel: 'viral' | 'hot' | 'normal' | 'low' | 'unknown';
+  remixSuitability: string;
+  remixScore: number;
+  remixAngle: string;
+  basisSource: '口播全文+真实数据' | '标题简介+真实数据';
+  updatedAt: string;
+}
+
+export interface RemixCompareItem {
+  contentId: number;
+  title: string;
+  rank: number;
+  remixScore: number;
+  verdict: string;
+  reason: string;
+  suggestedHook: string;
+}
+
+export interface RemixCompareResponse {
+  ok: boolean;
+  bestContentId: number | null;
+  summary: string;
+  rankings: RemixCompareItem[];
+}
+
+export interface CommentTopicIdeaItem {
+  id: number;
+  topic: string;
+  heatNote: string;
+  evidenceComments: string[];
+  creationIdeaTitle: string;
+  creationAngle: string;
+  savedBoardId: number | null;
+}
+
+export interface CreatorCopyDigest {
+  contentId: number;
+  overview: string;
+  keyPoints: string[];
+  actionItems: string[];
+  usedTranscript: boolean;
+  sourceKind?: 'transcript' | 'article';
+  sourceChars: number;
+  transcriptChars?: number;
+  generatedAt: string;
+}
+
+export interface TrackerCreator {
+  id: number;
+  name: string;
+  platform: string;
+  url: string;
+  source_type?: string;
+  status: string;
+  interval_minutes: number;
+  last_checked_at: string | null;
+  last_error: string | null;
+  follower_count: number | null;
+  avatar_url?: string;
+  content_count: number;
+  unread_count: number;
+  today_new_count: number;
+  latest_published_at: string | null;
+  is_running: boolean;
+}
+
+export interface TrackerVideoItem {
+  id: number;
+  source_id: number;
+  source_name: string;
+  source_type?: string;
+  platform: string;
+  canonical_url: string;
+  title: string;
+  author: string;
+  cover_url?: string;
+  summary: string;
+  body: string;
+  transcript: string;
+  transcript_status: string;
+  transcript_chars: number;
+  transcript_preview?: string;
+  published_at: string | null;
+  discovered_at: string;
+  is_read: number;
+  breakout_score?: number | null;
+  breakout_ratio?: number | null;
+  breakout_reason?: string;
+  creator_follower_count?: number | null;
+  latest_views: number | null;
+  latest_likes: number | null;
+  latest_comments: number | null;
+  latest_favorites?: number | null;
+  latest_shares?: number | null;
+  saved_board_id: number | null;
+  asr_job_status: string | null;
+  asr_error: string | null;
+  pipeline_stage?: 'queued' | 'downloading' | 'transcribing' | 'digesting' | null;
+  queue_position?: number | null;
+  comment_count: number;
+  comment_topics_count: number;
+  r2_analysis?: R2AnalysisPayload | null;
+  copy_digest?: CreatorCopyDigest | null;
+}
+
+export interface CreatorTodayUpdates {
+  dateLocal: string;
+  hasTodayNew: boolean;
+  todayCount: number;
+  items: TrackerVideoItem[];
+}
+
+export type CreatorLeaderboardRankItem = TrackerVideoItem & {
+  rank: number;
+  heatScore: number;
+  heatBasis: string;
+};
+
+export interface CreatorTodayLeaderboard {
+  dateLocal: string;
+  isFallback: boolean;
+  fallbackLabel: string;
+  items: CreatorLeaderboardRankItem[];
+}
+
+export interface CreatorsFeedResp {
+  creators: TrackerCreator[];
+  todayUpdates: CreatorTodayUpdates;
+  todayLeaderboard: CreatorTodayLeaderboard;
+  items: TrackerVideoItem[];
+  total: number;
+  offset: number;
+  limit: number;
+  hasMore: boolean;
+  fallbackShown: boolean;
+  totalUnread: number;
+  checkIntervalMinutes: number;
+  anyRunning: boolean;
+  asrRunning?: boolean;
+}
+
+export interface FetchCreatorHistoryResp {
+  ok: boolean;
+  sourceId: number;
+  fetchedCount: number;
+  insertedCount: number;
+  updatedCount: number;
+  totalStored: number;
+  error?: string;
+}
+
+export interface CommentTopicsResp {
+  ok: boolean;
+  contentId: number;
+  commentsCount: number;
+  topics: CommentTopicIdeaItem[];
+  message?: string;
+}
+
+export interface ContentDetailResp {
+  content: {
+    id: number;
+    platform: string;
+    canonical_url: string;
+    title: string;
+    author: string;
+    source_name: string;
+    summary: string;
+    body: string;
+    transcript: string;
+    transcript_status: string;
+    breakout_ratio: number | null;
+    breakout_score: number | null;
+    breakout_reason: string;
+    follower_count: number | null;
+    published_at: string | null;
+    discovered_at: string;
+  };
+  metrics: MetricSnapshot[];
+  comments: Array<{
+    id: number;
+    author: string;
+    text: string;
+    likes: number | null;
+    published_at: string | null;
+  }>;
+  analysis: {
+    category: string;
+    summary_zh: string;
+    core_points_json: string;
+    diff_angles_json: string;
+    trend_judgement: string;
+    content_form_advice: string;
+    analyzed_at: string;
+  } | null;
+  r2Analysis: R2AnalysisPayload | null;
+  commentTopics: CommentTopicIdeaItem[];
+  tingwuJobs: Array<{
+    id: number;
+    status: string;
+    error_message: string | null;
+    updated_at: string;
+  }>;
+}

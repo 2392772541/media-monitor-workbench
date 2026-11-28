@@ -307,7 +307,7 @@ export function App() {
             />
           )}
           {activeTab === 'comments' && (
-            <CommentsPage onToast={showToast} onNavigate={handleNavigate} />
+            <CommentsPage onToast={showToast} onNavigate={handleNavigate} onRefreshBadge={handleGlobalChanged} />
           )}
           {activeTab === 'publish' && (
             <PublishPage

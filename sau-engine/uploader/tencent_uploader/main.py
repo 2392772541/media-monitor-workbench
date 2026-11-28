@@ -123,15 +123,16 @@ async def weixin_setup(account_file, handle=False):
 
 
 class TencentVideo(object):
-    def __init__(self, title, file_path, tags, publish_date: datetime, account_file, category=None, is_draft=False):
+    def __init__(self, title, file_path, tags, publish_date: datetime, account_file, category=None, is_draft=False, desc: str | None = None):
         self.title = title  # 视频标题
         self.file_path = file_path
-        self.tags = tags
+        self.tags = tags or []
         self.publish_date = publish_date
         self.account_file = account_file
         self.category = category
         self.headless = LOCAL_CHROME_HEADLESS
         self.is_draft = is_draft  # 是否保存为草稿
+        self.desc = str(desc or "").strip()  # 话题前补充简介
         self.local_executable_path = LOCAL_CHROME_PATH or None
 
     async def set_schedule_time_tencent(self, page, publish_date):
@@ -290,10 +291,19 @@ class TencentVideo(object):
         await page.locator("div.input-editor").click()
         await page.keyboard.type(self.title)
         await page.keyboard.press("Enter")
-        for index, tag in enumerate(self.tags, start=1):
-            await page.keyboard.type("#" + tag)
+        # 话题前先填入可选补充简介
+        if getattr(self, "desc", ""):
+            await page.keyboard.type(self.desc)
+            await page.keyboard.press("Enter")
+        added_count = 0
+        for tag in self.tags or []:
+            clean_tag = str(tag).strip().lstrip("#").strip()
+            if not clean_tag:
+                continue
+            await page.keyboard.type("#" + clean_tag)
             await page.keyboard.press("Space")
-        tencent_logger.info(f"成功添加hashtag: {len(self.tags)}")
+            added_count += 1
+        tencent_logger.info(f"成功添加hashtag: {added_count}")
 
     async def add_collection(self, page):
         collection_elements = page.get_by_text("添加到合集").locator("xpath=following-sibling::div").locator(

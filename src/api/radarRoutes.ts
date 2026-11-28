@@ -1,7 +1,21 @@
 import type { FastifyInstance } from 'fastify';
-import { getDb } from '../db/database.js';
+import { getDb, updateSourceAuthorProfile, upsertContentWithMetrics } from '../db/database.js';
+import { getAdapter } from '../adapters/index.js';
+import { fetchBilibiliHistory } from '../adapters/bilibiliAdapter.js';
+import { fetchDouyinHistory } from '../adapters/douyinAdapter.js';
+import type { SourceRecord } from '../adapters/types.js';
 import { enqueueAllActiveCreators, getRunningSourceIds } from '../scheduler/taskRunner.js';
 import { recomputeAllBreakouts, recomputeSourceBreakout } from '../services/breakoutService.js';
+import {
+  analyzeContentForR2,
+  compareContentRemixSuitability,
+  computeContentHeatScore,
+  extractCommentTopicsAndIdeas,
+  getContentCommentTopics,
+  getShanghaiDayWindow,
+  mapR2RowToPayload,
+  saveCommentTopicToBoard,
+} from '../services/creatorR2Service.js';
 import {
   addCustomHotBoard,
   deleteCustomHotBoard,
@@ -30,6 +44,7 @@ import {
 import {
   generateCreatorCopyDigest,
   getCreatorCopyDigestMap,
+  hasValidVideoTranscript,
 } from '../services/creatorDigestService.js';
 import {
   analyzeCommentCrawlJob,
@@ -41,7 +56,10 @@ import {
   startStandaloneCommentCrawl,
 } from '../services/mediaCrawlerBridge.js';
 import {
+  enqueueTranscriptAndDigest,
+  getContentAsrPipelineState,
   getTingwuStatus,
+  isAsrPipelineBusy,
   launchTingwuLogin,
   startTingwuTranscription,
   syncCompletedTingwuJobs,
@@ -68,6 +86,84 @@ function safeParseJson<T>(raw: unknown, fallback: T): T {
   } catch {
     return fallback;
   }
+}
+
+// 防止同一博主与后台定时任务或重复点击同时占用 Playwright 浏览器目录
+const historyFetchLocks = new Set<number>();
+
+// 对标博主信息流与榜单共用的查询字段（包含 R2 分析、完整互动快照与评论统计）
+const CREATOR_FEED_SELECT = `
+  SELECT c.id, c.source_id, c.platform, c.canonical_url, c.title, c.author, c.cover_url,
+         c.summary, c.body, c.transcript, c.transcript_status,
+         length(COALESCE(c.transcript, '')) AS transcript_chars,
+         c.published_at, c.discovered_at, c.is_read,
+         c.breakout_score, c.breakout_ratio, c.breakout_reason,
+         s.name AS source_name, s.source_type AS source_type, s.follower_count AS creator_follower_count,
+         (SELECT views FROM content_metrics m WHERE m.content_id = c.id ORDER BY captured_at DESC LIMIT 1) AS latest_views,
+         (SELECT likes FROM content_metrics m WHERE m.content_id = c.id ORDER BY captured_at DESC LIMIT 1) AS latest_likes,
+         (SELECT comments FROM content_metrics m WHERE m.content_id = c.id ORDER BY captured_at DESC LIMIT 1) AS latest_comments,
+         (SELECT favorites FROM content_metrics m WHERE m.content_id = c.id ORDER BY captured_at DESC LIMIT 1) AS latest_favorites,
+         (SELECT shares FROM content_metrics m WHERE m.content_id = c.id ORDER BY captured_at DESC LIMIT 1) AS latest_shares,
+         (SELECT id FROM topic_board tb WHERE tb.source_content_id = c.id LIMIT 1) AS saved_board_id,
+         (SELECT status FROM tingwu_jobs tj WHERE tj.content_id = c.id ORDER BY tj.created_at DESC LIMIT 1) AS asr_job_status,
+         (SELECT error_message FROM tingwu_jobs tj WHERE tj.content_id = c.id ORDER BY tj.created_at DESC LIMIT 1) AS asr_error,
+         (SELECT COUNT(*) FROM content_comments cm WHERE cm.content_id = c.id) AS comment_count,
+         (SELECT COUNT(*) FROM comment_topic_ideas cti WHERE cti.content_id = c.id) AS comment_topics_count,
+         r2.what_it_says AS r2_what_it_says,
+         r2.heat_verdict AS r2_heat_verdict,
+         r2.heat_level AS r2_heat_level,
+         r2.remix_suitability AS r2_remix_suitability,
+         r2.remix_score AS r2_remix_score,
+         r2.remix_angle AS r2_remix_angle,
+         r2.basis_source AS r2_basis_source,
+         r2.updated_at AS r2_updated_at
+  FROM contents c
+  JOIN sources s ON s.id = c.source_id
+  LEFT JOIN content_r2_analyses r2 ON r2.content_id = c.id
+`;
+
+function enrichCreatorFeedRow(row: Record<string, unknown>, digestMap: Record<string, unknown>): Record<string, unknown> {
+  const {
+    r2_what_it_says,
+    r2_heat_verdict,
+    r2_heat_level,
+    r2_remix_suitability,
+    r2_remix_score,
+    r2_remix_angle,
+    r2_basis_source,
+    r2_updated_at,
+    ...rest
+  } = row;
+  const transcriptText = String(row.transcript || '').trim();
+  const transcriptPreview =
+    row.transcript_status === 'done' || transcriptText.length > 0 ? transcriptText.slice(0, 180) : '';
+  const r2Analysis = r2_updated_at
+    ? mapR2RowToPayload({
+        content_id: row.id,
+        what_it_says: r2_what_it_says,
+        heat_verdict: r2_heat_verdict,
+        heat_level: r2_heat_level,
+        remix_suitability: r2_remix_suitability,
+        remix_score: r2_remix_score,
+        remix_angle: r2_remix_angle,
+        basis_source: r2_basis_source,
+        updated_at: r2_updated_at,
+      })
+    : null;
+
+  const asrPipe = getContentAsrPipelineState(Number(row.id));
+
+  return {
+    ...rest,
+    transcript_chars: Number(row.transcript_chars || 0),
+    transcript_preview: transcriptPreview,
+    comment_count: Number(row.comment_count || 0),
+    comment_topics_count: Number(row.comment_topics_count || 0),
+    pipeline_stage: asrPipe.stage,
+    queue_position: asrPipe.queuePosition,
+    r2_analysis: r2Analysis,
+    copy_digest: digestMap[String(row.id)] || null,
+  };
 }
 
 export function registerRadarRoutes(app: FastifyInstance): void {
@@ -937,6 +1033,11 @@ export function registerRadarRoutes(app: FastifyInstance): void {
       .prepare('SELECT * FROM content_comments WHERE content_id = ? ORDER BY COALESCE(likes, 0) DESC LIMIT 40')
       .all(id);
     const analysis = db.prepare('SELECT * FROM content_analyses WHERE content_id = ?').get(id) || null;
+    const r2Row = db.prepare('SELECT * FROM content_r2_analyses WHERE content_id = ?').get(id) as
+      | Record<string, unknown>
+      | undefined;
+    const r2Analysis = r2Row ? mapR2RowToPayload(r2Row) : null;
+    const commentTopics = getContentCommentTopics(id);
     const recommendation =
       db.prepare('SELECT * FROM topic_recommendations WHERE content_id = ? AND account_id = ?').get(id, account.id) || null;
     const tingwuJobs = db
@@ -953,7 +1054,7 @@ export function registerRadarRoutes(app: FastifyInstance): void {
       : [];
     const duplicates = findDuplicateTopics(String(content.title || ''));
 
-    return { content, metrics, comments, analysis, recommendation, tingwuJobs, clusterSiblings, duplicates };
+    return { content, metrics, comments, analysis, r2Analysis, commentTopics, recommendation, tingwuJobs, clusterSiblings, duplicates };
   });
 
   app.post<{ Params: { id: string }; Body: { force?: boolean } }>('/api/radar/intel/:id/analyze', async (req, reply) => {
@@ -1465,120 +1566,276 @@ ${script.slice(0, 4500)}
     }
   });
 
-  // ===== 13. 对标博主极简追更流（实时追更 + 按博主分类 + 直接拿口播文案） =====
+  // ===== 13. 对标博主极简追更流（R1 每日更新与热度榜 + R2 三项分析与对比 + R3 历史分页 + R4 评论话题） =====
   app.get<{
     Querystring: {
       creatorId?: string;
       days?: string;
       onlyUnread?: string;
+      offset?: string;
       limit?: string;
+      includeRss?: string;
+      search?: string;
     };
   }>('/api/radar/creators/feed', async (req) => {
     const db = getDb();
-    const runningSet = new Set(getRunningSourceIds());
+    const runningSet = new Set([...getRunningSourceIds(), ...historyFetchLocks]);
     const creatorId = req.query.creatorId ? Number(req.query.creatorId) : null;
-    const days = req.query.days !== undefined ? Number(req.query.days) : 7;
+    const rawDays = req.query.days !== undefined && req.query.days !== '' ? Number(req.query.days) : 7;
+    const days = Number.isFinite(rawDays) ? rawDays : 7;
     const onlyUnread = req.query.onlyUnread === 'true';
-    const limit = Math.min(Math.max(Number(req.query.limit || 30), 5), 100);
+    const offset = Math.max(0, Math.floor(Number(req.query.offset || 0) || 0));
+    const limit = Math.min(Math.max(Math.floor(Number(req.query.limit || 30) || 30), 1), 200);
+    const includeRss = req.query.includeRss === '1' || req.query.includeRss === 'true';
+    const search = String(req.query.search || '').trim();
 
-    // 仅统计 14 天内新发布且未读的作品为“新更新”提醒，防止老视频积压成红点
+    // 默认将视频博主与 RSS 博客/资讯源分离；仅显式传 includeRss=1 时混入 RSS，始终排除热榜导入
+    const sourceFilterSql = includeRss
+      ? "s.source_type IN ('creator', 'rss', 'social', 'column')"
+      : "s.source_type = 'creator'";
+
+    const { dateLocal, todayStartUtcIso, todayEndUtcIso, todayStartMs } = getShanghaiDayWindow();
+
+    // 统计 14 天内未读与东八区当日新发计数
     const rawCreators = db
       .prepare(`
-        SELECT s.id, s.name, s.platform, s.url, s.status, s.interval_minutes,
-               s.last_checked_at, s.last_error, s.follower_count,
+        SELECT s.id, s.name, s.platform, s.url, s.source_type, s.status, s.interval_minutes,
+               s.last_checked_at, s.last_error, s.follower_count, s.avatar_url,
                (SELECT COUNT(*) FROM contents c WHERE c.source_id = s.id) AS content_count,
                (SELECT COUNT(*) FROM contents c
                 WHERE c.source_id = s.id
                   AND c.is_read = 0
                   AND COALESCE(c.published_at, c.discovered_at) >= datetime('now', '-14 days')) AS unread_count,
+               (SELECT COUNT(*) FROM contents c
+                WHERE c.source_id = s.id
+                  AND COALESCE(c.published_at, c.discovered_at) >= ?
+                  AND COALESCE(c.published_at, c.discovered_at) < ?) AS today_new_count,
                (SELECT MAX(COALESCE(c.published_at, c.discovered_at)) FROM contents c WHERE c.source_id = s.id) AS latest_published_at
         FROM sources s
-        WHERE s.source_type != 'hot_board'
-        ORDER BY unread_count DESC, latest_published_at DESC, s.id DESC
+        WHERE ${sourceFilterSql}
+        ORDER BY today_new_count DESC, unread_count DESC, latest_published_at DESC, s.id DESC
       `)
-      .all() as Array<Record<string, unknown>>;
+      .all(todayStartUtcIso, todayEndUtcIso) as Array<Record<string, unknown>>;
 
     const creators = rawCreators.map((c) => ({
       ...c,
+      content_count: Number(c.content_count || 0),
       unread_count: Number(c.unread_count || 0),
+      today_new_count: Number(c.today_new_count || 0),
       is_running: runningSet.has(Number(c.id)),
     }));
     const totalUnread = creators.reduce((sum, c) => sum + c.unread_count, 0);
 
-    const buildQuery = (applyDays: number) => {
-      const where: string[] = ["s.source_type != 'hot_board'"];
-      const args: (string | number)[] = [];
-      if (creatorId) {
-        where.push('c.source_id = ?');
-        args.push(creatorId);
-      }
-      if (applyDays > 0) {
-        where.push(`COALESCE(c.published_at, c.discovered_at) >= datetime('now', '-' || ? || ' days')`);
-        args.push(applyDays);
-      }
-      if (onlyUnread) {
-        where.push('c.is_read = 0');
-      }
-      const sql = `
-        SELECT c.id, c.source_id, c.platform, c.canonical_url, c.title, c.author, c.cover_url,
-               c.summary, c.body, c.transcript, c.transcript_status,
-               length(COALESCE(c.transcript, '')) AS transcript_chars,
-               c.published_at, c.discovered_at, c.is_read,
-               s.name AS source_name,
-               (SELECT views FROM content_metrics m WHERE m.content_id = c.id ORDER BY captured_at DESC LIMIT 1) AS latest_views,
-               (SELECT likes FROM content_metrics m WHERE m.content_id = c.id ORDER BY captured_at DESC LIMIT 1) AS latest_likes,
-               (SELECT comments FROM content_metrics m WHERE m.content_id = c.id ORDER BY captured_at DESC LIMIT 1) AS latest_comments,
-               (SELECT id FROM topic_board tb WHERE tb.source_content_id = c.id LIMIT 1) AS saved_board_id,
-               (SELECT status FROM tingwu_jobs tj WHERE tj.content_id = c.id ORDER BY tj.created_at DESC LIMIT 1) AS asr_job_status,
-               (SELECT error_message FROM tingwu_jobs tj WHERE tj.content_id = c.id ORDER BY tj.created_at DESC LIMIT 1) AS asr_error
-        FROM contents c
-        JOIN sources s ON s.id = c.source_id
-        WHERE ${where.join(' AND ')}
+    const digestMap = getCreatorCopyDigestMap();
+
+    // R1：今日最新更新视图（优先展示东八区今日新发；若今日暂无新发，展示每位博主最近 1 条动态）
+    const todayRows = db
+      .prepare(`
+        ${CREATOR_FEED_SELECT}
+        WHERE ${sourceFilterSql}
+          AND COALESCE(c.published_at, c.discovered_at) >= ?
+          AND COALESCE(c.published_at, c.discovered_at) < ?
         ORDER BY COALESCE(c.published_at, c.discovered_at) DESC, c.id DESC
-        LIMIT ?
-      `;
-      return db.prepare(sql).all(...args, limit) as Array<Record<string, unknown>>;
+        LIMIT 30
+      `)
+      .all(todayStartUtcIso, todayEndUtcIso) as Array<Record<string, unknown>>;
+
+    let todayUpdatesItems: Array<Record<string, unknown>>;
+    const hasTodayNew = todayRows.length > 0;
+    if (hasTodayNew) {
+      todayUpdatesItems = todayRows.map((r) => enrichCreatorFeedRow(r, digestMap));
+    } else {
+      const latestPerCreatorRows = db
+        .prepare(`
+          SELECT * FROM (
+            SELECT c.id,
+                   ROW_NUMBER() OVER (PARTITION BY c.source_id ORDER BY COALESCE(c.published_at, c.discovered_at) DESC, c.id DESC) AS rn
+            FROM contents c
+            JOIN sources s ON s.id = c.source_id
+            WHERE ${sourceFilterSql}
+          ) ranked
+          JOIN (${CREATOR_FEED_SELECT}) full_row ON full_row.id = ranked.id
+          WHERE ranked.rn = 1
+          ORDER BY COALESCE(full_row.published_at, full_row.discovered_at) DESC, full_row.id DESC
+          LIMIT 20
+        `)
+        .all() as Array<Record<string, unknown>>;
+      todayUpdatesItems = latestPerCreatorRows.map((r) => {
+        const { rn: _rn, ...clean } = r;
+        return enrichCreatorFeedRow(clean, digestMap);
+      });
+    }
+
+    const todayUpdates = {
+      dateLocal,
+      hasTodayNew,
+      todayCount: todayRows.length,
+      items: todayUpdatesItems,
     };
 
-    let items = buildQuery(days);
+    // R1：当日新发热度排行榜（当日 -> 近3天 -> 近7天 -> 历史高热兜底，兼容抖音 views=null）
+    const lbLadder: Array<{
+      isFallback: boolean;
+      fallbackLabel: string;
+      startIso: string | null;
+      endIso: string | null;
+    }> = [
+      { isFallback: false, fallbackLabel: '', startIso: todayStartUtcIso, endIso: todayEndUtcIso },
+      {
+        isFallback: true,
+        fallbackLabel: '今日暂无新发，以下为近 3 天新发热度榜',
+        startIso: new Date(todayStartMs - 2 * 86400000).toISOString(),
+        endIso: null,
+      },
+      {
+        isFallback: true,
+        fallbackLabel: '今日暂无新发，以下为近 7 天新发热度榜',
+        startIso: new Date(todayStartMs - 6 * 86400000).toISOString(),
+        endIso: null,
+      },
+      {
+        isFallback: true,
+        fallbackLabel: '近期暂无新发，以下为历史高热作品榜',
+        startIso: null,
+        endIso: null,
+      },
+    ];
+
+    let lbCandidates: Array<Record<string, unknown>> = [];
+    let lbMeta = lbLadder[lbLadder.length - 1];
+    for (const step of lbLadder) {
+      const lbWhere: string[] = [sourceFilterSql];
+      const lbArgs: (string | number)[] = [];
+      if (step.startIso) {
+        lbWhere.push('COALESCE(c.published_at, c.discovered_at) >= ?');
+        lbArgs.push(step.startIso);
+      }
+      if (step.endIso) {
+        lbWhere.push('COALESCE(c.published_at, c.discovered_at) < ?');
+        lbArgs.push(step.endIso);
+      }
+      const rows = db
+        .prepare(`
+          ${CREATOR_FEED_SELECT}
+          WHERE ${lbWhere.join(' AND ')}
+          ORDER BY COALESCE(c.published_at, c.discovered_at) DESC, c.id DESC
+          LIMIT 100
+        `)
+        .all(...lbArgs) as Array<Record<string, unknown>>;
+      if (rows.length > 0) {
+        lbCandidates = rows;
+        lbMeta = step;
+        break;
+      }
+    }
+
+    const lbScored = lbCandidates
+      .map((row) => {
+        const enriched = enrichCreatorFeedRow(row, digestMap);
+        const { heatScore, heatBasis } = computeContentHeatScore({
+          latest_views: row.latest_views as number | null,
+          latest_likes: row.latest_likes as number | null,
+          latest_comments: row.latest_comments as number | null,
+          latest_favorites: row.latest_favorites as number | null,
+          latest_shares: row.latest_shares as number | null,
+          breakout_ratio: row.breakout_ratio as number | null,
+          breakout_score: row.breakout_score as number | null,
+        });
+        return { enriched, heatScore, heatBasis };
+      })
+      .sort((a, b) => {
+        if (b.heatScore !== a.heatScore) return b.heatScore - a.heatScore;
+        const bRatio = Number(b.enriched.breakout_ratio || 0);
+        const aRatio = Number(a.enriched.breakout_ratio || 0);
+        if (bRatio !== aRatio) return bRatio - aRatio;
+        const bLikes = Number(b.enriched.latest_likes || 0);
+        const aLikes = Number(a.enriched.latest_likes || 0);
+        if (bLikes !== aLikes) return bLikes - aLikes;
+        const bPub = Date.parse(String(b.enriched.published_at || b.enriched.discovered_at || '')) || 0;
+        const aPub = Date.parse(String(a.enriched.published_at || a.enriched.discovered_at || '')) || 0;
+        if (bPub !== aPub) return bPub - aPub;
+        return Number(b.enriched.id) - Number(a.enriched.id);
+      })
+      .slice(0, 10)
+      .map((entry, idx) => ({
+        ...entry.enriched,
+        rank: idx + 1,
+        heatScore: entry.heatScore,
+        heatBasis: entry.heatBasis,
+      }));
+
+    const todayLeaderboard = {
+      dateLocal,
+      isFallback: lbMeta.isFallback,
+      fallbackLabel: lbMeta.fallbackLabel,
+      items: lbScored,
+    };
+
+    // R3：分博主历史作品列表（严格按发布时间从新到旧排序 + offset/limit 分页 + 搜索）
+    const where: string[] = [sourceFilterSql];
+    const args: (string | number)[] = [];
+    if (creatorId) {
+      where.push('c.source_id = ?');
+      args.push(creatorId);
+    }
+    if (days === 1) {
+      where.push('COALESCE(c.published_at, c.discovered_at) >= ? AND COALESCE(c.published_at, c.discovered_at) < ?');
+      args.push(todayStartUtcIso, todayEndUtcIso);
+    } else if (days > 1) {
+      const startIso = new Date(todayStartMs - (days - 1) * 86400000).toISOString();
+      where.push('COALESCE(c.published_at, c.discovered_at) >= ?');
+      args.push(startIso);
+    }
+    if (onlyUnread) {
+      where.push('c.is_read = 0');
+    }
+    if (search) {
+      const like = `%${search}%`;
+      where.push('(c.title LIKE ? OR c.summary LIKE ? OR c.transcript LIKE ? OR s.name LIKE ?)');
+      args.push(like, like, like, like);
+    }
+
+    const whereClause = where.join(' AND ');
+    const total = Number(
+      (
+        db
+          .prepare(`SELECT COUNT(*) AS c FROM contents c JOIN sources s ON s.id = c.source_id WHERE ${whereClause}`)
+          .get(...args) as { c: number }
+      ).c || 0
+    );
+
+    let items = db
+      .prepare(`
+        ${CREATOR_FEED_SELECT}
+        WHERE ${whereClause}
+        ORDER BY COALESCE(c.published_at, c.discovered_at) DESC, c.id DESC
+        LIMIT ? OFFSET ?
+      `)
+      .all(...args, limit, offset) as Array<Record<string, unknown>>;
+
     let fallbackShown = false;
-    // 若用户选了近 7 天且该博主近 7 天刚好没发新视频，温柔回退显示最近 5 条（绝不翻几十条老黄历，也不给一片空白）
-    if (items.length === 0 && days > 0 && !onlyUnread) {
-      const fallbackLimit = creatorId ? 5 : 8;
-      const where: string[] = ["s.source_type != 'hot_board'"];
-      const args: (string | number)[] = [];
+    // 仅在首页（offset=0）且未指定搜索/未读筛选、按天数过滤为空时，温柔回退最近历史条目避免白屏
+    if (offset === 0 && items.length === 0 && days > 0 && !onlyUnread && !search) {
+      const fallbackLimit = Math.min(limit, creatorId ? 5 : 8);
+      const fbWhere: string[] = [sourceFilterSql];
+      const fbArgs: (string | number)[] = [];
       if (creatorId) {
-        where.push('c.source_id = ?');
-        args.push(creatorId);
+        fbWhere.push('c.source_id = ?');
+        fbArgs.push(creatorId);
       }
       items = db
         .prepare(`
-          SELECT c.id, c.source_id, c.platform, c.canonical_url, c.title, c.author, c.cover_url,
-                 c.summary, c.body, c.transcript, c.transcript_status,
-                 length(COALESCE(c.transcript, '')) AS transcript_chars,
-                 c.published_at, c.discovered_at, c.is_read,
-                 s.name AS source_name,
-                 (SELECT views FROM content_metrics m WHERE m.content_id = c.id ORDER BY captured_at DESC LIMIT 1) AS latest_views,
-                 (SELECT likes FROM content_metrics m WHERE m.content_id = c.id ORDER BY captured_at DESC LIMIT 1) AS latest_likes,
-                 (SELECT comments FROM content_metrics m WHERE m.content_id = c.id ORDER BY captured_at DESC LIMIT 1) AS latest_comments,
-                 (SELECT id FROM topic_board tb WHERE tb.source_content_id = c.id LIMIT 1) AS saved_board_id,
-                 (SELECT status FROM tingwu_jobs tj WHERE tj.content_id = c.id ORDER BY tj.created_at DESC LIMIT 1) AS asr_job_status,
-                 (SELECT error_message FROM tingwu_jobs tj WHERE tj.content_id = c.id ORDER BY tj.created_at DESC LIMIT 1) AS asr_error
-          FROM contents c
-          JOIN sources s ON s.id = c.source_id
-          WHERE ${where.join(' AND ')}
+          ${CREATOR_FEED_SELECT}
+          WHERE ${fbWhere.join(' AND ')}
           ORDER BY COALESCE(c.published_at, c.discovered_at) DESC, c.id DESC
           LIMIT ?
         `)
-        .all(...args, fallbackLimit) as Array<Record<string, unknown>>;
+        .all(...fbArgs, fallbackLimit) as Array<Record<string, unknown>>;
       if (items.length > 0) fallbackShown = true;
     }
 
-    const digestMap = getCreatorCopyDigestMap();
-    const enrichedItems = items.map((it) => ({
-      ...it,
-      copy_digest: digestMap[String(it.id)] || null,
-    }));
+    const enrichedItems = items.map((it) => enrichCreatorFeedRow(it, digestMap));
+    const hasMore = !fallbackShown && offset + enrichedItems.length < total;
 
     const intervalRow = db.prepare("SELECT value FROM app_settings WHERE key = 'default_creator_interval'").get() as
       | { value?: string }
@@ -1587,21 +1844,216 @@ ${script.slice(0, 4500)}
 
     return {
       creators,
+      todayUpdates,
+      todayLeaderboard,
       items: enrichedItems,
+      total,
+      offset,
+      limit,
+      hasMore,
       fallbackShown,
       totalUnread,
       checkIntervalMinutes,
       anyRunning: runningSet.size > 0,
+      asrRunning: isAsrPipelineBusy(),
     };
   });
 
-  // 单条视频简洁文案归纳（大概讲什么 + 1234核心要点 + 1234可以做什么）
+  // R2：单条视频统一三项 AI 分析（讲了什么 / 火不火 / 是否适合二创）
+  app.post<{ Params: { id: string }; Body: { force?: boolean } }>(
+    '/api/radar/intel/:id/r2-analyze',
+    async (req, reply) => {
+      const id = Number(req.params.id);
+      if (!Number.isInteger(id) || id <= 0) {
+        return reply.code(400).send({ error: '无效的内容 ID' });
+      }
+      const analysis = await analyzeContentForR2(id, Boolean(req.body?.force));
+      if (!analysis) {
+        return reply.code(404).send({ error: '内容不存在' });
+      }
+      return { ok: true, analysis };
+    }
+  );
+
+  // R2：多视频横向对比，选出最适合二次创作的视频
+  app.post<{ Body: { contentIds?: number[]; creatorId?: number } }>(
+    '/api/radar/creators/compare-remix',
+    async (req) => {
+      return await compareContentRemixSuitability({
+        contentIds: Array.isArray(req.body?.contentIds) ? req.body.contentIds : undefined,
+        creatorId: req.body?.creatorId ? Number(req.body.creatorId) : undefined,
+      });
+    }
+  );
+
+  // R3：按需深抓指定博主更多历史视频（B站多页 / 抖音滚动加载）
+  app.post<{ Params: { id: string }; Body: { maxPages?: number } }>(
+    '/api/radar/creators/:id/fetch-history',
+    async (req, reply) => {
+      const sourceId = Number(req.params.id);
+      if (!Number.isInteger(sourceId) || sourceId <= 0) {
+        return reply.code(400).send({ error: '无效的博主 ID' });
+      }
+      const db = getDb();
+      const source = db.prepare('SELECT * FROM sources WHERE id = ?').get(sourceId) as SourceRecord | undefined;
+      if (!source) {
+        return reply.code(404).send({ error: '博主不存在' });
+      }
+      if (source.source_type === 'hot_board') {
+        return reply.code(400).send({ error: '热榜来源不支持抓取博主历史作品' });
+      }
+      if (getRunningSourceIds().includes(sourceId) || historyFetchLocks.has(sourceId)) {
+        return reply.code(409).send({ ok: false, error: '该博主正在采集或拉取历史作品中，请稍候完成' });
+      }
+
+      const maxPages = Math.min(Math.max(Math.round(Number(req.body?.maxPages || 3)), 1), 5);
+      const modeRow = db.prepare("SELECT value FROM app_settings WHERE key = 'browser_mode'").get() as
+        | { value?: string }
+        | undefined;
+      const headless = modeRow?.value !== 'headed';
+
+      historyFetchLocks.add(sourceId);
+      try {
+        let fetchRes;
+        if (source.platform === 'bilibili') {
+          fetchRes = await fetchBilibiliHistory(source, { headless, maxPages });
+        } else if (source.platform === 'douyin') {
+          fetchRes = await fetchDouyinHistory(source, { headless, maxPages });
+        } else {
+          fetchRes = await getAdapter(source.platform).fetchLatest(source, { headless });
+        }
+
+        if (fetchRes.authorProfile) {
+          updateSourceAuthorProfile(sourceId, fetchRes.authorProfile);
+        }
+
+        let insertedCount = 0;
+        let updatedCount = 0;
+        for (const item of fetchRes.items) {
+          const saved = upsertContentWithMetrics({
+            sourceId,
+            platform: source.platform,
+            platformItemId: item.platformItemId,
+            url: item.url,
+            title: item.title,
+            author: item.author,
+            summary: item.summary,
+            body: item.body,
+            coverUrl: item.coverUrl,
+            tags: item.tags,
+            publishedAt: item.publishedAt,
+            pageUpdatedAt: item.pageUpdatedAt,
+            contentType: item.contentType,
+            rawMeta: item.rawMeta,
+            metrics: item.metrics,
+          });
+          if (saved.isNew) {
+            insertedCount++;
+          } else if (saved.metricsUpdated) {
+            updatedCount++;
+          }
+        }
+
+        if (fetchRes.items.length > 0) {
+          recomputeSourceBreakout(sourceId);
+        }
+
+        const totalStored = Number(
+          (db.prepare('SELECT COUNT(*) AS c FROM contents WHERE source_id = ?').get(sourceId) as { c: number }).c || 0
+        );
+
+        if (!fetchRes.ok && fetchRes.items.length === 0) {
+          return reply.code(fetchRes.authRequired ? 401 : 400).send({
+            ok: false,
+            error: fetchRes.errorMessage || '暂未抓取到更多历史作品',
+            sourceId,
+            fetchedCount: 0,
+            insertedCount: 0,
+            updatedCount: 0,
+            totalStored,
+          });
+        }
+
+        return {
+          ok: true,
+          sourceId,
+          fetchedCount: fetchRes.items.length,
+          insertedCount,
+          updatedCount,
+          totalStored,
+        };
+      } finally {
+        historyFetchLocks.delete(sourceId);
+      }
+    }
+  );
+
+  // R4：基于真实评论区提炼讨论热门话题与对应创作选题（绝不编造虚假评论）
+  app.post<{ Params: { id: string }; Body: { autoCrawl?: boolean; force?: boolean } }>(
+    '/api/radar/intel/:id/comments/topics',
+    async (req, reply) => {
+      const id = Number(req.params.id);
+      if (!Number.isInteger(id) || id <= 0) {
+        return reply.code(400).send({ error: '无效的内容 ID' });
+      }
+      const result = await extractCommentTopicsAndIdeas(id, {
+        autoCrawl: Boolean(req.body?.autoCrawl),
+        force: Boolean(req.body?.force),
+      });
+      if (!result) {
+        return reply.code(404).send({ error: '内容不存在' });
+      }
+      return result;
+    }
+  );
+
+  // R4：将评论话题一键存入个人选题库（幂等防重复）
+  app.post<{ Params: { topicId: string } }>(
+    '/api/radar/comments/topics/:topicId/save-board',
+    async (req, reply) => {
+      const topicId = Number(req.params.topicId);
+      if (!Number.isInteger(topicId) || topicId <= 0) {
+        return reply.code(400).send({ error: '无效的话题 ID' });
+      }
+      const saved = saveCommentTopicToBoard(topicId);
+      if (!saved) {
+        return reply.code(404).send({ error: '评论话题不存在' });
+      }
+      return saved;
+    }
+  );
+
+  // 单条视频深度 1234 文案归纳：视频必须基于完整转写口播（绝不拿标题硬猜）；未转写则一键入队「提音→显卡转写→自动归纳」
   app.post<{ Params: { id: string }; Body: { forceRefresh?: boolean } }>(
     '/api/radar/intel/:id/copy-digest',
     async (req, reply) => {
+      const id = Number(req.params.id);
+      if (!Number.isInteger(id) || id <= 0) {
+        return reply.code(400).send({ error: '无效的内容 ID' });
+      }
+      const check = hasValidVideoTranscript(id);
+      if (!check.exists) {
+        return reply.code(404).send({ error: '视频记录不存在' });
+      }
+      // 视频尚无完整口播逐字稿：严禁拿标题/简介硬猜，直接自动串起本机 RTX 显卡转写 + 深度归纳流水线
+      if (check.isVideo && !check.hasTranscript) {
+        const queued = enqueueTranscriptAndDigest(id, true);
+        if (!queued.started) {
+          return reply.code(400).send({ ok: false, error: queued.message });
+        }
+        return {
+          ok: true,
+          status: 'transcribing',
+          queued: true,
+          alreadyQueued: Boolean(queued.alreadyQueued),
+          jobId: queued.jobId,
+          position: queued.position ?? 0,
+          message: queued.message,
+        };
+      }
       try {
-        const res = await generateCreatorCopyDigest(Number(req.params.id), Boolean(req.body?.forceRefresh));
-        return { ok: true, ...res };
+        const res = await generateCreatorCopyDigest(id, Boolean(req.body?.forceRefresh));
+        return { ok: true, status: 'done', ...res };
       } catch (err) {
         return reply.code(500).send({ error: (err as Error).message });
       }
